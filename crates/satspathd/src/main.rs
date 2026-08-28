@@ -1438,13 +1438,11 @@ fn namespace_descriptor(
         .as_ref()
         .map(|l| l.log_id().to_string())
         .unwrap_or_else(|| format!("satspath:{domain}"));
-    let endpoint_urls = if let Ok(custom_url) = std::env::var("SATSPATH_AUTHORITY_URL") {
-        vec![custom_url]
-    } else if domain != "localhost" {
-        vec![format!("https://{domain}/v2")]
-    } else {
-        vec![format!("http://{}/v2", state.bind)]
-    };
+    let endpoint_urls = authority_endpoint_urls(
+        std::env::var("SATSPATH_AUTHORITY_URL").ok(),
+        &domain,
+        state.bind,
+    );
     let quorum = std::env::var("SATSPATH_WITNESS_QUORUM")
         .ok()
         .and_then(|q| q.parse::<u8>().ok())
@@ -1463,6 +1461,26 @@ fn namespace_descriptor(
         expires_at: now + 30 * 86400,
         signature: String::new(),
     })
+}
+
+fn authority_endpoint_urls(
+    custom_url: Option<String>,
+    domain: &str,
+    bind: SocketAddr,
+) -> Vec<String> {
+    if let Some(custom_url) = custom_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        return vec![custom_url.to_owned()];
+    }
+
+    if domain != "localhost" {
+        vec![format!("https://{domain}/v2")]
+    } else {
+        vec![format!("http://{bind}/v2")]
+    }
 }
 
 fn print_startup_status(state: &AppState) -> Result<()> {
@@ -1824,6 +1842,28 @@ mod tests {
             auth_token: "test_auth_token".into(),
             mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    #[test]
+    fn authority_endpoint_urls_trim_custom_url_and_fall_back_when_blank() {
+        let bind = "127.0.0.1:9737".parse().unwrap();
+
+        assert_eq!(
+            authority_endpoint_urls(
+                Some("  https://authority.example/v2  ".to_string()),
+                "authority.example",
+                bind,
+            ),
+            vec!["https://authority.example/v2"]
+        );
+        assert_eq!(
+            authority_endpoint_urls(Some(" \t\n ".to_string()), "authority.example", bind),
+            vec!["https://authority.example/v2"]
+        );
+        assert_eq!(
+            authority_endpoint_urls(Some(String::new()), "localhost", bind),
+            vec!["http://127.0.0.1:9737/v2"]
+        );
     }
 
     #[tokio::test]
