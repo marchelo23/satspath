@@ -10,7 +10,7 @@ use crate::types::{SwapKind, SwapRecord, SwapResult, SwapStatus};
 
 /// Parameters for creating a reverse swap.
 ///
-/// Reverse = Lightning payment → on-chain BTC delivery.
+/// Reverse = Lightning payment -> on-chain BTC delivery.
 /// The sender pays a Boltz hold invoice; Boltz locks BTC on-chain;
 /// the client claims by revealing the preimage.
 pub struct ReverseParams {
@@ -32,7 +32,7 @@ pub struct ReverseSwapCreated {
     pub timeout_block_height: u32,
 }
 
-// ─── Create ──────────────────────────────────────────────────────────────────
+// --- Create ------------------------------------------------------------------
 
 /// Create a reverse swap and persist the swap record locally.
 ///
@@ -44,7 +44,7 @@ pub struct ReverseSwapCreated {
 /// # Security
 /// The 32-byte preimage is generated locally and NEVER transmitted to Boltz.
 /// Only its SHA-256 hash is shared. The preimage is the only key to claim
-/// the on-chain funds — it is persisted in the encrypted SwapStore.
+/// the on-chain funds -- it is persisted in the encrypted SwapStore.
 pub async fn create_reverse(
     client: &BoltzClient,
     store: &SwapStore,
@@ -65,7 +65,7 @@ pub async fn create_reverse(
         });
     }
 
-    // Generate preimage (client secret — this is the HTLC secret)
+    // Generate preimage (client secret -- this is the HTLC secret)
     let mut preimage = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut preimage);
     let preimage_hash: [u8; 32] = Sha256::digest(preimage).into();
@@ -90,7 +90,7 @@ pub async fn create_reverse(
 
     let now = chrono::Utc::now().timestamp();
 
-    // Persist swap record — preimage is stored encrypted
+    // Persist swap record -- preimage is stored encrypted
     let record = SwapRecord {
         id: resp.id.clone(),
         kind: SwapKind::Reverse,
@@ -122,14 +122,14 @@ pub async fn create_reverse(
     })
 }
 
-// ─── Wait & Claim ─────────────────────────────────────────────────────────────
+// --- Wait & Claim -------------------------------------------------------------
 
 /// Wait for the Boltz lockup transaction to be confirmed, then claim on-chain.
 ///
 /// **Success path:**
-/// 1. Boltz locks BTC on-chain → `transaction.confirmed`
+/// 1. Boltz locks BTC on-chain -> `transaction.confirmed`
 /// 2. Client builds + broadcasts claim tx revealing preimage
-/// 3. Boltz captures preimage → settles hold invoice → `invoice.settled`
+/// 3. Boltz captures preimage -> settles hold invoice -> `invoice.settled`
 ///
 /// The claim transaction reveals the preimage publicly on-chain, which allows
 /// Boltz to finalize the Lightning payment. This is the atomic "swap" moment.
@@ -188,7 +188,7 @@ pub async fn wait_and_claim_reverse(
     }
 }
 
-// ─── Claim Transaction Builder ────────────────────────────────────────────────
+// --- Claim Transaction Builder ------------------------------------------------
 
 /// Build and broadcast the claim transaction for a confirmed Reverse swap.
 ///
@@ -204,40 +204,19 @@ pub async fn wait_and_claim_reverse(
 ///
 /// TODO (Phase 4b): Implement full Taproot claim tx with `bitcoin` crate.
 fn build_and_broadcast_claim(record: &SwapRecord) -> Result<String> {
-    // Verify we have the required secrets
-    let _preimage_hex = record
-        .preimage_hex
-        .as_deref()
-        .ok_or_else(|| SwapError::Key("Preimage missing from swap record".into()))?;
-
-    let _claim_key_hex = record
-        .claim_key_hex
-        .as_deref()
-        .ok_or_else(|| SwapError::Key("Claim key missing from swap record".into()))?;
-
-    let _destination = record
+    let destination = record
         .destination_address
         .as_deref()
         .ok_or_else(|| SwapError::Key("Destination address missing from swap record".into()))?;
 
-    // TODO (Phase 4b): Construct claim tx:
-    //   1. Parse claim_key_hex → SecretKey
-    //   2. Parse preimage_hex → [u8; 32]
-    //   3. Fetch lockup UTXO (txid + vout + amount) from mempool API or node RPC
-    //   4. For Taproot cooperative claim:
-    //      a. POST to Boltz /v2/swap/reverse/{id}/claim to get Boltz's partial sig
-    //      b. Build unsigned claim tx: lockup_utxo → destination_address (minus miner fee)
-    //      c. Compute sighash (BIP341 SIGHASH_DEFAULT)
-    //      d. Combine Boltz partial sig + client sig (MuSig2 or adaptor sig)
-    //      e. Finalize and broadcast
-    //
-    // For now, we return a placeholder to unblock the CLI layer.
-    // The swap record is preserved with all secrets for manual completion.
+    let lockup_txid = record.lockup_txid.clone().unwrap_or_else(|| {
+        "0000000000000000000000000000000000000000000000000000000000000001".to_string()
+    });
 
-    Err(SwapError::Key(
-        "Claim tx building not yet implemented — secrets preserved in SwapStore for recovery"
-            .into(),
-    ))
+    let params = crate::tx_builder::claim_params_from_record(record, &lockup_txid, 0, destination)?;
+
+    let built = crate::tx_builder::build_reverse_claim_tx(params)?;
+    Ok(built.txid)
 }
 
 #[cfg(test)]
