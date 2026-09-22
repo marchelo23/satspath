@@ -5,12 +5,12 @@ use sha2::{Digest, Sha256};
 use crate::errors::{Result, SatsPathError};
 use crate::profile::{PaymentProfile, SignedPaymentProfile};
 
-/// Domain separator for profile signing, per Protocol v0.1 §12.
+/// Domain separator for profile signing, per Protocol v0.1 Section 12.
 /// Pre-pended to canonical JSON before hashing to prevent cross-context
 /// signature replay (e.g. a message signature cannot be mistaken for a profile sig).
 const PROFILE_DOMAIN_SEPARATOR: &[u8] = b"SatsPathProfileV1";
 
-/// An identity keypair for a SatsPath user.
+#[derive(Clone, Debug)]
 pub struct IdentityKeypair {
     pub secret_key: SecretKey,
     pub public_key: PublicKey,
@@ -65,7 +65,7 @@ pub fn canonical_profile_bytes(profile: &PaymentProfile) -> Result<Vec<u8>> {
 
 /// Sign a PaymentProfile with the given secret key and return a SignedPaymentProfile.
 ///
-/// Uses domain-separated hashing per Protocol v0.1 §12:
+/// Uses domain-separated hashing per Protocol v0.1 Section 12:
 /// `sig = Schnorr_secp256k1(SHA256("SatsPathProfileV1" || canonical_json(profile)))`
 pub fn sign_profile(
     profile: PaymentProfile,
@@ -147,7 +147,7 @@ pub fn verify_signed_profile(signed: &SignedPaymentProfile) -> Result<bool> {
 /// Check whether a `PaymentProfile` is expired.
 ///
 /// Returns `Ok(())` if:
-/// - `expires_at` is `None` (profile is non-expiring — backward-compatible).
+/// - `expires_at` is `None` (profile is non-expiring - backward-compatible).
 /// - `expires_at` is in the future relative to the current UTC wall clock.
 ///
 /// Returns `Err(SatsPathError::RegistryError(...))` if the profile has
@@ -308,7 +308,7 @@ mod tests {
         assert_eq!(fp1.len(), 8); // 4 bytes = 8 hex chars
     }
 
-    // ── SEC-01: expiry tests ──────────────────────────────────────────────────
+    // -- SEC-01: expiry tests --------------------------------------------------
 
     #[test]
     fn non_expiring_profile_passes() {
@@ -348,7 +348,7 @@ mod tests {
         // Allow a tiny race: the check is >= so this should fail closed
         let result = check_profile_expiry(&profile);
         // In rare cases the timestamp might tick forward; either way we accept both
-        // outcomes as long as the code is correct — but if it does fail, it must
+        // outcomes as long as the code is correct - but if it does fail, it must
         // be due to expiry.
         if let Err(e) = result {
             assert!(e.to_string().contains("expired"));
