@@ -48,7 +48,10 @@ pub use crypto::{
 };
 pub use dns::{DnsDescriptor, DnsError};
 pub use errors::{Result, SatsPathError};
-pub use execution::ExecutionMode;
+pub use execution::{
+    ExecutionGatePolicy, ExecutionMode, MockWalletExecutor, OnchainReceipt, PaymentReceipt,
+    WalletExecutor,
+};
 pub use ownership::{
     attach_signature_proof, attach_well_known_proof, build_manual_attestation,
     build_signature_attestation, evaluate_method_trust, evaluate_method_trust_for_profile,

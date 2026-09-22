@@ -8,6 +8,7 @@ pub mod reverse;
 pub mod submarine;
 pub mod swap_manager;
 pub mod swap_store;
+pub mod tx_builder;
 pub mod types;
 
 // Re-export common types
@@ -16,4 +17,8 @@ pub use errors::{Result, SwapError};
 pub use execution_gate::{claim_refund_builders_available, ensure_claim_refund_builders_available};
 pub use swap_manager::SwapManager;
 pub use swap_store::SwapStore;
+pub use tx_builder::{
+    build_reverse_claim_tx, build_submarine_refund_tx, claim_params_from_record,
+    refund_params_from_record, BuiltSwapTx, ReverseClaimTxParams, SubmarineRefundTxParams,
+};
 pub use types::{PairFees, PairLimits, SwapKind, SwapResult, SwapStatus};

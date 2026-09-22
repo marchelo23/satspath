@@ -29,7 +29,8 @@ pub async fn cmd_claim(
     cmd_register(&alias, lightning_address, onchain_address, None, None).await?;
 
     println!();
-    println!("✅ Claim successful! You can now receive the pending payment.");
+    println!("[OK] Claim successful! You can now receive the pending payment.");
+    println!("Destination profile is registered and ready for payment routing.");
 
     Ok(())
 }

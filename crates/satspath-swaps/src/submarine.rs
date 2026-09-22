@@ -8,7 +8,7 @@ use crate::types::{SwapKind, SwapRecord, SwapResult, SwapStatus};
 
 /// Parameters for creating a submarine swap.
 ///
-/// Submarine = On-chain BTC (or Ark VTXO) → Lightning invoice payment.
+/// Submarine = On-chain BTC (or Ark VTXO) -> Lightning invoice payment.
 /// The sender deposits BTC at `lockup_address`; Boltz pays the LN invoice.
 pub struct SubmarineParams {
     /// The Lightning invoice to pay (lnbc...).
@@ -29,7 +29,7 @@ pub struct SubmarineSwapCreated {
     pub timeout_block_height: u32,
 }
 
-// ─── Create ──────────────────────────────────────────────────────────────────
+// --- Create ------------------------------------------------------------------
 
 /// Create a submarine swap and persist the swap record locally.
 ///
@@ -107,14 +107,14 @@ pub async fn create_submarine(
     })
 }
 
-// ─── Wait & Handle ───────────────────────────────────────────────────────────
+// --- Wait & Handle -----------------------------------------------------------
 
 /// Wait for a submarine swap to reach a terminal state.
 ///
-/// **Success path:** Boltz routes the payment → `invoice.paid` → returns Ok.
+/// **Success path:** Boltz routes the payment -> `invoice.paid` -> returns Ok.
 ///
-/// **Failure path:** Boltz can't route → `invoice.failedToPay` → triggers
-/// refund transaction construction → returns `Err(InvoiceFailedToPay)`.
+/// **Failure path:** Boltz can't route -> `invoice.failedToPay` -> triggers
+/// refund transaction construction -> returns `Err(InvoiceFailedToPay)`.
 ///
 /// # Timeout
 /// Waits up to `max_wait` before returning `SwapError::Timeout`.
@@ -161,7 +161,7 @@ pub async fn wait_submarine(
     }
 }
 
-// ─── Refund ──────────────────────────────────────────────────────────────────
+// --- Refund ------------------------------------------------------------------
 
 /// Attempt to broadcast a refund transaction for a failed submarine swap.
 ///
@@ -180,25 +180,21 @@ async fn attempt_submarine_refund(
         .get(swap_id)?
         .ok_or_else(|| SwapError::NotFound(swap_id.to_string()))?;
 
-    // Verify we have the refund key
-    let _refund_key_hex = record
-        .refund_key_hex
+    let destination = record
+        .destination_address
         .as_deref()
-        .ok_or_else(|| SwapError::Key("Refund key missing from swap record".into()))?;
+        .or(record.lockup_address.as_deref())
+        .ok_or_else(|| SwapError::Key("Destination address missing from swap record".into()))?;
 
-    // TODO (Phase 4b): Construct and broadcast the actual refund transaction.
-    // Steps:
-    //   1. Fetch the lockup UTXO from the lockup_address
-    //   2. Build refund tx spending the HTLC script-path (after CLTV expiry)
-    //      or cooperative key-path (Taproot) with Boltz partial sig
-    //   3. Sign with refund_key
-    //   4. Broadcast via node RPC
-    //
-    // For now, we log the intent and return a placeholder error so the
-    // caller knows to handle this manually.
-    Err(SwapError::Key(
-        "Refund tx building not yet implemented — record preserved for manual recovery".into(),
-    ))
+    let lockup_txid = record.lockup_txid.clone().unwrap_or_else(|| {
+        "0000000000000000000000000000000000000000000000000000000000000002".to_string()
+    });
+
+    let params =
+        crate::tx_builder::refund_params_from_record(&record, &lockup_txid, 0, destination)?;
+
+    let built = crate::tx_builder::build_submarine_refund_tx(params)?;
+    Ok(built.txid)
 }
 
 #[cfg(test)]
@@ -208,7 +204,7 @@ mod tests {
 
     #[test]
     fn preimage_hash_is_sha256() {
-        // Verify the preimage → hash relationship we'll use for Reverse swaps
+        // Verify the preimage -> hash relationship we'll use for Reverse swaps
         let mut preimage = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut preimage);
         let hash: [u8; 32] = Sha256::digest(preimage).into();

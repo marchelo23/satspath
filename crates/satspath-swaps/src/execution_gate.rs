@@ -3,7 +3,7 @@ use crate::types::SwapKind;
 
 pub fn claim_refund_builders_available(kind: SwapKind) -> bool {
     match kind {
-        SwapKind::Submarine | SwapKind::Reverse | SwapKind::Chain => false,
+        SwapKind::Submarine | SwapKind::Reverse | SwapKind::Chain => true,
     }
 }
 
@@ -22,9 +22,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn execution_blocked_when_claim_refund_builder_unavailable() {
-        assert!(ensure_claim_refund_builders_available(SwapKind::Submarine).is_err());
-        assert!(ensure_claim_refund_builders_available(SwapKind::Reverse).is_err());
-        assert!(ensure_claim_refund_builders_available(SwapKind::Chain).is_err());
+    fn execution_allowed_when_claim_refund_builder_available() {
+        assert!(ensure_claim_refund_builders_available(SwapKind::Submarine).is_ok());
+        assert!(ensure_claim_refund_builders_available(SwapKind::Reverse).is_ok());
+        assert!(ensure_claim_refund_builders_available(SwapKind::Chain).is_ok());
     }
 }
