@@ -342,7 +342,7 @@ async fn serve(state: AppState) -> Result<()> {
         )
     })?);
     let url = format!("http://{}/", state.bind);
-    println!("Wallet UI → {url}");
+    println!("Wallet UI -> {url}");
     if state.open_ui {
         open_browser(&url);
     }
@@ -897,7 +897,7 @@ fn sign_and_store(home: &Path, wallet: &mut WalletState, network: &str) -> Resul
         identity_pubkey,
         methods,
         updated_at: t,
-        expires_at: Some(t + 30 * 24 * 3600), // default 30-day expiry per spec §28
+        expires_at: Some(t + 30 * 24 * 3600), // default 30-day expiry per spec section 28
         preferences: vec!["lightning".into(), "ark".into(), "onchain".into()],
         nonce: Some(satspath_core::crypto::generate_nonce()),
         rotation: None,
@@ -1172,6 +1172,13 @@ fn resolve_v2_envelope(
         &checkpoint,
     )?;
 
+    let current_state_proof = log.prove_state(&identifier_hash).ok();
+    if let Some(state_proof) = &current_state_proof {
+        if checkpoint.map_root.is_some() {
+            satspath_core::transparency::verify_checkpoint_state_binding(state_proof, &checkpoint)?;
+        }
+    }
+
     let descriptor = namespace_descriptor(state)?;
     let served_at = chrono::Utc::now().timestamp();
 
@@ -1184,7 +1191,7 @@ fn resolve_v2_envelope(
         inclusion_proof,
         checkpoint,
         consistency_proof: None,
-        current_state_proof: None,
+        current_state_proof,
         witness_cosignatures: vec![],
         served_at,
     })
@@ -1623,13 +1630,13 @@ fn json_result<T: Serialize>(
     }
 }
 
-// ─── Receive wallet UI ─────────────────────────────────────────────────────────
+// --- Receive wallet UI ---------------------------------------------------------
 
 const INDEX_HTML: &str = include_str!("index.html");
 
 #[derive(Debug, Serialize)]
 struct ReceiveView {
-    /// Masked alias, e.g. `r***@gmail.com` — the raw identifier is never exposed.
+    /// Masked alias, e.g. `r***@gmail.com` -- the raw identifier is never exposed.
     alias: String,
     rail: String,
     payload: String,
@@ -1642,13 +1649,13 @@ struct ReceiveRequest {
     amount_sats: Option<u64>,
 }
 /// Compute the wallet owner's preferred receive QR, entirely locally. Prefers
-/// Lightning → on-chain → Ark. Returns a reusable (amount-less) receive pointer.
+/// Lightning -> on-chain -> Ark. Returns a reusable (amount-less) receive pointer.
 fn receive_view(state: &AppState, req: ReceiveRequest) -> Result<ReceiveView> {
     let wallet = load_wallet(&state.home)?;
     let alias = wallet
         .alias
         .clone()
-        .ok_or_else(|| anyhow::anyhow!("no profile yet — set one via POST /v1/profile"))?;
+        .ok_or_else(|| anyhow::anyhow!("no profile yet -- set one via POST /v1/profile"))?;
     let methods = build_methods(&wallet, &state.network);
 
     let method = if let Some(req_rail) = req.rail {
@@ -1677,7 +1684,7 @@ fn receive_view(state: &AppState, req: ReceiveRequest) -> Result<ReceiveView> {
                     .find(|m| matches!(m, PaymentMethod::Ark { .. }))
             })
             .ok_or_else(|| {
-                anyhow::anyhow!("no receive methods — add one via POST /v1/profile/methods")
+                anyhow::anyhow!("no receive methods -- add one via POST /v1/profile/methods")
             })?
             .clone()
     };
@@ -2094,7 +2101,7 @@ mod tests {
     }
 }
 
-// ─── Send flow (priority routing + experimental email invite) ──────────────────
+// --- Send flow (priority routing + experimental email invite) ------------------
 
 #[derive(Debug, Deserialize)]
 struct SendRequest {

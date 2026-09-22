@@ -102,7 +102,7 @@ impl TransparencyLog {
             log_id: self.log_id.clone(),
             log_size: self.events.len() as u64,
             log_root: hex::encode(merkle_root(&self.leaf_hashes(self.events.len())?)),
-            map_root: None,
+            map_root: Some(self.state_map_root()?),
             previous_checkpoint_hash: self
                 .checkpoints
                 .last()
@@ -156,7 +156,7 @@ impl TransparencyLog {
             log_id: self.log_id.clone(),
             log_size: self.events.len() as u64,
             log_root: self.prepare_checkpoint_pub_root()?,
-            map_root: None,
+            map_root: Some(self.state_map_root()?),
             previous_checkpoint_hash: Some(previous_hash),
             created_at,
             operator_pubkey: rotation.new_operator_pubkey.clone(),
@@ -307,6 +307,35 @@ impl TransparencyLog {
         })
     }
 
+    pub fn state_map(&self) -> Result<super::SparseMerkleTree> {
+        let mut tree = super::SparseMerkleTree::new();
+        for event in &self.events {
+            let event_hash = event.event_hash()?;
+            let status = match event.action {
+                NameAction::Register
+                | NameAction::UpdateProfile
+                | NameAction::RotateKey
+                | NameAction::RecoverKey => super::IdentifierStatus::Registered,
+                NameAction::Revoke => super::IdentifierStatus::Revoked,
+            };
+            let value = super::StateMapValue {
+                latest_event_hash: event_hash,
+                sequence: event.sequence,
+                status,
+            };
+            tree.insert_hex(&event.identifier_hash, value)?;
+        }
+        Ok(tree)
+    }
+
+    pub fn state_map_root(&self) -> Result<String> {
+        Ok(self.state_map()?.root_hex())
+    }
+
+    pub fn prove_state(&self, identifier_hash: &str) -> Result<super::StateMapProof> {
+        self.state_map()?.prove_hex(identifier_hash)
+    }
+
     pub fn create_checkpoint(
         &mut self,
         operator_key: &SecretKey,
@@ -370,7 +399,7 @@ impl TransparencyLog {
                 .iter()
                 .filter(|e| e.action == NameAction::Revoke)
                 .count() as u64,
-            map_root: None,
+            map_root: Some(self.state_map_root()?),
             consistency_status: if self.checkpoints.is_empty() {
                 ConsistencyStatus::Empty
             } else if self

@@ -87,11 +87,38 @@ pub fn verify_checkpoint(checkpoint: &TransparencyCheckpoint) -> Result<bool> {
     {
         return Ok(false);
     }
+    if let Some(map_root) = &checkpoint.map_root {
+        if decode_hash(map_root).is_err() {
+            return Ok(false);
+        }
+    }
     verify_message_signature(
         &checkpoint.signing_message()?,
         &checkpoint.operator_signature,
         &checkpoint.operator_pubkey,
     )
+}
+
+pub fn verify_state_map_proof(proof: &super::StateMapProof, expected_root: &str) -> Result<bool> {
+    proof.verify(expected_root)
+}
+
+pub fn verify_checkpoint_state_binding(
+    proof: &super::StateMapProof,
+    checkpoint: &TransparencyCheckpoint,
+) -> Result<()> {
+    if !verify_checkpoint(checkpoint)? {
+        return Err(TransparencyError::InvalidCheckpointSignature.into());
+    }
+    let map_root = checkpoint
+        .map_root
+        .as_deref()
+        .ok_or_else(|| TransparencyError::CorruptStore("checkpoint missing map_root".into()))?;
+
+    if !proof.verify(map_root)? {
+        return Err(TransparencyError::CheckpointInclusionMismatch.into());
+    }
+    Ok(())
 }
 
 pub fn verify_checkpoint_inclusion(
