@@ -4,6 +4,7 @@
 //! does not move funds, sign Bitcoin transactions, broadcast transactions, or
 //! store Bitcoin wallet seeds/spending keys.
 
+mod rate_limit;
 mod v2_api;
 
 use std::fs;
@@ -66,6 +67,15 @@ struct Cli {
     /// Do not open the wallet UI in a browser on startup.
     #[arg(long)]
     no_open: bool,
+    /// Trust reverse proxy headers (X-Forwarded-For, X-Real-IP) for rate limiting.
+    #[arg(long)]
+    behind_proxy: bool,
+    /// Rate limiter burst capacity per IP (default: 60).
+    #[arg(long)]
+    rate_limit_burst: Option<u32>,
+    /// Rate limiter refill rate in requests/sec per IP (default: 10.0).
+    #[arg(long)]
+    rate_limit_rate: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -98,6 +108,7 @@ struct AppState {
     open_ui: bool,
     auth_token: String,
     mutation_lock: Arc<tokio::sync::Mutex<()>>,
+    rate_limiter: Arc<rate_limit::RateLimiter>,
 }
 
 #[derive(Debug, Serialize)]
@@ -112,6 +123,7 @@ struct StatusResponse {
     identity_fingerprint: Option<String>,
     methods: Vec<String>,
     safety: SafetyStatus,
+    rate_limit: rate_limit::RateLimiterStats,
 }
 
 #[derive(Debug, Serialize)]
@@ -319,6 +331,38 @@ async fn main() -> Result<()> {
 
     load_or_create_identity(&home)?;
 
+    let behind_proxy = cli.behind_proxy
+        || std::env::var("SATSPATHD_BEHIND_PROXY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+    let burst_capacity = cli
+        .rate_limit_burst
+        .or_else(|| {
+            std::env::var("SATSPATHD_RATE_LIMIT_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(rate_limit::DEFAULT_BURST_CAPACITY);
+
+    let refill_rate = cli
+        .rate_limit_rate
+        .or_else(|| {
+            std::env::var("SATSPATHD_RATE_LIMIT_RATE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(rate_limit::DEFAULT_REFILL_RATE);
+
+    let rate_limiter_config = rate_limit::RateLimiterConfig {
+        burst_capacity,
+        refill_rate_per_sec: refill_rate,
+        max_body_bytes: rate_limit::DEFAULT_MAX_BODY_BYTES,
+        trust_proxy_headers: behind_proxy,
+        cleanup_interval_secs: rate_limit::DEFAULT_CLEANUP_INTERVAL_SECS,
+    };
+    let rate_limiter = Arc::new(rate_limit::RateLimiter::new(rate_limiter_config));
+
     let state = AppState {
         home,
         bind,
@@ -326,6 +370,7 @@ async fn main() -> Result<()> {
         open_ui: !cli.no_open,
         auth_token,
         mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+        rate_limiter,
     };
 
     print_startup_status(&state)?;
@@ -347,7 +392,10 @@ async fn serve(state: AppState) -> Result<()> {
         open_browser(&url);
     }
     let state = Arc::new(state);
+    serve_server(state, server).await
+}
 
+async fn serve_server(state: Arc<AppState>, server: Arc<Server>) -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Request>(64);
     let srv = Arc::clone(&server);
     tokio::task::spawn_blocking(move || {
@@ -403,10 +451,51 @@ fn check_auth(request: &Request, expected_token: &str) -> anyhow::Result<()> {
     anyhow::bail!("Unauthorized: Invalid or missing Bearer token");
 }
 
+fn handle_read_error(e: anyhow::Error) -> Response<std::io::Cursor<Vec<u8>>> {
+    if e.to_string().contains("payload too large") {
+        json_error(StatusCode(413), e)
+    } else {
+        json_error(StatusCode(400), e)
+    }
+}
+
 async fn handle_request(mut request: Request, state: &AppState) -> Result<()> {
     let method = request.method().clone();
     let raw_url = request.url().to_string();
     let path = raw_url.split('?').next().unwrap_or("/").to_string();
+
+    // 1. Guard against oversized request bodies (HTTP 413 Payload Too Large)
+    let max_body = state.rate_limiter.max_body_bytes();
+    if let Some(body_len) = request.body_length() {
+        if body_len > max_body {
+            state.rate_limiter.record_payload_too_large();
+            eprintln!(
+                "[rate_limit] payload too large: {} bytes (limit: {}) on {} {}",
+                body_len, max_body, method, path
+            );
+            let _ = request.respond(rate_limit::payload_too_large_response(max_body));
+            return Ok(());
+        }
+    }
+
+    // 2. Client IP extraction and rate limiting (HTTP 429 Too Many Requests)
+    let client_ip = rate_limit::extract_client_ip(
+        request.remote_addr(),
+        request.headers(),
+        state.rate_limiter.trust_proxy_headers(),
+    );
+
+    match state.rate_limiter.check(&client_ip) {
+        rate_limit::RateLimitResult::Allowed { remaining: _ } => {}
+        rate_limit::RateLimitResult::RateLimited { retry_after_secs } => {
+            eprintln!(
+                "[rate_limit] client IP {} exceeded rate limit on {} {}, retry after {}s",
+                client_ip, method, path, retry_after_secs
+            );
+            let _ = request.respond(rate_limit::rate_limit_response(retry_after_secs));
+            return Ok(());
+        }
+    }
 
     let is_mutation = !matches!(method, Method::Get | Method::Head | Method::Options);
     let is_public_mutation = path == "/v1/receive"
@@ -425,13 +514,16 @@ async fn handle_request(mut request: Request, state: &AppState) -> Result<()> {
     let response = match (method.clone(), path.as_str()) {
         (Method::Options, _) => empty_response(StatusCode(204)),
         (Method::Get, "/") => html_response(INDEX_HTML),
+        (Method::Get, "/v1/diagnostics/rate_limit") => {
+            json_response(StatusCode(200), &state.rate_limiter.stats())
+        }
         (Method::Post, "/v1/receive") => match read_json::<ReceiveRequest>(&mut request) {
             Ok(body) => json_result(StatusCode(200), receive_view(state, body)),
-            Err(e) => json_error(StatusCode(400), e),
+            Err(e) => handle_read_error(e),
         },
         (Method::Post, "/v1/send") => match read_json::<SendRequest>(&mut request) {
             Ok(body) => json_response(StatusCode(200), &send_response(state, body).await),
-            Err(e) => json_error(StatusCode(400), e),
+            Err(e) => handle_read_error(e),
         },
         (Method::Post, "/v1/broadcast") => json_result(StatusCode(200), broadcast(state)),
         (Method::Get, "/health") => {
@@ -494,7 +586,7 @@ async fn handle_request(mut request: Request, state: &AppState) -> Result<()> {
                         json_error(status, e)
                     }
                 },
-                Err(e) => json_error(StatusCode(400), e),
+                Err(e) => handle_read_error(e),
             }
         }
         (Method::Get, "/v1/node") => json_result(StatusCode(200), node_response(state)),
@@ -1391,6 +1483,7 @@ fn status_response(state: &AppState) -> Result<StatusResponse> {
         identity_fingerprint,
         methods,
         safety: safety_status(),
+        rate_limit: state.rate_limiter.stats(),
     })
 }
 
@@ -1603,17 +1696,27 @@ fn print_startup_status(state: &AppState) -> Result<()> {
             status.methods.join(", ")
         }
     );
+    println!(
+        "  rate limit: burst={}, rate={:.1}/s, max_body={}B, behind_proxy={}",
+        status.rate_limit.burst_capacity,
+        status.rate_limit.refill_rate_per_sec,
+        status.rate_limit.max_body_bytes,
+        status.rate_limit.trust_proxy_headers
+    );
     println!("  safety: profile node only; no funds moved, no Bitcoin tx signing, no broadcast");
     Ok(())
 }
 
-const MAX_JSON_BODY_BYTES: u64 = 1024 * 1024; // 1 MB limit to prevent DoS
+const MAX_JSON_BODY_BYTES: u64 = 65_536; // 64 KB limit to prevent DoS
 
 fn read_json<T: for<'de> Deserialize<'de>>(request: &mut Request) -> Result<T> {
     use std::io::Read;
     let mut body = String::new();
-    let mut reader = request.as_reader().take(MAX_JSON_BODY_BYTES);
+    let mut reader = request.as_reader().take(MAX_JSON_BODY_BYTES + 1);
     reader.read_to_string(&mut body)?;
+    if body.len() as u64 > MAX_JSON_BODY_BYTES {
+        anyhow::bail!("payload too large: maximum allowed request body is 65536 bytes");
+    }
     if body.trim().is_empty() {
         anyhow::bail!("request body must be JSON");
     }
@@ -1835,7 +1938,7 @@ fn json_header() -> Header {
     Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).expect("valid static header")
 }
 
-fn cors_origin_header() -> Header {
+pub(crate) fn cors_origin_header() -> Header {
     // SEC-CORS: Restrict to local daemon UI and Arkade wallet origins.
     // Override via SATSPATHD_CORS_ORIGIN env var for custom deployments.
     let origin = std::env::var("SATSPATHD_CORS_ORIGIN").unwrap_or_else(|_| {
@@ -1855,7 +1958,7 @@ fn cors_origin_header() -> Header {
         .expect("valid static header")
 }
 
-fn cors_methods_header() -> Header {
+pub(crate) fn cors_methods_header() -> Header {
     Header::from_bytes(
         &b"Access-Control-Allow-Methods"[..],
         &b"GET, POST, OPTIONS"[..],
@@ -1863,7 +1966,7 @@ fn cors_methods_header() -> Header {
     .expect("valid static header")
 }
 
-fn cors_headers_header() -> Header {
+pub(crate) fn cors_headers_header() -> Header {
     Header::from_bytes(
         &b"Access-Control-Allow-Headers"[..],
         &b"Content-Type, Authorization, X-Request-Id"[..],
@@ -1936,6 +2039,9 @@ mod tests {
             open_ui: false,
             auth_token: "test_auth_token".into(),
             mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            rate_limiter: Arc::new(rate_limit::RateLimiter::new(
+                rate_limit::RateLimiterConfig::default(),
+            )),
         }
     }
 
@@ -2098,6 +2204,213 @@ mod tests {
 
         let not_found = resolve_v2_envelope(&state, "bob@example.com");
         assert!(not_found.is_err());
+    }
+
+    async fn start_test_daemon(
+        config: rate_limit::RateLimiterConfig,
+    ) -> (String, Arc<Server>, tokio::task::JoinHandle<()>) {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Box::leak(Box::new(dir)).path().to_path_buf();
+        let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let addr = server.server_addr().to_ip().unwrap();
+        let state = Arc::new(AppState {
+            home,
+            bind: addr,
+            network: "devnet".into(),
+            open_ui: false,
+            auth_token: "test_token".into(),
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            rate_limiter: Arc::new(rate_limit::RateLimiter::new(config)),
+        });
+        let srv_clone = Arc::clone(&server);
+        let handle = tokio::spawn(async move {
+            let _ = serve_server(state, srv_clone).await;
+        });
+        (format!("http://{addr}"), server, handle)
+    }
+
+    #[tokio::test]
+    async fn test_http_rate_limit_and_burst_protection() {
+        let config = rate_limit::RateLimiterConfig {
+            burst_capacity: 3,
+            refill_rate_per_sec: 0.1,
+            max_body_bytes: 65_536,
+            trust_proxy_headers: false,
+            cleanup_interval_secs: 300,
+        };
+        let (base_url, server, _handle) = start_test_daemon(config).await;
+        let client = reqwest::Client::new();
+
+        // 3 requests should succeed within burst
+        for i in 1..=3 {
+            let res = client
+                .get(format!("{base_url}/health"))
+                .send()
+                .await
+                .expect("send request");
+            assert_eq!(
+                res.status(),
+                reqwest::StatusCode::OK,
+                "request {i} within burst limit should succeed"
+            );
+        }
+
+        // 4th request must be rejected with 429 Too Many Requests
+        let res4 = client
+            .get(format!("{base_url}/health"))
+            .send()
+            .await
+            .expect("send request");
+        assert_eq!(
+            res4.status(),
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            "4th request exceeding burst should return 429"
+        );
+
+        let retry_header = res4.headers().get("Retry-After");
+        assert!(
+            retry_header.is_some(),
+            "429 response must contain Retry-After header"
+        );
+        let retry_secs: u64 = retry_header
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse()
+            .expect("parse retry-after header value");
+        assert!(retry_secs >= 1, "retry_after must be >= 1 second");
+
+        let body: serde_json::Value = res4.json().await.expect("parse 429 json body");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("Too Many Requests"),
+            "body must contain error description"
+        );
+
+        server.unblock();
+    }
+
+    #[tokio::test]
+    async fn test_http_payload_too_large_rejection_413() {
+        let config = rate_limit::RateLimiterConfig {
+            burst_capacity: 10,
+            refill_rate_per_sec: 10.0,
+            max_body_bytes: 1024, // 1 KB max for testing
+            trust_proxy_headers: false,
+            cleanup_interval_secs: 300,
+        };
+        let (base_url, server, _handle) = start_test_daemon(config).await;
+        let client = reqwest::Client::new();
+
+        // Send a request with a body of 2048 bytes (> 1024 bytes)
+        let large_body = vec![b'a'; 2048];
+        let res = client
+            .post(format!("{base_url}/v1/receive"))
+            .header("Content-Type", "application/json")
+            .body(large_body)
+            .send()
+            .await
+            .expect("send request");
+
+        assert_eq!(
+            res.status(),
+            reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+            "oversized body should return HTTP 413"
+        );
+
+        let body: serde_json::Value = res.json().await.expect("parse 413 json body");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("Payload Too Large"),
+            "body must state Payload Too Large"
+        );
+
+        server.unblock();
+    }
+
+    #[tokio::test]
+    async fn test_http_rate_limit_trusted_proxy_headers() {
+        let config = rate_limit::RateLimiterConfig {
+            burst_capacity: 2,
+            refill_rate_per_sec: 0.1,
+            max_body_bytes: 65_536,
+            trust_proxy_headers: true,
+            cleanup_interval_secs: 300,
+        };
+        let (base_url, server, _handle) = start_test_daemon(config).await;
+        let client = reqwest::Client::new();
+
+        // Client 1 (203.0.113.1) uses its 2 burst tokens
+        for _ in 0..2 {
+            let res = client
+                .get(format!("{base_url}/health"))
+                .header("X-Forwarded-For", "203.0.113.1, 10.0.0.1")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(res.status(), reqwest::StatusCode::OK);
+        }
+
+        // Client 1's 3rd request is blocked (429)
+        let res_c1_blocked = client
+            .get(format!("{base_url}/health"))
+            .header("X-Forwarded-For", "203.0.113.1, 10.0.0.1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            res_c1_blocked.status(),
+            reqwest::StatusCode::TOO_MANY_REQUESTS
+        );
+
+        // Client 2 (198.51.100.5) is independent and should be allowed
+        let res_c2 = client
+            .get(format!("{base_url}/health"))
+            .header("X-Forwarded-For", "198.51.100.5")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res_c2.status(), reqwest::StatusCode::OK);
+
+        server.unblock();
+    }
+
+    #[tokio::test]
+    async fn test_http_diagnostics_rate_limit() {
+        let config = rate_limit::RateLimiterConfig {
+            burst_capacity: 5,
+            refill_rate_per_sec: 1.0,
+            max_body_bytes: 65_536,
+            trust_proxy_headers: false,
+            cleanup_interval_secs: 300,
+        };
+        let (base_url, server, _handle) = start_test_daemon(config).await;
+        let client = reqwest::Client::new();
+
+        // 1 successful request
+        let _ = client
+            .get(format!("{base_url}/health"))
+            .send()
+            .await
+            .unwrap();
+
+        let diag_res = client
+            .get(format!("{base_url}/v1/diagnostics/rate_limit"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(diag_res.status(), reqwest::StatusCode::OK);
+
+        let stats: rate_limit::RateLimiterStats = diag_res.json().await.unwrap();
+        assert!(stats.total_allowed >= 1);
+        assert_eq!(stats.burst_capacity, 5);
+        assert_eq!(stats.max_body_bytes, 65_536);
+
+        server.unblock();
     }
 }
 
