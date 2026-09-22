@@ -7,14 +7,33 @@ services:
       target: runtime-daemon
     container_name: satspathd
     restart: unless-stopped
+    # Expose internally to the docker network for the Caddy TLS reverse proxy
+    expose:
+      - "9737"
+    # Localhost-only bind on host to allow local debugging while blocking public cleartext access
     ports:
-      - "9737:9737"
+      - "127.0.0.1:9737:9737"
     volumes:
       - satspath_data:/data
     environment:
       - SATSPATH_NETWORK=${SATSPATH_NETWORK:-mainnet}
+      - SATSPATHD_BEHIND_PROXY=1
       # - SATSPATHD_AUTH_TOKEN=your_secure_token_here (optional, auto-generated if missing)
       # - SATSPATHD_CORS_ORIGIN=https://your-domain.com
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: satspath-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - satspathd
 
   satspath-cli:
     build:
@@ -29,3 +48,7 @@ services:
 volumes:
   satspath_data:
     name: satspath_data
+  caddy_data:
+    name: caddy_data
+  caddy_config:
+    name: caddy_config

@@ -1,0 +1,36 @@
+# Caddy reverse proxy sidecar configuration for satspathd
+# In production, replace :80 and :443 with your domain name (e.g. node.example.com).
+# Caddy will automatically provision and renew TLS certificates from Let's Encrypt.
+
+:80 {
+    redir https://{host}{uri} permanent
+}
+
+:443 {
+    tls internal
+
+    # Enforce request body size limit matching satspathd (64 KB)
+    request_body {
+        max_size 64KB
+    }
+
+    # Security headers
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    }
+
+    reverse_proxy satspathd:9737 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+
+        transport http {
+            dial_timeout 5s
+            response_header_timeout 15s
+        }
+    }
+}

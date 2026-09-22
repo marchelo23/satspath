@@ -76,6 +76,15 @@ struct Cli {
     /// Rate limiter refill rate in requests/sec per IP (default: 10.0).
     #[arg(long)]
     rate_limit_rate: Option<f64>,
+    /// Path to PEM-encoded TLS certificate file for native HTTPS.
+    #[arg(long)]
+    tls_cert: Option<PathBuf>,
+    /// Path to PEM-encoded TLS private key file for native HTTPS.
+    #[arg(long)]
+    tls_key: Option<PathBuf>,
+    /// Refuse to start if binding to non-loopback address without TLS or reverse proxy.
+    #[arg(long)]
+    require_tls_or_proxy: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -109,6 +118,7 @@ struct AppState {
     auth_token: String,
     mutation_lock: Arc<tokio::sync::Mutex<()>>,
     rate_limiter: Arc<rate_limit::RateLimiter>,
+    is_tls: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -124,6 +134,8 @@ struct StatusResponse {
     methods: Vec<String>,
     safety: SafetyStatus,
     rate_limit: rate_limit::RateLimiterStats,
+    is_tls: bool,
+    behind_proxy: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -336,6 +348,29 @@ async fn main() -> Result<()> {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
+    let tls_cert_path = cli
+        .tls_cert
+        .or_else(|| std::env::var("SATSPATHD_TLS_CERT").ok().map(PathBuf::from));
+    let tls_key_path = cli
+        .tls_key
+        .or_else(|| std::env::var("SATSPATHD_TLS_KEY").ok().map(PathBuf::from));
+
+    let require_tls_or_proxy = cli.require_tls_or_proxy
+        || std::env::var("SATSPATHD_REQUIRE_TLS_OR_PROXY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+    let is_tls = tls_cert_path.is_some() && tls_key_path.is_some();
+    if (tls_cert_path.is_some() && tls_key_path.is_none())
+        || (tls_cert_path.is_none() && tls_key_path.is_some())
+    {
+        anyhow::bail!(
+            "Both --tls-cert and --tls-key must be provided together to enable native TLS"
+        );
+    }
+
+    audit_binding_security(bind, is_tls, behind_proxy, require_tls_or_proxy)?;
+
     let burst_capacity = cli
         .rate_limit_burst
         .or_else(|| {
@@ -371,22 +406,84 @@ async fn main() -> Result<()> {
         auth_token,
         mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
         rate_limiter,
+        is_tls,
+    };
+
+    let tls_config = if let (Some(cert), Some(key)) = (tls_cert_path, tls_key_path) {
+        Some((cert, key))
+    } else {
+        None
     };
 
     print_startup_status(&state)?;
-    serve(state).await
+    serve(state, tls_config).await
 }
 
-async fn serve(state: AppState) -> Result<()> {
-    let server = Arc::new(Server::http(state.bind).map_err(|e| {
-        anyhow::anyhow!(
-            "could not bind {}: {e}\n\nThe address may already be in use by another \
-             satspathd instance. Stop it, or choose another port with \
-             `--bind 127.0.0.1:<port>`.",
-            state.bind
-        )
-    })?);
-    let url = format!("http://{}/", state.bind);
+fn audit_binding_security(
+    bind: SocketAddr,
+    is_tls: bool,
+    behind_proxy: bool,
+    require_tls_or_proxy: bool,
+) -> Result<()> {
+    let is_loopback = bind.ip().is_loopback();
+    if !is_loopback && !is_tls && !behind_proxy {
+        if require_tls_or_proxy {
+            anyhow::bail!(
+                "Security violation: satspathd cannot bind to non-loopback address {} without \
+                 native TLS (--tls-cert/--tls-key) or reverse proxy trust (--behind-proxy). \
+                 Failing closed (--require-tls-or-proxy is active).",
+                bind
+            );
+        } else {
+            eprintln!("\n{}", "!".repeat(80));
+            eprintln!("SECURITY WARNING: INSECURE CLEARTEXT BINDING DETECTED!");
+            eprintln!("satspathd is binding to non-loopback address {bind} without TLS or --behind-proxy.");
+            eprintln!("Authentication tokens and sensitive profile mutations will be transmitted in cleartext.");
+            eprintln!(
+                "Adversaries on the local network can intercept admin tokens and alter profiles."
+            );
+            eprintln!("RECOMMENDATIONS:");
+            eprintln!("  1. Production: Run behind a TLS reverse proxy (Nginx/Caddy) and pass --behind-proxy.");
+            eprintln!("  2. Standalone: Provide TLS certificates via --tls-cert and --tls-key.");
+            eprintln!("  3. Local development: Bind to 127.0.0.1:9737.");
+            eprintln!("{}\n", "!".repeat(80));
+        }
+    }
+    Ok(())
+}
+
+async fn serve(state: AppState, tls_config: Option<(PathBuf, PathBuf)>) -> Result<()> {
+    let scheme = if tls_config.is_some() {
+        "https"
+    } else {
+        "http"
+    };
+    let server = if let Some((cert_path, key_path)) = tls_config {
+        let certificate = fs::read(&cert_path)
+            .with_context(|| format!("reading TLS certificate from {}", cert_path.display()))?;
+        let private_key = fs::read(&key_path)
+            .with_context(|| format!("reading TLS private key from {}", key_path.display()))?;
+        let ssl_config = tiny_http::SslConfig {
+            certificate,
+            private_key,
+        };
+        Arc::new(Server::https(state.bind, ssl_config).map_err(|e| {
+            anyhow::anyhow!(
+                "could not start HTTPS server on {}: {e}\n\nVerify certificate and private key formats.",
+                state.bind
+            )
+        })?)
+    } else {
+        Arc::new(Server::http(state.bind).map_err(|e| {
+            anyhow::anyhow!(
+                "could not bind {}: {e}\n\nThe address may already be in use by another \
+                 satspathd instance. Stop it, or choose another port with \
+                 `--bind 127.0.0.1:<port>`.",
+                state.bind
+            )
+        })?)
+    };
+    let url = format!("{scheme}://{}/", state.bind);
     println!("Wallet UI -> {url}");
     if state.open_ui {
         open_browser(&url);
@@ -1484,6 +1581,8 @@ fn status_response(state: &AppState) -> Result<StatusResponse> {
         methods,
         safety: safety_status(),
         rate_limit: state.rate_limiter.stats(),
+        is_tls: state.is_tls,
+        behind_proxy: state.rate_limiter.trust_proxy_headers(),
     })
 }
 
@@ -1702,6 +1801,12 @@ fn print_startup_status(state: &AppState) -> Result<()> {
         status.rate_limit.refill_rate_per_sec,
         status.rate_limit.max_body_bytes,
         status.rate_limit.trust_proxy_headers
+    );
+    println!(
+        "  transport: scheme={}, tls={}, behind_proxy={}",
+        if status.is_tls { "https" } else { "http" },
+        status.is_tls,
+        status.behind_proxy
     );
     println!("  safety: profile node only; no funds moved, no Bitcoin tx signing, no broadcast");
     Ok(())
@@ -2042,6 +2147,7 @@ mod tests {
             rate_limiter: Arc::new(rate_limit::RateLimiter::new(
                 rate_limit::RateLimiterConfig::default(),
             )),
+            is_tls: false,
         }
     }
 
@@ -2209,9 +2315,22 @@ mod tests {
     async fn start_test_daemon(
         config: rate_limit::RateLimiterConfig,
     ) -> (String, Arc<Server>, tokio::task::JoinHandle<()>) {
+        start_test_daemon_full(config, None).await
+    }
+
+    async fn start_test_daemon_full(
+        config: rate_limit::RateLimiterConfig,
+        ssl_config: Option<tiny_http::SslConfig>,
+    ) -> (String, Arc<Server>, tokio::task::JoinHandle<()>) {
         let dir = tempfile::tempdir().unwrap();
         let home = Box::leak(Box::new(dir)).path().to_path_buf();
-        let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let (server, scheme) = if let Some(ssl) = ssl_config {
+            let srv = Server::https("127.0.0.1:0", ssl).unwrap();
+            (Arc::new(srv), "https")
+        } else {
+            let srv = Server::http("127.0.0.1:0").unwrap();
+            (Arc::new(srv), "http")
+        };
         let addr = server.server_addr().to_ip().unwrap();
         let state = Arc::new(AppState {
             home,
@@ -2221,12 +2340,13 @@ mod tests {
             auth_token: "test_token".into(),
             mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             rate_limiter: Arc::new(rate_limit::RateLimiter::new(config)),
+            is_tls: scheme == "https",
         });
         let srv_clone = Arc::clone(&server);
         let handle = tokio::spawn(async move {
             let _ = serve_server(state, srv_clone).await;
         });
-        (format!("http://{addr}"), server, handle)
+        (format!("{scheme}://{addr}"), server, handle)
     }
 
     #[tokio::test]
@@ -2409,6 +2529,63 @@ mod tests {
         assert!(stats.total_allowed >= 1);
         assert_eq!(stats.burst_capacity, 5);
         assert_eq!(stats.max_body_bytes, 65_536);
+
+        server.unblock();
+    }
+
+    #[test]
+    fn test_cleartext_audit_allows_loopback() {
+        let addr: SocketAddr = "127.0.0.1:9737".parse().unwrap();
+        assert!(audit_binding_security(addr, false, false, false).is_ok());
+        assert!(audit_binding_security(addr, false, false, true).is_ok());
+    }
+
+    #[test]
+    fn test_cleartext_audit_rejects_non_loopback_when_enforced() {
+        let addr: SocketAddr = "0.0.0.0:9737".parse().unwrap();
+        let err = audit_binding_security(addr, false, false, true).unwrap_err();
+        assert!(err.to_string().contains("Security violation"));
+    }
+
+    #[test]
+    fn test_cleartext_audit_allows_non_loopback_with_proxy_or_tls() {
+        let addr: SocketAddr = "0.0.0.0:9737".parse().unwrap();
+        // Allowed when behind reverse proxy
+        assert!(audit_binding_security(addr, false, true, true).is_ok());
+        // Allowed when native TLS is active
+        assert!(audit_binding_security(addr, true, false, true).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_native_tls_server_https_get_and_post() {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])
+            .unwrap();
+        let cert_pem = cert.cert.pem();
+        let key_pem = cert.key_pair.serialize_pem();
+
+        let ssl_config = tiny_http::SslConfig {
+            certificate: cert_pem.into_bytes(),
+            private_key: key_pem.into_bytes(),
+        };
+
+        let config = rate_limit::RateLimiterConfig::default();
+        let (base_url, server, _handle) = start_test_daemon_full(config, Some(ssl_config)).await;
+        assert!(base_url.starts_with("https://"));
+
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap();
+
+        let res = client
+            .get(format!("{base_url}/health"))
+            .send()
+            .await
+            .expect("send HTTPS request");
+        assert_eq!(res.status(), reqwest::StatusCode::OK);
+
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(body["ok"], true);
 
         server.unblock();
     }
