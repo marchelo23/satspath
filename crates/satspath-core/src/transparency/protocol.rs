@@ -30,6 +30,38 @@ pub struct WitnessCosignature {
     pub signature: String,
 }
 
+/// Compute the canonical domain-separated message string for a witness cosignature.
+pub fn witness_cosignature_message(
+    witness_id: &str,
+    checkpoint_hash: &str,
+    tree_size: u64,
+    timestamp: i64,
+) -> String {
+    format!(
+        "SatsPathWitnessV1\nwitness_id={witness_id}\ncheckpoint_hash={checkpoint_hash}\ntree_size={tree_size}\ntimestamp={timestamp}"
+    )
+}
+
+impl WitnessCosignature {
+    pub fn signing_message(&self) -> String {
+        witness_cosignature_message(
+            &self.witness_id,
+            &self.checkpoint_hash,
+            self.tree_size,
+            self.timestamp,
+        )
+    }
+
+    pub fn verify(&self, checkpoint: &TransparencyCheckpoint) -> crate::errors::Result<bool> {
+        let cp_hash = checkpoint.checkpoint_hash()?;
+        if self.checkpoint_hash != cp_hash || self.tree_size != checkpoint.log_size {
+            return Ok(false);
+        }
+        let msg = self.signing_message();
+        crate::crypto::verify_message_signature(&msg, &self.signature, &self.witness_pubkey)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolutionEnvelope {
     pub version: u16,

@@ -42,16 +42,16 @@ pub use log::{ConsistencyStatus, TransparencyLog, TransparencyStatus};
 pub use migration::{verify_migration_statement, MigrationExport, MigrationStatement};
 pub use proof::{MerkleConsistencyProof, MerkleInclusionProof};
 pub use protocol::{
-    EndpointRole, NamespaceDescriptor, ReplicaEndpoint, ResolutionEnvelope, ResolutionRequest,
-    WitnessCosignature,
+    witness_cosignature_message, EndpointRole, NamespaceDescriptor, ReplicaEndpoint,
+    ResolutionEnvelope, ResolutionRequest, WitnessCosignature,
 };
 pub use replication::{
     detect_equivocation, select_endpoint, validate_no_rollback, ReplicaHealth,
     MAX_STALENESS_WINDOW_SECS,
 };
 pub use resolver::{
-    verify_namespace_binding, verify_witness_quorum, DimensionStatus, VerificationDimensions,
-    VerifiedResolution,
+    verify_namespace_binding, verify_witness_quorum, verify_witness_quorum_against_checkpoint,
+    DimensionStatus, VerificationDimensions, VerifiedResolution,
 };
 pub use state_map::{IdentifierStatus, StateMapProof, StateMapValue};
 pub use status::{S2SErrorCode, VerificationStatus};
