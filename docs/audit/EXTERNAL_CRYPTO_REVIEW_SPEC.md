@@ -41,9 +41,9 @@ This specification serves as the formal briefing document for external cryptogra
 * **Algorithm:** HMAC-SHA512.
 * **Formula:**
   $$\text{PRK} = \text{HMAC-SHA512}\Big(\text{Key} = \text{"SatsPath Identity Key m/9737'/0'"}, \; \text{Data} = \text{seed} \mathbin{\Vert} \text{to\_be\_bytes}(\text{account\_index})\Big)$$
-  $$\text{sk} = \text{PRK}[0..32] \pmod n \quad (n = \text{secp256k1 group order})$$
+  $$\text{sk} = \text{PRK}_{0..32} \pmod n \quad (n = \text{secp256k1 group order})$$
 * **Security Requirements:**
-  - Strict validation that derived scalar lies in $[1, n-1]$.
+  - Strict validation that derived scalar lies in the range $1 \le \text{scalar} < n$.
   - Complete isolation between account indices ($\text{account}_0 \neq \text{account}_1$).
   - Zero leakage of master wallet root keys or on-chain transaction graph.
 

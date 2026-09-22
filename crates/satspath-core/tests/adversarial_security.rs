@@ -131,14 +131,14 @@ fn test_ssrf_adversarial_ipv6_mapped_loopback() {
 #[test]
 fn test_ssrf_adversarial_port_smuggling() {
     let bad_ports = [
-        21,   // FTP
-        22,   // SSH
-        25,   // SMTP
-        8545, // Ethereum JSON-RPC
-        6379, // Redis
-        11211,// Memcached
-        2375, // Docker daemon
-        9000, // PHP-FPM / MinIO
+        21,    // FTP
+        22,    // SSH
+        25,    // SMTP
+        8545,  // Ethereum JSON-RPC
+        6379,  // Redis
+        11211, // Memcached
+        2375,  // Docker daemon
+        9000,  // PHP-FPM / MinIO
     ];
 
     for port in bad_ports {
@@ -303,7 +303,9 @@ fn test_transparency_log_split_view_and_equivocation_defense() {
     let event_hash = log.append(event, &signed).unwrap();
 
     let checkpoint = log.create_checkpoint(&operator.secret_key).unwrap();
-    let proof = log.inclusion(&event_hash, Some(checkpoint.log_size)).unwrap();
+    let proof = log
+        .inclusion(&event_hash, Some(checkpoint.log_size))
+        .unwrap();
 
     // Verification succeeds on legitimate checkpoint
     assert!(verify_checkpoint_inclusion(&event_hash, &proof, &checkpoint).is_ok());
@@ -371,33 +373,24 @@ fn test_payment_method_ownership_proof_forgery_rejection() {
     )
     .expect("Legitimate attestation should build");
 
-    let tier = verify_method_verification(
-        &onchain_method,
-        &alice_pubkey_hex,
-        &verification,
-        now,
-        None,
-    )
-    .expect("Legitimate proof must verify");
+    let tier =
+        verify_method_verification(&onchain_method, &alice_pubkey_hex, &verification, now, None)
+            .expect("Legitimate proof must verify");
     assert_eq!(tier, TrustTier::Cryptographic);
 
     // Attack 1: Replaying Alice's verification onto Bob's identity pubkey
     assert!(
-        verify_method_verification(
-            &onchain_method,
-            &bob_pubkey_hex,
-            &verification,
-            now,
-            None,
-        )
-        .is_err(),
+        verify_method_verification(&onchain_method, &bob_pubkey_hex, &verification, now, None,)
+            .is_err(),
         "Replaying Alice's proof to Bob's identity must fail"
     );
 
     // Attack 2: Tampering signature in the proof
     let mut forged_verification = verification.clone();
     if let VerificationStatus::Verified {
-        proof: OwnershipProof::MessageSignature { ref mut signature, .. },
+        proof: OwnershipProof::MessageSignature {
+            ref mut signature, ..
+        },
         ..
     } = forged_verification.status
     {
