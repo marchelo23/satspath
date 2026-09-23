@@ -18,6 +18,8 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Response, StatusCode};
 
+use crate::http::{cors_headers_header, cors_methods_header, cors_origin_header};
+
 /// Default maximum request body size in bytes (64 KB).
 pub const DEFAULT_MAX_BODY_BYTES: usize = 65_536;
 
@@ -323,9 +325,9 @@ pub fn rate_limit_response(retry_after_secs: u64) -> Response<Cursor<Vec<u8>>> {
         .with_status_code(StatusCode(429))
         .with_header(content_type)
         .with_header(retry_header)
-        .with_header(crate::cors_origin_header())
-        .with_header(crate::cors_methods_header())
-        .with_header(crate::cors_headers_header())
+        .with_header(cors_origin_header())
+        .with_header(cors_methods_header())
+        .with_header(cors_headers_header())
 }
 
 /// Construct an HTTP 413 Payload Too Large response.
@@ -342,9 +344,9 @@ pub fn payload_too_large_response(max_bytes: usize) -> Response<Cursor<Vec<u8>>>
     Response::from_data(data)
         .with_status_code(StatusCode(413))
         .with_header(content_type)
-        .with_header(crate::cors_origin_header())
-        .with_header(crate::cors_methods_header())
-        .with_header(crate::cors_headers_header())
+        .with_header(cors_origin_header())
+        .with_header(cors_methods_header())
+        .with_header(cors_headers_header())
 }
 
 #[cfg(test)]
