@@ -97,6 +97,8 @@ pub use resolver::{
 #[cfg(feature = "std")]
 pub use resolvers::{bip353::Bip353Resolver, http::HttpResolver, nostr::NostrResolver};
 
+pub use validation::validate_silent_payment_address;
+
 /// Validate that a string looks like a Lightning Address (user@domain).
 pub fn is_valid_lightning_address(s: &str) -> bool {
     validation::validate_lightning_address(s).is_ok()
