@@ -244,6 +244,9 @@ pub struct Invite {
     /// Sender's identity pubkey (hex) for verification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_pubkey: Option<String>,
+    /// Unique invite ID if assigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite_id: Option<String>,
 }
 
 /// Non-custodial invite state for an identifier with no published profile yet.
@@ -258,6 +261,27 @@ pub struct InviteRecord {
     pub status: InviteStatus,
     pub created_at: i64,
     pub expires_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_pubkey: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_profile_pubkey: Option<String>,
+}
+
+/// Notification generated when an invite is claimed by the receiver.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClaimNotification {
+    pub notification_id: String,
+    pub invite_id: String,
+    pub identifier_hash: String,
+    pub display_hint: String,
+    pub amount_sats: u64,
+    pub claimed_at: i64,
+    pub claimed_profile_pubkey: String,
+    pub read: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

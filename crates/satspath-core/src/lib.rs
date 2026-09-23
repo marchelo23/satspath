@@ -70,8 +70,8 @@ pub use platform::{
 pub use pointer::{BitcoinNetwork, PaymentPointer};
 pub use privacy::{canonical_identifier, identifier_hash, validate_ascii_identifier};
 pub use profile::{
-    Bolt12Offer, ClaimPolicy, Invite, InviteRecord, InviteStatus, PaymentMethod, PaymentProfile,
-    PaymentRequest, SignedPaymentProfile,
+    Bolt12Offer, ClaimNotification, ClaimPolicy, Invite, InviteRecord, InviteStatus, PaymentMethod,
+    PaymentProfile, PaymentRequest, SignedPaymentProfile,
 };
 pub use rotation::{
     apply_key_rotation, get_effective_identity_pubkey, is_rotation_valid, rotate_identity_key,
@@ -88,6 +88,11 @@ pub use transparency::{
     TransparencyCheckpoint, TransparencyError, TransparencyLog, TransparencyLogIdentity,
     TransparencyStatus, TrustedVerifier,
 };
+
+#[cfg(feature = "std")]
+pub mod invite_store;
+#[cfg(feature = "std")]
+pub use invite_store::{InviteStore, INVITES_FILE};
 
 #[cfg(feature = "std")]
 pub use resolver::{
@@ -113,8 +118,10 @@ pub fn create_invite(
 ) -> Invite {
     let now = chrono::Utc::now().timestamp();
     let alias_hash = crate::privacy::identifier_hash(alias);
+    let invite_id = uuid::Uuid::new_v4().to_string();
     let claim_url = format!(
-        "https://satspath.local/claim?alias_hash={}&amount={}",
+        "https://satspath.local/claim?invite_id={}&alias_hash={}&amount={}",
+        invite_id,
         &alias_hash[..16],
         amount_sats
     );
@@ -145,6 +152,7 @@ pub fn create_invite(
             .into(),
         sender_signature,
         sender_pubkey,
+        invite_id: Some(invite_id),
     }
 }
 
@@ -192,6 +200,52 @@ pub fn create_invite_record(
         status: InviteStatus::Created,
         created_at: now,
         expires_at: now + ttl_seconds,
+        sender_pubkey: None,
+        sender_signature: None,
+        claimed_at: None,
+        claimed_profile_pubkey: None,
+    }
+}
+
+/// Create a signed invite record with cryptographic sender attribution.
+pub fn create_signed_invite_record(
+    identifier: &str,
+    amount_sats: u64,
+    memo: Option<String>,
+    sender_fingerprint: String,
+    ttl_seconds: i64,
+    sender_secret_key: Option<&secp256k1::SecretKey>,
+) -> InviteRecord {
+    let now = chrono::Utc::now().timestamp();
+    let identifier_hash = privacy::identifier_hash(identifier);
+    let expires_at = now + ttl_seconds;
+
+    let (sender_signature, sender_pubkey) = if let Some(sk) = sender_secret_key {
+        let secp = secp256k1::Secp256k1::new();
+        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, sk);
+        let message = format!(
+            "SatsPath Invite v1\nalias_hash={identifier_hash}\namount_sats={amount_sats}\ncreated_at={now}\nexpires_at={expires_at}"
+        );
+        let sig = crate::crypto::sign_message(&message, sk);
+        (Some(sig), Some(hex::encode(pubkey.serialize())))
+    } else {
+        (None, None)
+    };
+
+    InviteRecord {
+        invite_id: uuid::Uuid::new_v4().to_string(),
+        identifier_hash,
+        display_hint: privacy::mask_identifier(identifier),
+        amount_sats,
+        memo,
+        sender_fingerprint,
+        status: InviteStatus::Created,
+        created_at: now,
+        expires_at,
+        sender_pubkey,
+        sender_signature,
+        claimed_at: None,
+        claimed_profile_pubkey: None,
     }
 }
 
@@ -213,5 +267,39 @@ mod tests {
         assert!(!format!("{invite:?}").contains("seed"));
         assert!(!format!("{invite:?}").contains("xprv"));
         assert!(invite.expires_at > invite.created_at);
+        assert!(invite.claimed_at.is_none());
+        assert!(invite.claimed_profile_pubkey.is_none());
+    }
+
+    #[test]
+    fn create_signed_invite_record_and_verify_roundtrip() {
+        let secp = secp256k1::Secp256k1::new();
+        let secret = secp256k1::SecretKey::new(&mut secp256k1::rand::thread_rng());
+        let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret);
+        let pubkey_hex = hex::encode(pubkey.serialize());
+
+        let record = create_signed_invite_record(
+            "bob@example.com",
+            25_000,
+            Some("Pizza".into()),
+            pubkey_hex.clone(),
+            3600,
+            Some(&secret),
+        );
+
+        assert_eq!(record.sender_pubkey.as_deref(), Some(pubkey_hex.as_str()));
+        assert!(record.sender_signature.is_some());
+
+        let message = format!(
+            "SatsPath Invite v1\nalias_hash={}\namount_sats={}\ncreated_at={}\nexpires_at={}",
+            record.identifier_hash, record.amount_sats, record.created_at, record.expires_at
+        );
+        let valid = crypto::verify_message_signature(
+            &message,
+            record.sender_signature.as_deref().unwrap(),
+            record.sender_pubkey.as_deref().unwrap(),
+        )
+        .expect("verification should run");
+        assert!(valid);
     }
 }

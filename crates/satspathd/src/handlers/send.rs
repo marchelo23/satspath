@@ -171,8 +171,43 @@ pub(crate) async fn send_response(state: &AppState, body: SendRequest) -> SendRe
             }
         }
         Err(_) => {
-            let invite =
-                satspath_core::create_invite(&body.recipient, body.amount_sats, None, 86400);
+            let secret_opt = load_wallet(&state.home).ok().and_then(|w| {
+                w.identity_pubkey.and_then(|pk| {
+                    crate::handlers::wallet::load_identity_key(&state.home, &pk).ok()
+                })
+            });
+            let invite = satspath_core::create_invite(
+                &body.recipient,
+                body.amount_sats,
+                secret_opt.as_ref(),
+                86400,
+            );
+
+            // Persist invite record to InviteStore
+            if let Ok(mut store) = satspath_core::InviteStore::open(&state.home) {
+                let sender_fp = secret_opt
+                    .as_ref()
+                    .map(|sk| {
+                        let secp = secp256k1::Secp256k1::new();
+                        let pk = secp256k1::PublicKey::from_secret_key(&secp, sk);
+                        hex::encode(pk.serialize())
+                    })
+                    .unwrap_or_else(|| "local-sender".to_string());
+
+                let mut record = satspath_core::create_signed_invite_record(
+                    &body.recipient,
+                    body.amount_sats,
+                    None,
+                    sender_fp,
+                    86400,
+                    secret_opt.as_ref(),
+                );
+                if let Some(ref iid) = invite.invite_id {
+                    record.invite_id = iid.clone();
+                }
+                let _ = store.insert(record);
+            }
+
             let email = build_email_invite(&body.recipient, body.amount_sats, &invite.claim_url);
             SendResponse::Invite {
                 mode: "preview_only",
