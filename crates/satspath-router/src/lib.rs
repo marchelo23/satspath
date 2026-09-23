@@ -17,7 +17,11 @@ pub mod urgency;
 pub use ark_routes::{plan_ark_route, ArkRoutePlan, SenderCapabilities};
 pub use bip353_preview::quote_from_bip353_resolution;
 pub use bolt12::{parse_bolt12_offer, Bolt12Invoice, Bolt12InvoiceRequest, Bolt12Offer};
-pub use fees::{fallback_fees, fetch_fee_estimate, FeeEstimate};
+pub use fees::{
+    compute_median_fee, decay_estimate, fallback_fees, fetch_fee_estimate,
+    fetch_fee_estimate_with_config, ConsensusFeeReport, EsploraFeeEstimate, FeeEstimate,
+    FeeEstimatorConfig, FeeSource, MempoolFeeEstimate, MultiSourceFeeEstimator,
+};
 pub use key_rotation::{
     apply_key_rotation, get_effective_identity_pubkey, is_rotation_valid, rotate_identity_key,
     verify_key_rotation,

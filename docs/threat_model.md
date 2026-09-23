@@ -21,7 +21,7 @@ Bitcoin, Lightning, or Ark security models.
 | **Lost keys**                    | User loses their `.satspath/keys.json`                         | Keys are local; demo only; no recovery mechanism at MVP                                                                     | Nostr-based key backup (NIP-06); seed phrase with BIP-39; multi-sig recovery            |
 | **Malicious invite links**       | Attacker crafts an invite URL for a different alias/amount     | Invite contains alias hash + amount; receiver should verify independently                                                   | Signed invites using sender's identity key; expiry timestamps; single-use tokens        |
 | **Ark server trust assumptions** | Ark server can censor or delay payments                        | MockArkClient at MVP; no real Ark integration                                                                               | Covenants-based Ark with client-side verification; multi-server federation              |
-| **Fee manipulation**             | Attacker serves a fake mempool.space response                  | Falls back to safe `hourFee=5` on API error                                                                                 | Multiple fee data sources; user-configurable fee source; local fee estimation           |
+| **Fee manipulation**             | Attacker serves a manipulated fee response or blackholes oracles | Multi-source median consensus across Bitcoin Core RPC, Esplora, and Mempool.space; decaying cache fallback; staleness cutoff | Prioritized user-configurable fee sources; local Bitcoin Core RPC consensus; bounded fallback decay |
 | **Replay attacks**               | Old payment request reused                                     | `updated_at` timestamp in profile; profiles can be revoked by re-signing                                                    | Nonce in payment requests; short-lived payment intents with expiry                      |
 | **Profile downgrade**            | Attacker strips or replaces a method                           | Authorized removal is permitted but signed, sequenced, logged and displayed; router selects only ownership-verified methods | User policy for change warnings                                                         |
 
@@ -81,5 +81,15 @@ SatsPath incorporates BIP-352 Silent Payments for private on-chain settlement, d
 1. **CDH / ECDH Security on secp256k1:** `S = a * B_scan = b_scan * A`. Security relies on the Computational Diffie-Hellman assumption over secp256k1.
 2. **Hash Domain Separation:** Tagged hashes guarantee that scalar tweaks cannot be reused or replayed across protocols or output indices `k`.
 3. **Local Key Custody:** Neither `b_scan` nor `b_spend` is ever transmitted over network layers, Nostr relays, or directory services.
+
+## Fee Estimation Security Model
+
+To defend against fee manipulation attacks where compromised or malicious oracles report inflated or deflated fee rates:
+
+1. **Multi-Source Median Consensus:** The router queries multiple independent sources concurrently (Bitcoin Core RPC via `estimatesmartfee`, Esplora API via `/api/fee-estimates`, and Mempool.space via `/api/v1/fees/recommended`). Fee rates for each confirmation tier are aggregated using median filtering, rendering single-oracle manipulation mathematically ineffective unless an attacker controls more than 50% of queried sources.
+2. **Prioritized Configuration:** Operators can configure explicit fee source lists and prioritized endpoints via `SATSPATH_FEE_SOURCES`, `SATSPATH_BITCOIN_RPC_URL`, `SATSPATH_MEMPOOL_URL`, and `SATSPATH_ESPLORA_URL`.
+3. **Staleness Rejection:** Estimates older than a configurable threshold (`SATSPATH_FEE_MAX_STALENESS_SECS`, default 1800 seconds / 30 minutes) are considered stale and discarded.
+4. **Decaying Cache Fallback:** In the event of temporary network partitions where all external oracles are unreachable, the router uses the last known valid consensus estimate and decays it smoothly towards conservative baseline `FALLBACK_FEES` (10 sat/vB hour fee) rather than experiencing a cliff-edge disruption.
+
 
 

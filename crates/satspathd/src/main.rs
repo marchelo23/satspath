@@ -46,6 +46,13 @@ async fn main() -> Result<()> {
 
     fs::create_dir_all(&home).context("creating SATSPATH_HOME")?;
 
+    if let Some(ref sources) = cli.fee_sources {
+        std::env::set_var("SATSPATH_FEE_SOURCES", sources);
+    }
+    if let Some(staleness) = cli.fee_max_staleness {
+        std::env::set_var("SATSPATH_FEE_MAX_STALENESS_SECS", staleness.to_string());
+    }
+
     // SEC-04: Daemon API Authorization
     let macaroon_path = home.join("admin.macaroon");
     let auth_token = if let Ok(token) = std::env::var("SATSPATHD_AUTH_TOKEN") {

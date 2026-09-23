@@ -51,6 +51,12 @@ pub(crate) struct Cli {
     /// Refuse to start if binding to non-loopback address without TLS or reverse proxy.
     #[arg(long)]
     pub(crate) require_tls_or_proxy: bool,
+    /// Comma-separated prioritized list of fee estimation sources (e.g. "core,mempool,esplora").
+    #[arg(long)]
+    pub(crate) fee_sources: Option<String>,
+    /// Maximum age in seconds before a cached fee estimate is considered stale (default: 1800).
+    #[arg(long)]
+    pub(crate) fee_max_staleness: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
