@@ -4,13 +4,13 @@
 
 **One identity. Every path.**
 
-SatsPath maps a human-readable recipient identifier such as **alice@example.com** to a cryptographically signed payment profile, verifies it, discovers the receiver's available Bitcoin payment methods, and returns a wallet handoff for a compatible route.
+SatsPath maps a human-readable recipient identifier such as `alice@example.com` to a cryptographically signed payment profile, verifies it, discovers the receiver's available Bitcoin payment methods, and returns a wallet handoff for a compatible route.
 
 > **Experimental software**
 >
 > Mainnet payment execution is **not implemented**. SatsPath must not be used to move real funds. Internal v2 conformance work has been completed, but an independent external security / cryptographic review is still required before any production or real-funds claim.
 
-Website: https://satspath.com
+Website: <https://satspath.com>
 
 ---
 
