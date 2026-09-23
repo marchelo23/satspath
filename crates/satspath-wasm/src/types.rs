@@ -212,6 +212,11 @@ pub enum SwapDirective {
     LightningPayment {
         target_ln_address: Option<String>,
     },
+    Bolt12Payment {
+        offer: String,
+        target_invoice: Option<String>,
+        has_blinded_paths: bool,
+    },
     SubmarineSwap {
         target_invoice: Option<String>,
     },

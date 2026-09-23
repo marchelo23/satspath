@@ -234,6 +234,27 @@ async fn exec_experimental(
             println!("  Testnet LN node integration pending.");
             println!("  Run with a real LN node to execute.");
         }
+        SwapDirective::Bolt12Payment {
+            offer,
+            target_invoice,
+            has_blinded_paths,
+        } => {
+            println!(
+                "  [BOLT12 Offer] {}",
+                display_value(offer, mask_identifier, debug)
+            );
+            if *has_blinded_paths {
+                println!("  [Privacy] Blinded path enabled (receiver node ID protected)");
+            }
+            if let Some(ref inv) = target_invoice {
+                println!(
+                    "  [BOLT12 Invoice] {}",
+                    display_value(inv, mask_invoice, debug)
+                );
+            } else {
+                println!("  [Status] Invoice fetching via BOLT12 gateway pending.");
+            }
+        }
         SwapDirective::SubmarineSwap { target_invoice } => {
             // Must have a real invoice — no fake fallback.
             let invoice = target_invoice.as_deref().ok_or_else(|| {

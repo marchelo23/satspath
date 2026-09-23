@@ -83,6 +83,7 @@ pub fn score_routes(
                     .lightning_fee_sats_estimate
                     .unwrap_or_else(|| std::cmp::max(1, amount_sats / 10_000));
                 let available = lightning_address.is_some() || lnurl.is_some() || bolt12.is_some();
+                let mut privacy_score = 7;
                 let pointer = if let Some(address) = lightning_address {
                     PaymentPointer::LightningAddress {
                         address: address.clone(),
@@ -98,6 +99,20 @@ pub fn score_routes(
                         invoice: invoice.to_string(),
                         amount_sats: Some(amount_sats),
                     }
+                } else if let Some(offer_str) = bolt12.as_deref() {
+                    let parsed = crate::bolt12::parse_bolt12_offer(offer_str).ok();
+                    let has_blinded = parsed
+                        .as_ref()
+                        .map(|o| o.has_blinded_paths())
+                        .unwrap_or(false);
+                    if has_blinded {
+                        privacy_score = 9;
+                    } else {
+                        privacy_score = 8;
+                    }
+                    PaymentPointer::Bolt12Offer {
+                        offer: offer_str.to_string(),
+                    }
                 } else {
                     continue;
                 };
@@ -105,7 +120,7 @@ pub fn score_routes(
                     rail: PaymentRail::Lightning,
                     estimated_fee_sats: Some(fee),
                     estimated_time_seconds: Some(5),
-                    privacy_score: 7,
+                    privacy_score,
                     reliability_score: 8,
                     requires_user_action: true,
                     available,
@@ -155,11 +170,17 @@ pub fn score_routes(
                 let fee = fee_snapshot
                     .lightning_fee_sats_estimate
                     .unwrap_or_else(|| std::cmp::max(1, amount_sats / 10_000));
+                let parsed = crate::bolt12::parse_bolt12_offer(&offer_data.offer).ok();
+                let has_blinded = parsed
+                    .as_ref()
+                    .map(|o| o.has_blinded_paths())
+                    .unwrap_or(false);
+                let privacy_score = if has_blinded { 9 } else { 8 };
                 candidates.push(RouteCandidate {
                     rail: PaymentRail::Lightning,
                     estimated_fee_sats: Some(fee),
                     estimated_time_seconds: Some(2),
-                    privacy_score: 9,
+                    privacy_score,
                     reliability_score: 9,
                     requires_user_action: true,
                     available: true,

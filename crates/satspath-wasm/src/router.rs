@@ -36,11 +36,23 @@ pub fn select_route(req: &RouteRequest, fees: &FeeEstimate) -> Result<RouteQuote
             if !is_lightning_available_for_amount(method, req.amount_sats) {
                 continue;
             }
-            let ln_address = match method {
+            let swap_directive = match method {
                 PaymentMethod::Lightning {
-                    lightning_address, ..
-                } => lightning_address.clone(),
-                _ => None,
+                    bolt12: Some(offer),
+                    ..
+                } => SwapDirective::Bolt12Payment {
+                    offer: offer.clone(),
+                    target_invoice: None,
+                    has_blinded_paths: false,
+                },
+                _ => SwapDirective::LightningPayment {
+                    target_ln_address: match method {
+                        PaymentMethod::Lightning {
+                            lightning_address, ..
+                        } => lightning_address.clone(),
+                        _ => None,
+                    },
+                },
             };
             let fee = estimate_lightning_fee(req.amount_sats);
             return Ok(RouteQuote {
@@ -52,9 +64,7 @@ pub fn select_route(req: &RouteRequest, fees: &FeeEstimate) -> Result<RouteQuote
                 estimated_fee_sats: fee,
                 estimated_confirmation: "instant".to_string(),
                 fee_snapshot: None,
-                swap_directive: SwapDirective::LightningPayment {
-                    target_ln_address: ln_address,
-                },
+                swap_directive,
                 execution: ExecutionMode::ManualWallet,
                 wallet_hint:
                     "Use any Lightning wallet (LDK, Breez, Phoenix, etc.) to pay the invoice."
