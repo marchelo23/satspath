@@ -39,7 +39,12 @@ pub use scoring::{
     score_routes, FeeSnapshot, PaymentRail, RouteCandidate, RouteDecision, RoutePreferences,
 };
 pub use silent_payments::{
-    create_silent_payment_address, generate_silent_payment_keys, parse_silent_payment_scan_key,
+    compute_input_hash, create_silent_payment_address, create_silent_payment_address_for_network,
+    derive_spending_privkey, derive_spending_privkey_from_scan, detect_silent_payment_outputs,
+    generate_silent_payment_keys, parse_outpoint_to_bytes, parse_silent_payment_address,
+    parse_silent_payment_scan_key, tagged_hash, SilentPayment, SilentPaymentAddress,
+    SilentPaymentInput, SilentPaymentOutput, SilentPaymentScanKey, BIP0352_TAG_INPUTS,
+    BIP0352_TAG_SHARED_SECRET,
 };
 pub use split_payments::{
     calculate_split_amounts, route_split_payment, validate_split_request, SplitPaymentRoute,

@@ -61,3 +61,24 @@ NOT TRUSTED (at MVP):
 3. **Fail safe.** When in doubt, reject and show a clear error rather than proceeding.
 4. **Privacy by default.** Multiple on-chain addresses; avoid address reuse.
 5. **Invite rather than proxy.** For unknown users, create an invite that the receiver claims with their own keys.
+
+## Silent Payments (BIP-352) Privacy and Security Model
+
+SatsPath incorporates BIP-352 Silent Payments for private on-chain settlement, decoupling sender payments from public address reuse and shielding the recipient's transaction graph.
+
+### Threat Matrix & Mitigations
+
+| Threat | Risk | BIP-352 Mitigation |
+| :--- | :--- | :--- |
+| **Address Reuse & Graph Analysis** | Passive blockchain observers cluster multiple payments to the same entity. | Each payment derives an ephemeral Taproot output (P_k) using sender inputs and recipient scan key. No two payments share the same on-chain scriptPubkey. |
+| **Spending Key Exposure** | Continuous online scanning on mobile/watch-only devices risks spend key compromise. | Dual-key architecture separates scanning (b_scan) from spending (b_spend). Watch-only nodes can detect incoming payments with b_scan without access to b_spend. |
+| **Cross-Protocol Collision** | Output derivation tweaked by attacker to collide with standard Taproot or Lightning scripts. | Strict domain-separated tagged hashing adhering to BIP-340/352 (BIP0352/Inputs and BIP0352/SharedSecret). |
+| **Malicious Input Manipulation** | Attacker crafts multi-input transactions attempting to skew tweak generation or reuse secrets. | Lexicographical input outpoint binding (outpoint_L) and sum of eligible input public keys (A = sum(A_i)) committed into the input hash. |
+| **Private Key Parity Desync** | Signer produces invalid Schnorr signatures if Taproot odd parity is not handled. | Spending key derivation dynamically negates p_k when the tweaked public key possesses odd y-coordinate parity, guaranteeing 100% Schnorr/BIP-340 signature compatibility. |
+| **Light Client Resource Exhaustion** | Scanning requires evaluating every eligible Taproot transaction across blocks. | Scan key filtering, compact client-side filters, and witness checkpoint coordination mitigate CPU exhaustion on mobile nodes. |
+
+### Cryptographic Assumptions
+1. **CDH / ECDH Security on secp256k1:** S = a * B_scan = b_scan * A. Security relies on the Computational Diffie-Hellman assumption over secp256k1.
+2. **Hash Domain Separation:** Tagged hashes guarantee that scalar tweaks cannot be reused or replayed across protocols or output indices k.
+3. **Local Key Custody:** Neither b_scan nor b_spend is ever transmitted over network layers, Nostr relays, or directory services.
+
