@@ -14,8 +14,7 @@ pnpm add @satspath/wasm bip39 react-qr-code
 pnpm add @satspath/resolvers @satspath/router
 ```
 
-> [!TIP]
-> If you are building the WebAssembly package directly from the local repository:
+> **Tip:** If you are building the WebAssembly package directly from the local repository:
 >
 > ```bash
 > cd crates/satspath-wasm
