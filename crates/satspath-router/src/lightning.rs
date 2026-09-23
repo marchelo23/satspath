@@ -12,6 +12,7 @@ pub fn is_lightning_available(method: &PaymentMethod) -> bool {
             bolt12,
             ..
         } => lnurl.is_some() || lightning_address.is_some() || bolt12.is_some(),
+        PaymentMethod::Bolt12(_) => true,
         _ => false,
     }
 }
@@ -43,10 +44,27 @@ pub async fn is_lightning_available_for_amount(method: &PaymentMethod, amount_sa
             true
         }
         PaymentMethod::Lightning {
-            bolt12: Some(_), ..
+            bolt12: Some(offer_str),
+            ..
         } => {
-            // BOLT12 offers don't have a min_sendable until invoice is generated
-            // Assume available for now
+            if let Ok(offer) = crate::bolt12::parse_bolt12_offer(offer_str) {
+                if !offer.is_amount_valid(amount_sats * 1_000) {
+                    return false;
+                }
+            }
+            true
+        }
+        PaymentMethod::Bolt12(offer_data) => {
+            if let Some(min_sats) = offer_data.minimum_amount_sats {
+                if amount_sats < min_sats {
+                    return false;
+                }
+            }
+            if let Ok(offer) = crate::bolt12::parse_bolt12_offer(&offer_data.offer) {
+                if !offer.is_amount_valid(amount_sats * 1_000) {
+                    return false;
+                }
+            }
             true
         }
         _ => false,
@@ -80,8 +98,29 @@ pub fn is_lightning_available_for_amount_sync(method: &PaymentMethod, amount_sat
             ..
         } => true, // Can't check without fetching
         PaymentMethod::Lightning {
-            bolt12: Some(_), ..
-        } => true, // BOLT12: no min until invoice
+            bolt12: Some(offer_str),
+            ..
+        } => {
+            if let Ok(offer) = crate::bolt12::parse_bolt12_offer(offer_str) {
+                if !offer.is_amount_valid(amount_sats * 1_000) {
+                    return false;
+                }
+            }
+            true
+        }
+        PaymentMethod::Bolt12(offer_data) => {
+            if let Some(min_sats) = offer_data.minimum_amount_sats {
+                if amount_sats < min_sats {
+                    return false;
+                }
+            }
+            if let Ok(offer) = crate::bolt12::parse_bolt12_offer(&offer_data.offer) {
+                if !offer.is_amount_valid(amount_sats * 1_000) {
+                    return false;
+                }
+            }
+            true
+        }
         _ => false,
     }
 }

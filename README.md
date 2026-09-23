@@ -72,7 +72,7 @@ This table is the source of truth for public claims about the current implementa
 | BIP-353 / DNS | **Preview / experimental** | Resolver and DNS primitives exist; strict trust requires local DNSSEC validation |
 | Lightning Address / LNURL | **Implemented for discovery and handoff** | Can resolve public metadata and produce a wallet-facing payment payload |
 | BOLT11 | **Implemented for handoff paths** | Concrete invoices may be fetched through supported LNURL flows; SatsPath does not pay them |
-| BOLT12 | **Partial / experimental** | Data types and basic parsing exist; full offer handling and invoice fetching are not yet implemented |
+| BOLT12 | **Implemented for discovery and handoff** | Bech32m/TLV offer parsing, blinded path privacy routing, signed invoice requests, invoice validation, and gateway handoff |
 | Bitcoin on-chain / BIP-21 | **Implemented for handoff** | Address validation, fee-aware routing and BIP-21 payload generation |
 | Silent Payments | **Experimental** | Public pointer / routing support exists; spending execution remains outside SatsPath |
 | Ark | **Preview / testnet-oriented** | Receive pointers and routing exist; some execution paths are mocked or simulated; no mainnet Ark execution |

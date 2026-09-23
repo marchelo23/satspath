@@ -52,7 +52,12 @@ pub fn select_priority_route(
     routing_ok: bool,
 ) -> Option<PriorityDecision> {
     let onchain = find(methods, |m| matches!(m, PaymentMethod::Onchain { .. }));
-    let lightning = find(methods, |m| matches!(m, PaymentMethod::Lightning { .. }));
+    let lightning = find(methods, |m| {
+        matches!(
+            m,
+            PaymentMethod::Lightning { .. } | PaymentMethod::Bolt12(_)
+        )
+    });
     let ark = find(methods, |m| matches!(m, PaymentMethod::Ark { .. }));
 
     let small = amount_sats < SMALL_PAYMENT_SATS;

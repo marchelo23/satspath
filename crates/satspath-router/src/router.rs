@@ -26,6 +26,12 @@ pub struct RouteRequest {
 pub enum SwapDirective {
     /// Direct Lightning payment via LNURL/Lightning Address.
     LightningPayment { target_ln_address: Option<String> },
+    /// BOLT12 payment via offer or fetched invoice.
+    Bolt12Payment {
+        offer: String,
+        target_invoice: Option<String>,
+        has_blinded_paths: bool,
+    },
     /// Submarine Swap: on-chain/Ark → Lightning (requires Boltz).
     SubmarineSwap { target_invoice: Option<String> },
     /// Reverse Swap: Lightning → on-chain (requires Boltz).
@@ -92,6 +98,38 @@ pub async fn select_route(req: &RouteRequest) -> satspath_core::Result<RouteQuot
                 } => lightning_address.clone(),
                 _ => None,
             };
+            let swap_directive = match ln {
+                PaymentMethod::Lightning {
+                    bolt12: Some(offer),
+                    ..
+                } => {
+                    let parsed = crate::bolt12::parse_bolt12_offer(offer).ok();
+                    let has_blinded = parsed
+                        .as_ref()
+                        .map(|o| o.has_blinded_paths())
+                        .unwrap_or(false);
+                    SwapDirective::Bolt12Payment {
+                        offer: offer.clone(),
+                        target_invoice: None,
+                        has_blinded_paths: has_blinded,
+                    }
+                }
+                PaymentMethod::Bolt12(offer_data) => {
+                    let parsed = crate::bolt12::parse_bolt12_offer(&offer_data.offer).ok();
+                    let has_blinded = parsed
+                        .as_ref()
+                        .map(|o| o.has_blinded_paths())
+                        .unwrap_or(false);
+                    SwapDirective::Bolt12Payment {
+                        offer: offer_data.offer.clone(),
+                        target_invoice: None,
+                        has_blinded_paths: has_blinded,
+                    }
+                }
+                _ => SwapDirective::LightningPayment {
+                    target_ln_address: ln_address,
+                },
+            };
             let fee = estimate_lightning_fee_sats(req.amount_sats);
             return Ok(RouteQuote {
                 selected_method: ln.clone(),
@@ -102,9 +140,7 @@ pub async fn select_route(req: &RouteRequest) -> satspath_core::Result<RouteQuot
                 estimated_fee_sats: Some(fee),
                 estimated_confirmation: Some("instant".into()),
                 fee_snapshot: None,
-                swap_directive: SwapDirective::LightningPayment {
-                    target_ln_address: ln_address,
-                },
+                swap_directive,
                 execution: None,
                 wallet_hint: None,
             });
@@ -254,6 +290,38 @@ pub fn select_route_with_fees(
                 } => lightning_address.clone(),
                 _ => None,
             };
+            let swap_directive = match ln {
+                PaymentMethod::Lightning {
+                    bolt12: Some(offer),
+                    ..
+                } => {
+                    let parsed = crate::bolt12::parse_bolt12_offer(offer).ok();
+                    let has_blinded = parsed
+                        .as_ref()
+                        .map(|o| o.has_blinded_paths())
+                        .unwrap_or(false);
+                    SwapDirective::Bolt12Payment {
+                        offer: offer.clone(),
+                        target_invoice: None,
+                        has_blinded_paths: has_blinded,
+                    }
+                }
+                PaymentMethod::Bolt12(offer_data) => {
+                    let parsed = crate::bolt12::parse_bolt12_offer(&offer_data.offer).ok();
+                    let has_blinded = parsed
+                        .as_ref()
+                        .map(|o| o.has_blinded_paths())
+                        .unwrap_or(false);
+                    SwapDirective::Bolt12Payment {
+                        offer: offer_data.offer.clone(),
+                        target_invoice: None,
+                        has_blinded_paths: has_blinded,
+                    }
+                }
+                _ => SwapDirective::LightningPayment {
+                    target_ln_address: ln_address,
+                },
+            };
             let fee = estimate_lightning_fee_sats(req.amount_sats);
             return Ok(RouteQuote {
                 selected_method: ln.clone(),
@@ -264,9 +332,7 @@ pub fn select_route_with_fees(
                 estimated_fee_sats: Some(fee),
                 estimated_confirmation: Some("instant".into()),
                 fee_snapshot: None,
-                swap_directive: SwapDirective::LightningPayment {
-                    target_ln_address: ln_address,
-                },
+                swap_directive,
                 execution: None,
                 wallet_hint: None,
             });

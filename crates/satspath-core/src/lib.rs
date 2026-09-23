@@ -70,8 +70,8 @@ pub use platform::{
 pub use pointer::{BitcoinNetwork, PaymentPointer};
 pub use privacy::{canonical_identifier, identifier_hash, validate_ascii_identifier};
 pub use profile::{
-    ClaimPolicy, Invite, InviteRecord, InviteStatus, PaymentMethod, PaymentProfile, PaymentRequest,
-    SignedPaymentProfile,
+    Bolt12Offer, ClaimPolicy, Invite, InviteRecord, InviteStatus, PaymentMethod, PaymentProfile,
+    PaymentRequest, SignedPaymentProfile,
 };
 pub use rotation::{
     apply_key_rotation, get_effective_identity_pubkey, is_rotation_valid, rotate_identity_key,

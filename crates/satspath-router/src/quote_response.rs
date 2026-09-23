@@ -309,16 +309,52 @@ async fn route_verified_signed(
         }
     };
 
-    // 6. Best-effort upgrade Lightning to a concrete BOLT11 invoice.
+    // 6. Best-effort upgrade Lightning / BOLT12 to a concrete invoice.
     if fetch_ln_invoice {
-        if let PaymentMethod::Lightning {
-            lightning_address: Some(addr),
-            ..
-        } = &route.selected_method
-        {
-            if let Ok(invoice) = fetch_real_invoice(addr, amount_sats).await {
-                qr = invoice;
+        match &route.selected_method {
+            PaymentMethod::Lightning {
+                lightning_address: Some(addr),
+                ..
+            } => {
+                if let Ok(invoice) = fetch_real_invoice(addr, amount_sats).await {
+                    qr = invoice;
+                }
             }
+            PaymentMethod::Lightning {
+                bolt12: Some(offer_str),
+                lightning_address: None,
+                ..
+            } => {
+                if let Ok(offer) = crate::bolt12::parse_bolt12_offer(offer_str) {
+                    if let Ok(invoice) = crate::bolt12::fetch_bolt12_invoice(
+                        &offer,
+                        amount_sats * 1_000,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                    {
+                        qr = invoice.invoice;
+                    }
+                }
+            }
+            PaymentMethod::Bolt12(offer_data) => {
+                if let Ok(offer) = crate::bolt12::parse_bolt12_offer(&offer_data.offer) {
+                    if let Ok(invoice) = crate::bolt12::fetch_bolt12_invoice(
+                        &offer,
+                        amount_sats * 1_000,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                    {
+                        qr = invoice.invoice;
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
