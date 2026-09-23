@@ -257,6 +257,51 @@ pub(crate) struct SendRequest {
     pub(crate) routing_ok: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct ClaimRequest {
+    pub(crate) invite_id: String,
+    pub(crate) alias: String,
+    #[serde(default)]
+    pub(crate) signed_profile: Option<satspath_core::SignedPaymentProfile>,
+    #[serde(default)]
+    pub(crate) lightning_address: Option<String>,
+    #[serde(default)]
+    pub(crate) onchain_address: Option<String>,
+    #[serde(default)]
+    pub(crate) onchain_pubkey: Option<String>,
+    #[serde(default)]
+    pub(crate) ark_server: Option<String>,
+    #[serde(default)]
+    pub(crate) ark_pubkey: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ClaimResponse {
+    pub(crate) status: String,
+    pub(crate) invite_id: String,
+    pub(crate) alias: String,
+    pub(crate) amount_sats: u64,
+    pub(crate) profile_pubkey: String,
+    pub(crate) claimed_at: i64,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct InspectInviteResponse {
+    pub(crate) invite_id: String,
+    pub(crate) identifier_hash: String,
+    pub(crate) display_hint: String,
+    pub(crate) amount_sats: u64,
+    pub(crate) memo: Option<String>,
+    pub(crate) status: satspath_core::InviteStatus,
+    pub(crate) is_expired: bool,
+    pub(crate) is_claimable: bool,
+    pub(crate) created_at: i64,
+    pub(crate) expires_at: i64,
+    pub(crate) sender_verified: bool,
+    pub(crate) sender_pubkey: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Helper to build PaymentMethod list from wallet state
 // ---------------------------------------------------------------------------

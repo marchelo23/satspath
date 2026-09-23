@@ -6,6 +6,11 @@ use tiny_http::{Method, Request, StatusCode};
 use crate::auth::check_auth;
 use crate::config::AppState;
 use crate::handlers::{
+    claim::{
+        claim_invite_handler, inspect_invite_handler, list_invites_handler,
+        list_notifications_handler, mark_all_notifications_read_handler,
+        mark_notification_read_handler,
+    },
     profile::{
         create_challenge, profile_response, rotate_profile_key, update_profile,
         update_profile_methods, verify_challenge,
@@ -16,7 +21,7 @@ use crate::handlers::{
     status::{node_response, status_response},
     transparency::{
         anchor_latest_checkpoint, consistency_from_query, namespace_descriptor, paginated,
-        transparency_log,
+        query_str, transparency_log,
     },
 };
 use crate::http::{
@@ -24,7 +29,7 @@ use crate::http::{
 };
 use crate::rate_limit;
 use crate::types::{
-    safety_warnings, AliasRequest, ConsistencyVerifyRequest, DnsResolveRequest,
+    safety_warnings, AliasRequest, ClaimRequest, ConsistencyVerifyRequest, DnsResolveRequest,
     InclusionVerifyRequest, PayRequest, PreviewResponse, ProfileUpdateRequest, QuoteRequest,
     ReceiveRequest, SendRequest, VerifyRequest,
 };
@@ -72,6 +77,7 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
     let is_mutation = !matches!(method, Method::Get | Method::Head | Method::Options);
     let is_public_mutation = path == "/v1/receive"
         || path == "/v1/send"
+        || path == "/v1/claim"
         || path == "/v1/dns/resolve"
         || path == "/v1/transparency/verify/inclusion"
         || path == "/v2/resolve";
@@ -85,7 +91,7 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
 
     let response = match (method.clone(), path.as_str()) {
         (Method::Options, _) => empty_response(StatusCode(204)),
-        (Method::Get, "/") => html_response(INDEX_HTML),
+        (Method::Get, "/") | (Method::Get, "/claim") => html_response(INDEX_HTML),
         (Method::Get, "/v1/diagnostics/rate_limit") => {
             json_response(StatusCode(200), &state.rate_limiter.stats())
         }
@@ -342,6 +348,56 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
             }
             Err(e) => json_error(StatusCode(400), e),
         },
+        (Method::Get, p) if p.starts_with("/v1/claim") => {
+            let invite_id = query_str(&raw_url, "invite_id").or_else(|| {
+                let sub = p.trim_start_matches("/v1/claim").trim_start_matches('/');
+                if !sub.is_empty() {
+                    Some(sub.to_string())
+                } else {
+                    None
+                }
+            });
+            match invite_id {
+                Some(id) => json_result(StatusCode(200), inspect_invite_handler(state, &id)),
+                None => json_error(
+                    StatusCode(400),
+                    anyhow::anyhow!("missing 'invite_id' query parameter or path segment"),
+                ),
+            }
+        }
+        (Method::Post, "/v1/claim") => {
+            let _guard = state.mutation_lock.lock().await;
+            match read_json::<ClaimRequest>(&mut request) {
+                Ok(body) => match claim_invite_handler(state, body) {
+                    Ok(resp) => json_response(StatusCode(200), &resp),
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        let status = if err_str.contains("not found") {
+                            StatusCode(404)
+                        } else if err_str.contains("already been claimed") {
+                            StatusCode(409)
+                        } else {
+                            StatusCode(400)
+                        };
+                        json_error(status, e)
+                    }
+                },
+                Err(e) => handle_read_error(e),
+            }
+        }
+        (Method::Get, "/v1/invites") => json_result(StatusCode(200), list_invites_handler(state)),
+        (Method::Get, "/v1/invites/notifications") => {
+            json_result(StatusCode(200), list_notifications_handler(state))
+        }
+        (Method::Post, "/v1/invites/notifications/read-all") => {
+            json_result(StatusCode(200), mark_all_notifications_read_handler(state))
+        }
+        (Method::Post, p) if p.starts_with("/v1/invites/notifications/") => {
+            let id = p
+                .trim_start_matches("/v1/invites/notifications/")
+                .trim_end_matches("/read");
+            json_result(StatusCode(200), mark_notification_read_handler(state, id))
+        }
         _ => json_error(StatusCode(404), anyhow::anyhow!("endpoint not found")),
     };
     request.respond(response)?;

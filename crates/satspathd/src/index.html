@@ -448,12 +448,14 @@
     <nav>
       <button data-tab="send" class="active">Send</button>
       <button data-tab="receive">Receive</button>
+      <button data-tab="claim" id="nav-claim">Claim</button>
       <button data-tab="profile">My Profile</button>
       <button data-tab="transparency">Transparency</button>
     </nav>
 
     <!-- SEND -->
     <section id="tab-send">
+      <div id="s-notifications" class="card hidden" style="margin-bottom:20px; border-color: rgba(52, 211, 153, 0.4); background: rgba(52, 211, 153, 0.08);"></div>
       <h2>Send Payment</h2>
       <p class="tagline">Decentralized, non-custodial path routing.</p>
       
@@ -471,6 +473,55 @@
       
       <div class="card hidden" id="s-card"></div>
       <div class="err hidden" id="s-err"></div>
+    </section>
+
+    <!-- CLAIM -->
+    <section id="tab-claim" class="hidden">
+      <h2>Claim Payment Invite</h2>
+      <p class="tagline">Non-custodial claim &bull; keys generated locally &bull; SatsPath never sees your seed</p>
+      
+      <div class="card" id="c-inspect-card">
+        <div class="field-group">
+          <label>Invite ID or Claim Link</label>
+          <div style="display:flex; gap:8px;">
+            <input id="c-invite-id" type="text" placeholder="UUID or paste claim link" autocomplete="off" style="flex:1;" />
+            <button class="action" id="c-inspect-btn" style="width:auto; padding:0 20px; margin:0;">Inspect</button>
+          </div>
+        </div>
+        <div id="c-details" class="hidden" style="margin-top:16px;"></div>
+      </div>
+
+      <div class="card hidden" id="c-claim-box" style="margin-top:20px;">
+        <h3 style="font-family: var(--font-mono); font-size:16px; margin-bottom:8px;">Claim &amp; Publish Payment Profile</h3>
+        <p class="reason" style="margin-bottom:16px;">
+          Configure your public receive pointers. Your identity keys remain strictly local in your wallet/daemon.
+        </p>
+
+        <div class="field-group">
+          <label>Your Identifier / Alias</label>
+          <input id="c-alias" type="text" placeholder="alice@example.com" />
+        </div>
+
+        <div class="field-group">
+          <label>Lightning Address (optional)</label>
+          <input id="c-ln" type="text" placeholder="alice@getalby.com" />
+        </div>
+
+        <div class="field-group">
+          <label>Bitcoin On-chain Address (optional)</label>
+          <input id="c-onchain" type="text" placeholder="bc1q... or tb1q..." />
+        </div>
+
+        <div class="field-group">
+          <label>Ark Server URL (optional)</label>
+          <input id="c-ark-server" type="text" placeholder="https://ark.example.com" />
+        </div>
+
+        <button class="action" id="c-claim-go">Publish Profile &amp; Claim Payment</button>
+      </div>
+
+      <div class="card hidden" id="c-result-card" style="margin-top:20px;"></div>
+      <div class="err hidden" id="c-err" style="margin-top:20px;"></div>
     </section>
 
     <section id="tab-transparency" class="hidden" aria-live="polite">
@@ -634,11 +685,13 @@
   };
 
   // Tab switching logic
-  document.querySelectorAll("nav button").forEach(b => b.addEventListener("click", () => {
-    document.querySelectorAll("nav button").forEach(x => x.classList.toggle("active", x === b));
-    ["send","receive","profile","transparency"].forEach(t => $("tab-" + t).classList.toggle("hidden", t !== b.dataset.tab));
-    if (b.dataset.tab === "transparency") loadTransparency();
-  }));
+  const switchTab = (tabName) => {
+    document.querySelectorAll("nav button").forEach(x => x.classList.toggle("active", x.dataset.tab === tabName));
+    ["send","receive","claim","profile","transparency"].forEach(t => $("tab-" + t).classList.toggle("hidden", t !== tabName));
+    if (tabName === "transparency") loadTransparency();
+    if (tabName === "send") loadNotifications();
+  };
+  document.querySelectorAll("nav button").forEach(b => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 
   let transparencyLoaded = false, transparencyEvents = [], transparencyCheckpoints = [], latestCheckpoint = null, treeScale = 1, treePan = 0;
   const hexBytes = h => new Uint8Array((h.match(/.{2}/g) || []).map(x => parseInt(x, 16)));
@@ -937,6 +990,174 @@
     } catch (e) { err.textContent = e.message; show(err); }
     finally { btn.disabled = false; }
   });
+
+  // CLAIM & NOTIFICATIONS
+  const loadNotifications = async () => {
+    try {
+      const box = $("s-notifications");
+      const r = await fetch("/v1/invites/notifications");
+      if (!r.ok) return;
+      const notes = await r.json();
+      const unread = notes.filter(n => !n.read);
+      if (unread.length === 0) {
+        hide(box);
+        return;
+      }
+      box.innerHTML = unread.map(n => `
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+          <div>
+            <span style="color:#34d399; font-weight:700;">[Claimed Invite]</span>
+            <strong>${esc(n.display_hint)}</strong> has claimed their invite for <strong>${n.amount_sats.toLocaleString()} sats</strong>!
+          </div>
+          <div style="display:flex; gap:8px;">
+            <button class="action" style="width:auto; padding:6px 14px; margin:0; font-size:12px;" onclick="fillSend('${esc(n.display_hint)}', ${n.amount_sats}, '${esc(n.notification_id)}')">
+              Send Payment Now
+            </button>
+            <button style="background:none; border:1px solid var(--border); color:var(--text-muted); border-radius:6px; padding:4px 8px; cursor:pointer;" onclick="dismissNotification('${esc(n.notification_id)}')">
+              Dismiss
+            </button>
+          </div>
+        </div>
+      `).join("");
+      show(box);
+    } catch (_) {}
+  };
+
+  window.fillSend = async (recipient, amount, notificationId) => {
+    if (notificationId) {
+      fetch("/v1/invites/notifications/" + encodeURIComponent(notificationId) + "/read", {method: "POST"}).catch(()=>{});
+    }
+    $("s-recipient").value = recipient;
+    $("s-amount").value = amount;
+    switchTab("send");
+    $("s-go").click();
+  };
+
+  window.dismissNotification = async (notificationId) => {
+    await fetch("/v1/invites/notifications/" + encodeURIComponent(notificationId) + "/read", {method: "POST"}).catch(()=>{});
+    loadNotifications();
+  };
+
+  const inspectInvite = async (rawInput) => {
+    const input = (rawInput || $("c-invite-id").value).trim();
+    if (!input) return;
+    let inviteId = input;
+    if (input.includes("invite_id=")) {
+      const match = input.match(/[?&]invite_id=([^&#]+)/);
+      if (match) inviteId = decodeURIComponent(match[1]);
+    } else if (input.includes("/")) {
+      inviteId = input.split("/").pop().split("?")[0];
+    }
+    $("c-invite-id").value = inviteId;
+
+    const details = $("c-details"), claimBox = $("c-claim-box"), resCard = $("c-result-card"), err = $("c-err");
+    hide(details); hide(claimBox); hide(resCard); hide(err);
+
+    try {
+      const r = await fetch("/v1/claim?invite_id=" + encodeURIComponent(inviteId));
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+
+      details.innerHTML = `
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+          <span class="rail-badge ${d.is_claimable ? 'ark' : 'onchain'}">${esc(d.status)}</span>
+          <span style="font-family:var(--font-mono); font-size:18px; color:var(--lightning); font-weight:700;">
+            ${d.amount_sats.toLocaleString()} sats
+          </span>
+        </div>
+        <div class="who">Recipient: ${esc(d.display_hint)}</div>
+        ${d.memo ? `<div class="reason" style="margin-top:6px;">Memo: ${esc(d.memo)}</div>` : ''}
+        <div style="font-size:12px; color:var(--text-muted); margin-top:10px;">
+          ${d.sender_verified ? '<span style="color:#34d399;">&check; Sender signature verified</span>' : 'Sender signature not attached'}
+          &bull; ${d.is_expired ? '<span style="color:#f87171;">Expired</span>' : 'Expires in ' + Math.max(0, Math.round((d.expires_at - Math.floor(Date.now()/1000))/3600)) + ' hours'}
+        </div>
+      `;
+      show(details);
+
+      if (d.is_claimable) {
+        show(claimBox);
+      } else {
+        resCard.innerHTML = `<div class="reason" style="color:#f87171;">This invite cannot be claimed (status: ${esc(d.status)}).</div>`;
+        show(resCard);
+      }
+    } catch (e) {
+      err.textContent = e.message;
+      show(err);
+    }
+  };
+
+  $("c-inspect-btn").addEventListener("click", () => inspectInvite());
+  $("c-invite-id").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); inspectInvite(); }
+  });
+
+  $("c-claim-go").addEventListener("click", async () => {
+    const btn = $("c-claim-go"), resCard = $("c-result-card"), err = $("c-err");
+    hide(resCard); hide(err); btn.disabled = true;
+    try {
+      const invite_id = $("c-invite-id").value.trim();
+      const alias = $("c-alias").value.trim();
+      const ln = $("c-ln").value.trim();
+      const onchain = $("c-onchain").value.trim();
+      const ark = $("c-ark-server").value.trim();
+
+      if (!invite_id) throw new Error("Invite ID is required.");
+      if (!alias) throw new Error("Please enter your identifier / alias.");
+      if (!ln && !onchain && !ark) throw new Error("Please provide at least one receive method (Lightning, Onchain, or Ark).");
+
+      const body = {
+        invite_id,
+        alias,
+        lightning_address: ln || undefined,
+        onchain_address: onchain || undefined,
+        ark_server: ark || undefined,
+      };
+
+      const r = await fetch("/v1/claim", {
+        method: "POST",
+        headers: {"content-type": "application/json"},
+        body: JSON.stringify(body)
+      });
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+
+      hide($("c-claim-box"));
+      resCard.innerHTML = `
+        <div style="text-align:center; padding:12px;">
+          <div style="font-size:36px; margin-bottom:12px;">&#10004;</div>
+          <h3 style="font-family:var(--font-mono); color:#34d399; margin-bottom:8px;">Invite Successfully Claimed!</h3>
+          <p class="reason" style="margin-bottom:16px;">
+            Your payment profile for <strong>${esc(d.alias)}</strong> is now published in the transparency log.
+          </p>
+          <div class="payload-box" style="font-size:12px; margin-bottom:16px;">
+            Public Key: ${esc(d.profile_pubkey)}
+          </div>
+          <p class="reason" style="font-size:12px;">
+            The sender has been notified and can now complete the payment handoff directly to your receive methods.
+          </p>
+        </div>
+      `;
+      show(resCard);
+    } catch (e) {
+      err.textContent = e.message;
+      show(err);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // URL Query and deep-linking initialization
+  const urlParams = new URLSearchParams(window.location.search);
+  const paramInvite = urlParams.get("invite_id") || urlParams.get("token");
+  if (paramInvite || window.location.pathname === "/claim") {
+    switchTab("claim");
+    if (paramInvite) {
+      $("c-invite-id").value = paramInvite;
+      inspectInvite(paramInvite);
+    }
+  } else {
+    loadNotifications();
+  }
 </script>
 </body>
 </html>
