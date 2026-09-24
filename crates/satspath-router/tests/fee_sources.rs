@@ -1,10 +1,10 @@
 use mockito::Server;
 use satspath_router::fees::{
-    clear_cached_fee, current_time_secs, update_cached_fee, FeeEstimate, FeeEstimatorConfig,
-    FeeSource, FALLBACK_FEES,
+    current_time_secs, CachedEstimate, FeeEstimate, FeeEstimatorConfig, FeeSource, FALLBACK_FEES,
 };
 use satspath_router::fetch_fee_estimate_with_config;
 use serde_json::json;
+use std::sync::{Arc, RwLock};
 
 #[tokio::test]
 async fn test_esplora_mock_fee_estimation() {
@@ -36,7 +36,9 @@ async fn test_esplora_mock_fee_estimation() {
         min_sources_for_consensus: 1,
         max_staleness_secs: 1800,
         request_timeout_ms: 2000,
-    };
+        cache: None,
+    }
+    .with_isolated_cache();
 
     let report = fetch_fee_estimate_with_config(&config)
         .await
@@ -133,7 +135,9 @@ async fn test_bitcoin_core_rpc_mock_fee_estimation() {
         min_sources_for_consensus: 1,
         max_staleness_secs: 1800,
         request_timeout_ms: 2000,
-    };
+        cache: None,
+    }
+    .with_isolated_cache();
 
     let report = fetch_fee_estimate_with_config(&config)
         .await
@@ -221,7 +225,9 @@ async fn test_multi_source_consensus_neutralizes_malicious_oracle() {
         min_sources_for_consensus: 2,
         max_staleness_secs: 1800,
         request_timeout_ms: 2000,
-    };
+        cache: None,
+    }
+    .with_isolated_cache();
 
     let report = fetch_fee_estimate_with_config(&config)
         .await
@@ -242,8 +248,6 @@ async fn test_multi_source_consensus_neutralizes_malicious_oracle() {
 
 #[tokio::test]
 async fn test_offline_decaying_cache_and_staleness_fallback() {
-    clear_cached_fee();
-
     let cached_time = current_time_secs();
     let initial_estimate = FeeEstimate {
         fastest_fee: 50,
@@ -252,11 +256,12 @@ async fn test_offline_decaying_cache_and_staleness_fallback() {
         economy_fee: 20,
         minimum_fee: 5,
     };
-    update_cached_fee(
-        initial_estimate.clone(),
-        vec!["preloaded_oracle".into()],
-        cached_time,
-    );
+
+    let isolated_cache = Arc::new(RwLock::new(Some(CachedEstimate {
+        estimate: initial_estimate.clone(),
+        timestamp_secs: cached_time,
+        sources_used: vec!["preloaded_oracle".into()],
+    })));
 
     // Point config to non-existent endpoint to simulate total offline network partition
     let config = FeeEstimatorConfig {
@@ -266,6 +271,7 @@ async fn test_offline_decaying_cache_and_staleness_fallback() {
         min_sources_for_consensus: 1,
         max_staleness_secs: 3600,
         request_timeout_ms: 100,
+        cache: Some(isolated_cache.clone()),
     };
 
     let report = fetch_fee_estimate_with_config(&config)
@@ -279,11 +285,11 @@ async fn test_offline_decaying_cache_and_staleness_fallback() {
 
     // Now test staleness cutoff: simulate an expired cache timestamp older than max_staleness
     let expired_timestamp = cached_time.saturating_sub(7200); // 2 hours ago
-    update_cached_fee(
-        initial_estimate,
-        vec!["preloaded_oracle".into()],
-        expired_timestamp,
-    );
+    *isolated_cache.write().unwrap() = Some(CachedEstimate {
+        estimate: initial_estimate,
+        timestamp_secs: expired_timestamp,
+        sources_used: vec!["preloaded_oracle".into()],
+    });
 
     let expired_report = fetch_fee_estimate_with_config(&config)
         .await
@@ -292,6 +298,4 @@ async fn test_offline_decaying_cache_and_staleness_fallback() {
     // Stale cache is rejected, falling back to FALLBACK_FEES
     assert_eq!(expired_report.estimate, FALLBACK_FEES);
     assert!(!expired_report.is_from_cache);
-
-    clear_cached_fee();
 }
