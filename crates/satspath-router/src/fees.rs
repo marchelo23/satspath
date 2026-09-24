@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use satspath_core::{Result, SatsPathError};
 
@@ -165,6 +165,9 @@ pub struct FeeEstimatorConfig {
     pub max_staleness_secs: u64,
     /// Request timeout in milliseconds for each oracle call (default: 3000ms).
     pub request_timeout_ms: u64,
+    /// Optional isolated cache for testing or independent estimator instances.
+    #[serde(skip)]
+    pub cache: Option<Arc<RwLock<Option<CachedEstimate>>>>,
 }
 
 impl Default for FeeEstimatorConfig {
@@ -296,7 +299,14 @@ impl FeeEstimatorConfig {
             min_sources_for_consensus,
             max_staleness_secs,
             request_timeout_ms,
+            cache: None,
         }
+    }
+
+    /// Create a copy of this configuration bound to an isolated cache.
+    pub fn with_isolated_cache(mut self) -> Self {
+        self.cache = Some(Arc::new(RwLock::new(None)));
+        self
     }
 }
 
@@ -597,9 +607,31 @@ pub mod native_fees {
             }
         }
 
+        let update_cache = |est: FeeEstimate, src: Vec<String>, ts: u64| {
+            if let Some(ref c) = config.cache {
+                if let Ok(mut lock) = c.write() {
+                    *lock = Some(CachedEstimate {
+                        estimate: est,
+                        timestamp_secs: ts,
+                        sources_used: src,
+                    });
+                }
+            } else {
+                update_cached_fee(est, src, ts);
+            }
+        };
+
+        let read_cache = || -> Option<CachedEstimate> {
+            if let Some(ref c) = config.cache {
+                c.read().ok().and_then(|lock| lock.clone())
+            } else {
+                get_cached_fee()
+            }
+        };
+
         if successful_estimates.len() >= config.min_sources_for_consensus {
             if let Some(consensus) = compute_median_fee(&successful_estimates) {
-                update_cached_fee(consensus.clone(), sources_used.clone(), now);
+                update_cache(consensus.clone(), sources_used.clone(), now);
                 return Ok(ConsensusFeeReport {
                     estimate: consensus,
                     timestamp_secs: now,
@@ -613,7 +645,7 @@ pub mod native_fees {
         }
 
         // Fallback: check cached estimate with decay
-        if let Some(cached) = get_cached_fee() {
+        if let Some(cached) = read_cache() {
             let elapsed = now.saturating_sub(cached.timestamp_secs);
             if elapsed < config.max_staleness_secs {
                 let decayed = decay_estimate(&cached.estimate, elapsed, config.max_staleness_secs);
