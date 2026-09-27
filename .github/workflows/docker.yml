@@ -80,7 +80,7 @@ jobs:
           output: trivy-cli.sarif
           severity: CRITICAL,HIGH
           ignore-unfixed: true
-          exit-code: "0"
+          exit-code: "1"
 
       - name: Upload Trivy scan results (CLI)
         if: always()

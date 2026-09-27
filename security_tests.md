@@ -138,7 +138,7 @@ test test_attack_p2p_dht_scraping_privacy ... ok
 
 ✅ SETUP: Payload broadcasted to P2P network.
 ⚔️ ATTACK 8 (Part 2): Sniffer intercepts the P2P payload in-transit and modifies the Testnet address...
-🛡️ DEFENSE SUCCESS: The receiving Rust Core detected the P2P MITM corruption and aborted the Testnet payment.
+🛡️ DEFENSE SUCCESS: The receiving Rust Core detected the P2P MITM corruption and aborted wallet-handoff generation.
 test test_attack_p2p_in_transit_corruption ... ok
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -179,7 +179,7 @@ test test_attack_pqc_downgrade ... ok
 
 ✅ SETUP: Analyzing DNS BIP-353 Resolver configuration...
 ⚔️ ATTACK 11: Malicious Wi-Fi attempts to poison DNS cache and return fake TXT records...
-🛡️ DEFENSE SUCCESS: DNSSEC validation is strictly enforced by default (`opts.validate = true`). Untrusted DNS responses will be rejected by the protocol layer.
+🛡️ DEFENSE SUCCESS: Strict DNSSEC policy rejected the unauthenticated result. The default DoH backend does not independently validate DNSSEC, so Strict mode fails closed unless authenticated DNSSEC evidence is available.
 test test_attack_dns_spoofing ... ok
 
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s

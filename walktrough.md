@@ -49,7 +49,7 @@ SatsPath is built around a strict cryptographic separation of identity and trans
 1. **Lightning Network:** Selected for smaller amounts (< 100k sats). It handles LNURL-pay two-step fetches and parses BOLT11 invoices to verify amounts.
 2. **On-chain:** Selected for larger amounts when fees are acceptable. Includes support for Silent Payments (`sp1...` keys) which are seamlessly integrated into the generated `bitcoin:` URIs.
 3. **Ark:** Fallback for when fees are high. Provides Ark payment pointers. (Client-side DAG validation is delegated to the integrating wallet).
-4. **BOLT12 (Experimental / Partial):** Native offer decoding (TLV/bech32m), blinded path extraction, and experimental invoice request structures are implemented in `satspath-router`. Official all-TLV Merkle tree hashing and full live CLN/LDK node interoperability are undergoing validation. An optional HTTP proxy scaffold (`proxy-workers/bolt12`) is available for environments without direct node RPC.
+4. **BOLT12 (Experimental / Partial):** Offer parsing, TLV decoding, blinded path extraction, and experimental invoice request structures are implemented in `satspath-router`. Official all-TLV Merkle tree hashing and full live CLN/LDK node interoperability are undergoing validation. An optional HTTP proxy scaffold (`proxy-workers/bolt12`) is available for environments without direct node RPC.
 
 ## What is Implemented vs. What is Not
 

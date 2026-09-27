@@ -196,7 +196,7 @@ Wire behavior is documented in [wire_p2p.md](./wire_p2p.md).
 Known v1/v2 implementation gaps:
 
 - **DNSSEC Local Validation:** BIP-353 strict mode requires an embedded validating resolver to avoid relying on upstream resolver flags or failing closed.
-- **BOLT12 Interoperability:** Bech32m offer decoding and blinded path extraction are implemented, but all-TLV Merkle tree hashing and full invoice-request interoperability against live CLN/LDK implementations are still being validated.
+- **BOLT12 Interoperability:** Offer parsing and blinded path extraction are implemented, but official all-TLV Merkle tree hashing and full invoice-request interoperability against live CLN/LDK implementations are still being validated.
 - **Silent Payments Interoperability:** Experimental BIP-352 support is implemented; full conformance validation against official BIP-352 test vectors is ongoing.
 - **External Security Audit:** Independent third-party cryptographic and security audit is required before recommending real-funds production usage.
 - **Ark Settlement:** Ark remains preview / simulated (receive pointers and routing exist; live ASP round execution is mocked).
