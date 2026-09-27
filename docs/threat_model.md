@@ -14,7 +14,7 @@ This document establishes the threat model for the SatsPath protocol prototype, 
 2. **Custody Risk vs. Payment Redirection Risk:** Compromising SatsPath does not directly expose wallet spending keys or authorize Bitcoin transactions. However, a compromised discovery or handoff component may attempt payment redirection, which is why authenticated profiles, key continuity, resolver verification, and wallet-side confirmation of amounts and destinations remain security-critical.
 3. **Payment Execution Sovereignty:** SatsPath discovers and validates payment capabilities, then hands off public instructions (BOLT11/12 invoices, BIP-21 URIs, Ark pointers) to the user's host wallet. The host wallet signs and executes the transaction.
 4. **No Unauthenticated State:** A resolver or network transport is untrusted. Unverified, malformed, expired, or conflicting profile data fails closed.
-5. **Attributable Operator State:** Servers and log operators must commit to an append-only event history and sign public checkpoints. Equivocation and rollbacks produce cryptographic evidence of misbehavior.
+5. **Attributable Operator State:** Servers and log operators must commit to an append-only event history and sign public checkpoints. Signed equivocation can produce attributable cryptographic evidence. Rollback attempts are detected against pinned monotonic state and rejected.
 
 ---
 
@@ -24,7 +24,7 @@ SatsPath avoids collapsing security guarantees into an ambiguous `verified: true
 
 | Property | Definition | Component Guaranteeing It | Underlying Assumption | Failure Mode / Limitation |
 | :--- | :--- | :--- | :--- | :--- |
-| **Integrity** | Payload has not been modified in transit. | Profile Schnorr Signature (`BIP-340`) over canonical JSON | `secp256k1` signature unforgeability (ECDLP/ROM) | Fails closed on semantic modification of signed profile fields that changes their RFC 8785 canonical representation. |
+| **Integrity** | Payload has not been modified in transit. | Profile Schnorr Signature (`BIP-340`) over canonical JSON | `secp256k1` signature unforgeability (ECDLP/ROM) | Fails closed on semantic modifications to signed profile fields that change their RFC 8785 canonical representation. |
 | **Authenticity** | Profile is authorized by the current controller of the identity key. | Domain-separated signature (`SatsPathProfileV1`) | Private key generated securely on user device and never leaked | Does not prove initial domain/namespace ownership. |
 | **Freshness** | Profile represents current, unexpired payment capabilities. | `expires_at` timestamps, monotonic sequence numbers | Synchronized client wall clock within acceptable drift | Stale profiles are rejected once expiration timestamp passes. |
 | **Consistency** | All verifiers observe identical, append-only history without forks. | RFC 6962-style Merkle log, signed checkpoints, witness quorum ($K$-of-$N$) | At least $(N - K + 1)$ honest, non-colluding witnesses | Local pinning detects local forks; global split-views require gossip monitors. |
@@ -86,7 +86,7 @@ SatsPath implements experimental BIP-352 Silent Payments for private on-chain se
 2. **Dual-Key Isolation:** Recipient advertises a scan key ($B_{\text{scan}}$) and spend key ($B_{\text{spend}}$). Online scanning nodes require only $b_{\text{scan}}$ to detect incoming funds, keeping $b_{\text{spend}}$ cold.
 3. **Tagged Hashing Domain Separation:** Hashes conform to BIP-340/352 (`BIP0352/Inputs` and `BIP0352/SharedSecret`) ensuring scalar tweaks cannot collide with Taproot script trees.
 4. **Input Outpoint Binding:** Lexicographically smallest outpoint ($outpoint_L$) is committed to prevent tweak malleability across multi-input transactions.
-5. **Conformance Status:** Experimental Silent Payments primitives and address/output construction are implemented. BIP-352 conformance and interoperability remain unverified until the official send/receive test vectors pass.
+5. **Conformance Status:** Experimental BIP-352 primitives and address/output construction are implemented. Standards conformance and mainnet interoperability are not claimed until the official BIP-352 test vectors pass.
 
 ---
 

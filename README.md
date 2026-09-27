@@ -60,7 +60,7 @@ A Lightning Address (`user@domain.com`) exclusively targets a Lightning receivin
 
 ### What Works Today, What is Experimental, and What Has Not Been Audited?
 * **Implemented Today:** Signed profiles, key rotation, HTTPS/Nostr resolvers, multi-source fee consensus, append-only Merkle transparency log, sparse Merkle state map, and witness quorum cosigning.
-* **Preview / Experimental:** BIP-353 (Preview; strict DNSSEC fails closed without local validator), BOLT12 (Experimental / Partial; prototype TLV, offer-handling, and blinded-path primitives exist; standards-conformant checksumless BOLT12 string decoding, invoice-request construction, Merkle signing, and CLN/LDK interop remain incomplete), Silent Payments (Experimental; primitives and address/output construction implemented; official BIP-352 test vectors and interop remain unverified), Ark routing (Preview; ASP rounds simulated).
+* **Preview / Experimental:** BIP-353 (Preview; strict DNSSEC fails closed without local validator), BOLT12 (Experimental / Partial; prototype TLV, offer-handling, and blinded-path primitives exist; standards-conformant checksumless BOLT12 string decoding, invoice-request construction, Merkle signing, and CLN/LDK interop remain incomplete), Silent Payments (Experimental; primitives and address/output construction implemented; standards conformance and mainnet interoperability are not claimed until the official BIP-352 test vectors pass), Ark routing (Preview; ASP rounds simulated).
 * **Audit Status:** SatsPath has completed internal test suites and automated adversarial simulations, but has **NOT yet undergone an independent third-party cryptographic or security audit**.
 
 Website: <https://satspath.com>
@@ -129,7 +129,7 @@ This table reflects the actual status of the codebase (`crates/`) verified by un
 | **Lightning Address / LNURL** | **IMPLEMENTED** | Resolves public metadata and requests concrete BOLT11 invoices for wallet handoff. |
 | **BOLT12 Offers & Blinded Paths**| **EXPERIMENTAL (Partial)** | Prototype TLV, offer-handling, and blinded-path primitives exist (`crates/satspath-router/src/bolt12.rs`), but standards-conformant checksumless BOLT12 string decoding, invoice-request construction, Merkle signing, and interoperability with implementations such as Core Lightning and LDK remain incomplete. |
 | **On-Chain / BIP-21** | **IMPLEMENTED** | Network address validation (mainnet, testnet, regtest), dynamic fee estimation, and `bitcoin:` BIP-21 URI formatting. |
-| **Silent Payments (BIP-352)** | **EXPERIMENTAL** | Experimental Silent Payments primitives and address/output construction are implemented (`crates/satspath-router/src/silent_payments.rs`). BIP-352 conformance and interoperability remain unverified until the official send/receive test vectors pass. |
+| **Silent Payments (BIP-352)** | **EXPERIMENTAL** | Experimental BIP-352 primitives and address/output construction are implemented (`crates/satspath-router/src/silent_payments.rs`). Standards conformance and mainnet interoperability are not claimed until the official BIP-352 test vectors pass. |
 | **Multi-Source Fee Consensus** | **IMPLEMENTED** | Concurrent queries across Bitcoin Core RPC, Esplora, and Mempool.space with median filtering and decaying cache fallback (`crates/satspath-router/src/fees.rs`). |
 | **S2S v2 Transparency Log** | **IMPLEMENTED** | Append-only Merkle event log, RFC 6962-style compact consistency proofs, and signed operator checkpoints (`crates/satspath-core/src/transparency.rs`). |
 | **Authenticated State Map** | **IMPLEMENTED** | Sparse Merkle tree generating cryptographic non-inclusion proofs, bound to checkpoint root (`crates/satspath-core/src/state_map.rs`). |
@@ -194,7 +194,7 @@ flowchart TD
 ```
 
 1. **Namespace Authority Acknowledged:** Human-readable names (`user@domain.com` or `₿user@domain.com`) fundamentally depend on underlying namespace authorities (DNS registrars, DNSSEC zone owners, WebPKI, or platform domain registries). A domain owner retains the technical ability to censor, revoke, or cease publishing an identifier. SatsPath does not claim to eliminate this external dependency.
-2. **Cryptographic Protection Against Impersonation:** Once an identity binding has been independently authenticated or pinned, cryptographic verification and key continuity are designed to prevent a namespace provider from silently replacing the user's authenticated payment capabilities or identity keys.
+2. **Cryptographic Protection Against Impersonation:** Once an identity binding has been independently authenticated or pinned, cryptographic verification and key continuity are designed to prevent a namespace provider from silently replacing authenticated payment capabilities or identity keys.
 3. **Attributable Misbehavior:** If an adversarial server replaces Alice's key or serves an unauthorized profile, clients fail verification (such as an unauthorized key replacement or checkpoint inclusion mismatch failure). The server cannot forge an authorized transition without the required signing key. Invalid transitions fail verification, while signed equivocation can produce attributable cryptographic evidence.
 
 ---
@@ -222,7 +222,7 @@ When a client contacts an identifier for the very first time without prior key p
 The witness protocol requires a $K$-of-$N$ threshold (e.g. 2-of-3 or 3-of-5). If fewer than $K$ witnesses are compromised, the rogue operator cannot obtain the cosignatures needed to validate an equivocation. If $K$ or more witnesses collude with the operator to forge a split view, clients on disparate branches cannot detect the fork locally until checkpoints are audited or gossiped out-of-band.
 
 ### 6. Does SatsPath work on Bitcoin Mainnet today?
-**For public discovery and wallet handoff: YES (with documented limitations).** SatsPath can resolve mainnet Lightning Addresses, fetch mainnet BOLT11 invoices, inspect prototype BOLT12 offer payloads, construct experimental BIP-352 Silent Payment addresses, and generate mainnet BIP-21 URIs. Standards-conformant BOLT12 string decoding and official BIP-352 vector validation remain experimental.  
+**For public discovery and wallet handoff: YES (with documented limitations).** SatsPath can resolve mainnet Lightning Addresses, fetch mainnet BOLT11 invoices, and generate mainnet BIP-21 URIs. Experimental BOLT12 handling exists, but standards-conformant mainnet interoperability is not yet claimed. Experimental BIP-352 primitives and address/output construction are implemented, but standards conformance and mainnet interoperability are not claimed until the official BIP-352 test vectors pass.  
 **For transaction execution: NO.** SatsPath does not connect to the Bitcoin P2P network to broadcast transactions, does not manage UTXOs, and does not hold spending keys. Execution is delegated to the user's wallet.
 
 ### 7. Has SatsPath been externally audited?

@@ -12,7 +12,7 @@ The current codebase (`crates/`) implements and tests the following capabilities
 * **Multi-Transport Resolver Chain (IMPLEMENTED):** Local registry, HTTPS `.well-known/satspath-authority`, and Nostr (NIP-05 and kind 30078).
 * **BIP-353 DNS Resolution (PREVIEW):** Record parsing and strict DNSSEC policy enforcement are implemented. The default DoH backend does not independently validate the DNSSEC chain; Strict mode therefore requires authenticated DNSSEC results and fails closed otherwise.
 * **BOLT12 Handling (EXPERIMENTAL / PARTIAL):** Prototype TLV, offer-handling, and blinded-path primitives exist (`crates/satspath-router/src/bolt12.rs`), but standards-conformant checksumless BOLT12 string decoding, invoice-request construction, Merkle signing, and interoperability with implementations such as Core Lightning and LDK remain incomplete.
-* **Silent Payments BIP-352 (EXPERIMENTAL):** Experimental Silent Payments primitives and address/output construction are implemented (`crates/satspath-router/src/silent_payments.rs`). BIP-352 conformance and interoperability remain unverified until the official send/receive test vectors pass.
+* **Silent Payments BIP-352 (EXPERIMENTAL):** Experimental BIP-352 primitives and address/output construction are implemented (`crates/satspath-router/src/silent_payments.rs`). Standards conformance and mainnet interoperability are not claimed until the official BIP-352 test vectors pass.
 * **Multi-Source Fee Estimation (IMPLEMENTED):** Concurrent queries to Bitcoin Core RPC, Esplora, and Mempool.space with median consensus filtering and decaying cache fallback (`crates/satspath-router/src/fees.rs`).
 * **S2S v2 Transparency & State Map (IMPLEMENTED):** Append-only RFC 6962 Merkle log, signed operator checkpoints, client pin store, and Sparse Merkle state map for non-inclusion proofs (`crates/satspath-core/src/state_map.rs`).
 * **Witness Quorum Cosigning (IMPLEMENTED):** Standalone witness node daemon (`crates/satspath-witness`) performing $K$-of-$N$ Schnorr cosigning, consistency proof verification, and local rollback/equivocation detection.
@@ -32,7 +32,7 @@ The v0.2 milestone focuses on external validation, production hardening, and wal
 * Independent threat modeling and penetration testing of `satspathd` reverse proxy and SSRF defenses.
 
 ### B. Decentralized Infrastructure & Protocol Conformance
-* **Official BOLT12 TLV Merkle Tree Alignment:** Implement the full all-TLV Merkle tree algorithm and execute conformance suites against Core Lightning and LDK test vectors.
+* **Official BOLT12 Conformance:** Implement standards-conformant checksumless string decoding, all-TLV Merkle tree root hashing, invoice-request construction, and execute conformance suites against Core Lightning and LDK test vectors.
 * **Official BIP-352 Conformance:** Import and validate the standard BIP-352 test vectors into `satspath-router`.
 * **Cross-Witness Gossip:** Implement public alert and gossip mechanisms between independent witness nodes to broadcast detected equivocation or split-view checkpoints in real-time.
 * **Embedded DNSSEC Validator:** Integrate a lightweight local DNSSEC validator into `satspath-core` to enable `DnssecPolicy::Strict` without relying on external system resolvers.

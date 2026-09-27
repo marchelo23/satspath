@@ -62,8 +62,8 @@ SatsPath is built around a strict cryptographic separation of identity and trans
 | Live multi-source fee consensus | **IMPLEMENTED** | Core RPC, Esplora, Mempool median filtering |
 | Lightning rail selection & LNURL invoice fetch | **IMPLEMENTED** | Generates handoff invoice payload |
 | On-chain rail & BIP-21 URI formatting | **IMPLEMENTED** | Generates standard `bitcoin:` URI |
-| BOLT12 prototype primitives & blinded paths | **EXPERIMENTAL (Partial)** | Standards-conformant string parsing and CLN/LDK interop unverified |
-| Experimental Silent Payments (BIP-352) | **EXPERIMENTAL** | Primitives implemented; official BIP-352 test vectors unverified |
+| BOLT12 prototype primitives & blinded paths | **EXPERIMENTAL (Partial)** | Standards-conformant string decoding and CLN/LDK interop incomplete |
+| Experimental Silent Payments (BIP-352) | **EXPERIMENTAL** | Primitives implemented; standards conformance & mainnet interop not claimed until vectors pass |
 | Ark fallback rail selection | **PREVIEW** | Pointers and routing exist; ASP rounds simulated |
 | Terminal QR code (Dense1x2 unicode) | **IMPLEMENTED** | CLI preview display |
 | LocalPeerRegistry (SHA-256 keyed, no raw email) | **IMPLEMENTED** | Local state storage |
