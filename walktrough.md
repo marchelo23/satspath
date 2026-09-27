@@ -36,19 +36,19 @@ The project has been pruned into a minimal, standalone backend ecosystem focused
 
 ## Security and Cryptography
 
-SatsPath is built with a strict Zero-Trust model:
+SatsPath is built around a strict cryptographic separation of identity and transport:
 
-- **Post-Quantum Cryptography (PQC):** Uses a hybrid signature scheme (`ML-DSA-65-Schnorr`) for generating and verifying identity keys. The engine validates that keys and signatures conform to these robust standards, while keeping execution times in the microsecond range.
+- **Identity Cryptography:** Classical `secp256k1` Schnorr signatures (BIP-340) form the primary identity layer. A hybrid post-quantum module (`ML-DSA-65-Schnorr`) is provided in `crates/satspath-pqc` as an experimental research primitive.
 - **SSRF Protection:** Resolvers strictly validate URLs and block loopback, private, and internal metadata IP ranges (e.g., `169.254.169.254`) to prevent malicious profile endpoints from exploiting internal networks.
 - **Nostr Concurrency & Tombstoning:** Downloads profiles from multiple Nostr relays concurrently to ensure the most recent sequence is used, effectively preventing downgrade attacks. It strictly rejects revoked (tombstoned) profiles.
-- **Safe Persistence:** All local state (`.satspath/`) uses SHA-256 keyed storage. Sensitive swap material is stored using AES-256-GCM encryption, and plaintext writing is strictly guarded against.
+- **Safe Persistence:** Local state uses SHA-256 keyed indexing (preventing accidental plaintext disclosure, though low-entropy aliases remain susceptible to offline dictionary enumeration). Sensitive swap material is encrypted via AES-256-GCM.
 
 ## Supported Payment Rails
 
 1. **Lightning Network:** Selected for smaller amounts (< 100k sats). It handles LNURL-pay two-step fetches and parses BOLT11 invoices to verify amounts.
 2. **On-chain:** Selected for larger amounts when fees are acceptable. Includes support for Silent Payments (`sp1...` keys) which are seamlessly integrated into the generated `bitcoin:` URIs.
 3. **Ark:** Fallback for when fees are high. Provides Ark payment pointers. (Client-side DAG validation is delegated to the integrating wallet).
-4. **BOLT12:** An HTTP proxy scaffold (`proxy-workers/bolt12`) is available to resolve BOLT12 offers to real BOLT11 invoices asynchronously when native LNURL is unavailable.
+4. **BOLT12:** Native offer decoding (TLV/bech32m), blinded path routing, invoice request generation, and invoice validation are implemented in `satspath-router`. An optional HTTP proxy scaffold (`proxy-workers/bolt12`) is available for environments without direct node RPC.
 
 ## What is Implemented vs. What is Not
 
@@ -68,8 +68,8 @@ SatsPath is built with a strict Zero-Trust model:
 | LocalPeerRegistry (SHA-256 keyed, no raw email)               | ✅                            |
 | SwapStore AES-256-GCM encryption & sensitive guards           | ✅                            |
 | Boltz API client & Swap creation (testnet scaffolding)        | ✅ scaffold                   |
-| Claim/Refund transaction construction                         | ❌ Out of scope               |
-| PSBT signing                                                  | ❌ Out of scope               |
+| Claim/Refund transaction construction                         | ✅ Implemented (Testnet scaffolding in satspath-swaps) |
+| PSBT signing                                                  | ❌ Out of scope (Delegated to Wallet) |
 | Ark VTXO DAG validation                                       | ❌ Delegated to Wallet        |
 | Mainnet swap execution                                        | ❌ Intentionally out of scope |
 

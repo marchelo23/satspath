@@ -7,11 +7,15 @@ The implementation must be understood as a protocol stack, not as a single P2P s
 ## Repository Layout
 
 ```txt
-crates/satspath-core      protocol data types, signatures, resolvers, validation
-crates/satspath-router    quote response contract and route selection
+crates/satspath-core      protocol data types, signatures, resolvers, validation, transparency log, state map
+crates/satspath-router    quote response contract, fee consensus, BOLT12, Silent Payments, route selection
 crates/satspath-cli       command-line reference client
-crates/satspathd          local daemon and HTTP API
-docs/                     protocol and operational documentation
+crates/satspathd          local / authoritative daemon and HTTP API
+crates/satspath-witness   independent witness node and K-of-N checkpoint cosigner
+crates/satspath-wasm      WebAssembly bindings for browser / wallet integrations
+crates/satspath-swaps     experimental testnet/regtest swap scaffolding (Boltz v2)
+crates/satspath-pqc       experimental post-quantum hybrid signature research module (ML-DSA-65)
+docs/                     protocol, security, and operational documentation
 ```
 
 ## Core Protocol Types
@@ -178,14 +182,14 @@ Wire behavior is documented in [wire_p2p.md](./wire_p2p.md).
 
 ## Current Gaps
 
-Known v1 implementation gaps:
+Known v1/v2 implementation gaps:
 
-- DNSSEC strict mode needs a local DNSSEC-validating resolver to fully trust BIP-353 on mainnet.
-- Nostr publishing is not yet exposed as a Rust CLI command; use a Nostr client to publish the kind 30078 event. Platform resolvers are scaffolds.
-- Resolver provenance is not yet carried through `ProfileResolver`, so signed-profile quote responses mark `identifier_verified: false` unless a direct BIP-353 preview provides DNSSEC validation.
-- Mainnet payment execution is intentionally not implemented.
-- P2P wire envelopes should be formalized in the SDK to match [wire_p2p.md](./wire_p2p.md).
-- Method ownership proofs exist in core but need broader resolver integration.
+- DNSSEC strict mode requires an embedded validating resolver to avoid relying on upstream resolver flags.
+- Independent external cryptographic and security audit is required before recommending real-funds production usage.
+- Ark settlement remains preview / simulated (receive pointers and routing exist; live ASP round execution is mocked).
+- Mainnet payment execution and transaction signing are deliberately unsupported (delegated to host wallets).
+- Cross-witness public gossip protocol for real-time split-view alerting is designed but not yet deployed.
+- Method ownership proofs exist in core and are enforced for quotes, with wider resolver adoption ongoing.
 
 ## Conformance Checklist
 

@@ -33,9 +33,9 @@ The attack simulations confirm that the core protocol cryptography is robust aga
 **Scenario**: An attacker attempts to hijack a user's alias by injecting a `KeyRotation` object pointing to the attacker's newly generated key. The attacker signs the rotation transition with their own key since they don't hold the original user's private key.
 **Result**: **PASS**. The `is_rotation_valid` protocol validator rejects the rotation. Key rotation transitions must be signed by the _previous_ secret key to authorize the transition. The defense successfully prevented the unauthorized hijack.
 
-> **TIP:**
-> **Production Readiness**
-> The signature and key-rotation foundations are secure. The protocol relies on standard, heavily-tested cryptographic primitives (`secp256k1` Schnorr signatures). Assuming the private keys are generated securely on the user's local device, these vectors are fully protected in production.
+> **NOTE:**
+> **Cryptographic Assumptions & Scope**
+> The signature and key-rotation mechanisms rely on standard `secp256k1` Schnorr signatures (BIP-340) and canonical JSON serialization. These tests confirm that the implementation correctly rejects forged profiles and unauthorized rotations in covered scenarios, assuming user private keys are generated securely on local devices and never exposed.
 
 # SatsPath Router Security & Attack Simulations - Results
 
@@ -82,9 +82,9 @@ The attack simulations confirm that the `satspath-router` incorporates strong de
 **Scenario**: An attacker generates an excessively large invoice (e.g. 10 BTC) and attempts to force it through Lightning (L2) where it is highly likely to fail or trap liquidity in HTLCs.
 **Result**: **PASS**. The router identified the transaction size as exceeding the `LARGE_PAYMENT_SATS` safety threshold. Even if fees were manipulated to force the router away from L1, it explicitly bypassed Lightning for this massive amount and selected Ark (L3) to protect the user from L2 liquidity traps.
 
-> **TIP:**
-> **Production Readiness**
-> The router's logic operates as a strict, inert priority pipeline. It does not blindly trust external inputs (like fee oracles or requested payment amounts) without subjecting them to internal safety thresholds. These simulations prove the router will fail-safe or gracefully degrade to alternative rails when under attack.
+> **NOTE:**
+> **Routing Heuristic Boundaries**
+> The router logic functions as an internal priority pipeline evaluated against local safety thresholds. These tests validate that the router fails safe or gracefully selects alternative advertised rails under simulated adversarial conditions (such as extreme fees or channel routing failures). They validate implemented heuristics, but do not replace comprehensive multi-node testing under live network congestion.
 
 # SatsPath Advanced Security Simulations - Results
 
@@ -121,9 +121,9 @@ The attack simulations confirm that SatsPath is protected against advanced netwo
 **Scenario**: An attacker stores a cryptographically valid profile generated 6 months ago. They replay it to a client today in an attempt to route funds to an old, compromised payment method.
 **Result**: **PASS**. Despite the ECDSA/Schnorr signatures being perfectly valid, the protocol strictly enforces `check_profile_expiry`. The router checks the `expires_at` timestamp against the current wall-clock time and aggressively rejects the zombie profile.
 
-> **TIP:**
-> **Production Readiness**
-> Combined with the previous tests, SatsPath's cryptography, routing heuristics, and network boundaries have proven to be exceptionally robust. The system is safe against tampering, routing censorship, L2 liquidity traps, SSRF, and replay attacks.
+> **NOTE:**
+> **Coverage Scope**
+> Combined with previous test suites, these simulations validate that the implementation enforces expiration checks, SSRF boundary guards, and signature verification. They demonstrate resilience against the simulated attack vectors within the tested scope. They do not constitute a formal security proof or eliminate the need for independent external audits.
 
 # SatsPath P2P Testnet Security Simulations - Results
 
@@ -137,7 +137,7 @@ running 2 tests
 
 ⚔️ ATTACK 8 (Part 1): Sniffer listens to the Hyperswarm DHT announcements...
 🔍 SNIFFER SEES: Announcing on DHT Topic: 18605124289845250c7d2c090b952b2341e96df723a93033e557020f5bd8b181
-🛡️ DEFENSE SUCCESS: Privacy Rule P2P-03 enforced. Alias is mathematically obfuscated.
+🛡️ DEFENSE SUCCESS: Privacy Rule P2P-03 enforced. Alias is hashed prior to network broadcast.
 test test_attack_p2p_dht_scraping_privacy ... ok
 
 ✅ SETUP: Payload broadcasted to P2P network.
@@ -155,16 +155,16 @@ The attack simulations confirm that the P2P integration (Pear/Hyperswarm) safely
 ### Attack 8 (Part 1): P2P DHT Scraping Privacy
 
 **Scenario**: A malicious node on the Hyperswarm DHT listens to all traffic in an attempt to scrape user aliases (emails) to build a spam list or track users.
-**Result**: **PASS**. As mandated by Privacy Rule P2P-03, the daemon hashes the alias (`SHA256`) before it even touches the network. The attacker only sees an opaque 64-character hash (e.g., `18605124...`). It is mathematically unfeasible to reverse this hash to find the plain text alias, guaranteeing privacy.
+**Result**: **PASS**. As mandated by Privacy Rule P2P-03, the daemon hashes the alias (`SHA256`) before it touches the network. The passive network eavesdropper observes an opaque 64-character hash (e.g., `18605124...`) instead of plaintext. Note: Hashing identifiers prevents direct plaintext disclosure, but low-entropy identifiers such as email-like aliases remain susceptible to offline dictionary enumeration and rainbow-table attacks. Hashing alone must not be characterized as complete privacy against a motivated adversary.
 
 ### Attack 8 (Part 2): In-Transit MITM Corruption
 
 **Scenario**: A Man-in-the-Middle (MITM) attacker or malicious P2P node intercepts the JSON profile as it is being downloaded by the payer. The attacker swaps the Testnet Lightning address with their own to steal the testnet coins.
 **Result**: **PASS**. Although the P2P layer successfully transports the modified payload, the receiving Rust Core acts as the final arbiter. The `verify_signed_profile` function recalculates the signature over the corrupted payload, detects the discrepancy, and safely aborts the payment flow.
 
-> **TIP:**
-> **Production Readiness**
-> These tests definitively prove that the P2P transport layer does not require trust. The system's security architecture—where trust is anchored locally via cryptography rather than network transport—functions exactly as intended. The CLI and GUI clients can safely operate on Mainnet or Testnet over public, untrusted networks.
+> **NOTE:**
+> **Transport Trust Boundary**
+> These tests validate that the protocol verifies cryptographic signatures and rejects tampered payloads regardless of the underlying transport layer. Untrusted network transports cannot forge valid profiles without possessing the user's private key. However, this represents testnet and development testing; SatsPath does not execute mainnet payments, and production deployment requires external cryptographic review.
 
 # SatsPath Extreme Security Simulations - Results
 
@@ -182,7 +182,7 @@ test test_attack_memory_exhaustion_dos ... ok
 
 ✅ SETUP: User requires Post-Quantum Cryptography (pqc_required = true)...
 ⚔️ ATTACK 10: Attacker intercepts JSON and switches pqc_required to FALSE to downgrade security...
-🛡️ DEFENSE SUCCESS: Cryptographic downgrade is impossible. The Schnorr signature covers the PQC flag and explicitly rejected the modification.
+🛡️ DEFENSE SUCCESS: Cryptographic downgrade rejected. The Schnorr signature covers the canonical profile including the PQC flag and explicitly rejects modified payloads.
 test test_attack_pqc_downgrade ... ok
 
 ✅ SETUP: Analyzing DNS BIP-353 Resolver configuration...
