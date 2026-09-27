@@ -42,7 +42,7 @@ SatsPath operates strictly on **public payment data** to generate wallet handoff
 1. **Resolve:** Fetches the signed profile for the given identifier.
 2. **Verify:** Validates cryptographic signatures, sequence freshness, and expiration.
 3. **Route:** Evaluates fees and policies across available receiving methods.
-4. **Handoff:** Formats the selected method into a standard Bitcoin payment payload (`bitcoin:` URI, BOLT11 invoice, BOLT12 offer/invoice, or Ark pointer) or QR code.
+4. **Handoff:** Formats the selected method into a wallet handoff payload (`bitcoin:` URI, BOLT11 invoice, experimental BOLT12 structure, Ark pointer, or QR code), subject to the capability-specific maturity and interoperability limits documented above.
 5. **Execution:** The host wallet scans or receives the handoff payload, prompts the user for confirmation, signs with the user's spending key, and broadcasts to the Bitcoin or Lightning network.
 
 Safe CLI preview commands:

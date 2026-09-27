@@ -52,7 +52,7 @@ A Lightning Address (`user@domain.com`) exclusively targets a Lightning receivin
 
 ### What Does SatsPath Trust?
 * **Namespace Authorities (DNS, WebPKI, Platforms):** Acknowledged as having authority to assign, revoke, or censor names. They cannot, however, forge cryptographic identity signatures without detection.
-* **Initial Contact (TOFU):** First-contact lookup relies on Trust-On-First-Use unless corroborated out-of-band or by trusted witness quorums.
+* **Initial Contact (TOFU):** First-contact identity authentication relies on Trust-On-First-Use unless the namespace-to-key binding is independently verified out-of-band or through another trusted identity anchor. Witness quorums can improve consistency and split-view detection but do not by themselves authenticate the initial binding.
 * **Log Operators & Witnesses:** Monitored via append-only Merkle logs and $K$-of-$N$ Schnorr witness quorums to detect split views and rollbacks.
 
 ### Who Holds the Private Keys?
@@ -286,7 +286,7 @@ SatsPath is developed as **free and open-source public infrastructure** for the 
 * **Non-Profit & Open Source:** Licensed under MIT. No proprietary protocols, no closed APIs.
 * **No Token, No Rent-Seeking:** SatsPath does not issue a token, take a fee cut, or impose transaction taxes.
 * **Self-Custody Preserving:** Designed specifically to empower sovereign, non-custodial Bitcoin wallets.
-* **Interoperability First:** Composable with existing standards (BIP-21, BIP-352, BIP-353, BOLT11, BOLT12, Nostr).
+* **Interoperability First:** Integrates with existing Bitcoin and Lightning standards where implemented (such as BIP-21, BOLT11, BIP-353, and Nostr-based transports), while experimental BIP-352 and BOLT12 interoperability remains under validation.
 * **Hackathon Origins:** Originated at the **Plan ₿ Summer School 2026 in Lugano**, winning **2nd place in the hackathon**.
 
 ---

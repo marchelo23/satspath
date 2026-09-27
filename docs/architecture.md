@@ -61,7 +61,7 @@ satspath/
 | Crate | Maturity Status | Role & Safety Boundary |
 | :--- | :--- | :--- |
 | **`satspath-core`** | **IMPLEMENTED** | Core protocol primitives: profile schemas, canonical RFC 8785 JSON, `secp256k1` Schnorr signatures, append-only Merkle log, Sparse Merkle state map, and resolver chain. |
-| **`satspath-router`** | **IMPLEMENTED** | Evaluates payment methods, aggregates multi-source fee estimates (Bitcoin Core RPC, Esplora, Mempool), resolves BOLT12 offers and blinded paths, computes BIP-352 Silent Payment outputs, and formats wallet handoffs. |
+| **`satspath-router`** | **IMPLEMENTED** | Evaluates payment methods, aggregates multi-source fee estimates, formats wallet handoffs, and contains experimental BOLT12 and BIP-352 handling primitives subject to the capability-specific maturity limits documented in README.md. |
 | **`satspath-cli`** | **IMPLEMENTED** | Developer tool for local profile generation, proof verification, route simulation, and QR generation. Does not execute mainnet payments. |
 | **`satspathd`** | **IMPLEMENTED** | Server-to-server daemon exposing authenticated profile endpoints, transparency logs, signed checkpoints, and rate-limiting defenses. |
 | **`satspath-witness`**| **IMPLEMENTED** | Lightweight monitor node that tracks daemon checkpoints, independently verifies consistency proofs, cosigns checkpoints via Schnorr signatures, and detects split views. |
