@@ -4,18 +4,22 @@ This document summarizes the verified implementation status of SatsPath and outl
 
 ---
 
-## 1. Verified Implemented Capabilities
+## 1. Verified Capability Status
 
 The current codebase (`crates/`) implements and tests the following capabilities:
 
-* **Core Protocol Specification & Cryptography:** Canonical JSON serialization (RFC 8785), domain-separated `secp256k1` Schnorr signatures (BIP-340), monotonic sequence tracking, and dual-signed key rotation.
-* **Multi-Transport Resolver Chain:** Local registry, HTTPS `.well-known/satspath-authority`, BIP-353 DNS resolution (with DNSSEC fail-closed policy), and Nostr (NIP-05 and kind 30078).
-* **BOLT12 Native Handling:** Bech32m TLV offer decoding, blinded path extraction, signed invoice requests, and invoice validation (`crates/satspath-router/src/bolt12.rs`).
-* **Silent Payments (BIP-352):** Public key derivation, tagged hashing (`BIP0352/Inputs`, `BIP0352/SharedSecret`), multi-input aggregation, output computation, and BIP-21 URI formatting (`crates/satspath-router/src/silent_payments.rs`).
-* **Multi-Source Fee Estimation:** Concurrent queries to Bitcoin Core RPC, Esplora, and Mempool.space with median consensus filtering and decaying cache fallback (`crates/satspath-router/src/fees.rs`).
-* **S2S v2 Transparency & State Map:** Append-only RFC 6962 Merkle log, signed operator checkpoints, client pin store, and Sparse Merkle state map for non-inclusion proofs (`crates/satspath-core/src/state_map.rs`).
-* **Witness Quorum Cosigning:** Standalone witness node daemon (`crates/satspath-witness`) performing $K$-of-$N$ Schnorr cosigning, consistency proof verification, and local rollback/equivocation detection.
-* **Containerized Daemons & CLI:** Reference binaries for development and testing (`satspath-cli`, `satspathd`, `satspath-witness`).
+* **Core Protocol Specification & Cryptography (IMPLEMENTED):** Canonical JSON serialization (RFC 8785), domain-separated `secp256k1` Schnorr signatures (BIP-340), monotonic sequence tracking, and dual-signed key rotation.
+* **Multi-Transport Resolver Chain (IMPLEMENTED):** Local registry, HTTPS `.well-known/satspath-authority`, and Nostr (NIP-05 and kind 30078).
+* **BIP-353 DNS Resolution (PREVIEW):** Record parsing and strict DNSSEC policy enforcement are implemented. The default DoH backend does not independently validate the DNSSEC chain; Strict mode therefore requires authenticated DNSSEC results and fails closed otherwise.
+* **BOLT12 Native Handling (EXPERIMENTAL / PARTIAL):** Bech32m TLV offer decoding (`lno1...`), blinded path extraction, and experimental invoice request structures (`crates/satspath-router/src/bolt12.rs`). Official all-TLV Merkle tree hashing and full interoperability against live CLN/LDK implementations are still being validated.
+* **Silent Payments BIP-352 (EXPERIMENTAL):** Public scan/spend key derivation, tagged hashing (`BIP0352/Inputs`, `BIP0352/SharedSecret`), multi-input key aggregation, and ephemeral Taproot output derivation (`crates/satspath-router/src/silent_payments.rs`). Conformance testing against official BIP-352 test vectors is ongoing.
+* **Multi-Source Fee Estimation (IMPLEMENTED):** Concurrent queries to Bitcoin Core RPC, Esplora, and Mempool.space with median consensus filtering and decaying cache fallback (`crates/satspath-router/src/fees.rs`).
+* **S2S v2 Transparency & State Map (IMPLEMENTED):** Append-only RFC 6962 Merkle log, signed operator checkpoints, client pin store, and Sparse Merkle state map for non-inclusion proofs (`crates/satspath-core/src/state_map.rs`).
+* **Witness Quorum Cosigning (IMPLEMENTED):** Standalone witness node daemon (`crates/satspath-witness`) performing $K$-of-$N$ Schnorr cosigning, consistency proof verification, and local rollback/equivocation detection.
+* **Ark Payment Routing (PREVIEW):** Receive pointer parsing and route scoring exist; live Ark ASP VTXO round execution is simulated (`crates/satspath-router/src/ark.rs`).
+* **Submarine / Reverse Swaps (EXPERIMENTAL):** Boltz Exchange v2 client, encrypted store (AES-256-GCM), and claim/refund tx builders for testnet/regtest only (`crates/satspath-swaps`).
+* **Post-Quantum Cryptography (RESEARCH):** Hybrid signature research module (`secp256k1` + ML-DSA-65) in `crates/satspath-pqc`.
+* **Containerized Daemons & CLI (IMPLEMENTED):** Reference binaries for development and testing (`satspath-cli`, `satspathd`, `satspath-witness`).
 
 ---
 
@@ -27,7 +31,9 @@ The v0.2 milestone focuses on external validation, production hardening, and wal
 * Independent third-party cryptographic review of canonical serialization, Merkle proof verifiers, key rotation, and domain-separated signing schemes.
 * Independent threat modeling and penetration testing of `satspathd` reverse proxy and SSRF defenses.
 
-### B. Decentralized Infrastructure & Witness Federation
+### B. Decentralized Infrastructure & Protocol Conformance
+* **Official BOLT12 TLV Merkle Tree Alignment:** Implement the full all-TLV Merkle tree algorithm and execute conformance suites against Core Lightning and LDK test vectors.
+* **Official BIP-352 Conformance:** Import and validate the standard BIP-352 test vectors into `satspath-router`.
 * **Cross-Witness Gossip:** Implement public alert and gossip mechanisms between independent witness nodes to broadcast detected equivocation or split-view checkpoints in real-time.
 * **Embedded DNSSEC Validator:** Integrate a lightweight local DNSSEC validator into `satspath-core` to enable `DnssecPolicy::Strict` without relying on external system resolvers.
 

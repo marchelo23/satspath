@@ -11,9 +11,10 @@ This document establishes the threat model for the SatsPath protocol prototype, 
 ### Core Invariants
 
 1. **Non-Custodial Separation:** SatsPath never generates, stores, or transmits Bitcoin spending keys, wallet seeds, BIP-39 mnemonics, or Lightning macaroons. Identity keypairs (`secp256k1`) sign public payment profiles and rotation records; they carry zero spending authority.
-2. **Payment Execution Sovereignty:** SatsPath discovers and validates payment capabilities, then hands off public instructions (BOLT11/12 invoices, BIP-21 URIs, Ark pointers) to the user's host wallet. The host wallet signs and executes the transaction.
-3. **No Unauthenticated State:** A resolver or network transport is untrusted. Unverified, malformed, expired, or conflicting profile data fails closed.
-4. **Attributable Operator State:** Servers and log operators must commit to an append-only event history and sign public checkpoints. Equivocation and rollbacks produce cryptographic evidence of misbehavior.
+2. **Custody Risk vs. Payment Redirection Risk:** Compromising SatsPath does not directly expose wallet spending keys or authorize Bitcoin transactions. However, a compromised discovery or handoff component may attempt payment redirection, which is why authenticated profiles, key continuity, resolver verification, and wallet-side confirmation of amounts and destinations remain security-critical.
+3. **Payment Execution Sovereignty:** SatsPath discovers and validates payment capabilities, then hands off public instructions (BOLT11/12 invoices, BIP-21 URIs, Ark pointers) to the user's host wallet. The host wallet signs and executes the transaction.
+4. **No Unauthenticated State:** A resolver or network transport is untrusted. Unverified, malformed, expired, or conflicting profile data fails closed.
+5. **Attributable Operator State:** Servers and log operators must commit to an append-only event history and sign public checkpoints. Equivocation and rollbacks produce cryptographic evidence of misbehavior.
 
 ---
 
@@ -39,8 +40,7 @@ When a client queries an identifier for the very first time without prior out-of
 
 * **What TOFU Protects Against:** Once a client observes and pins an initial checkpoint (`log_id`, operator key, sequence, root hash), subsequent attacks attempting to roll back history, present a lower tree size, or substitute an unauthorized operator key are detected immediately and rejected.
 * **What TOFU Does NOT Protect Against:** If an active man-in-the-middle attacker or rogue namespace operator controls resolution during the *initial first contact*, the client may pin the attacker's fraudulent state, provided the attacker can satisfy transport proofs.
-* **Mitigation via Witness Quorum:** S2S v2 requires checkpoints to be cosigned by an independent witness quorum ($K$-of-$N$). A single rogue operator cannot serve an un-witnessed root without failing quorum checks.
-* **Future Work:** Universal public gossip networks and transparency monitors will allow cross-client consistency checks, removing remaining TOFU windows.
+* **Mitigation via Witness Quorum & Gossip:** S2S v2 requires checkpoints to be cosigned by an independent witness quorum ($K$-of-$N$). A single rogue operator cannot serve an un-witnessed root without failing quorum checks. Future cross-witness gossip can reduce first-contact consistency risk and improve split-view detection, but does not by itself authenticate the initial namespace-to-key binding without out-of-band verification.
 
 ---
 
@@ -60,18 +60,18 @@ SatsPath uses `SHA256(canonical_identifier)` for internal indexation and transpo
 | :--- | :--- | :--- | :--- | :--- |
 | **Malicious Resolver** | Resolver modifies payment addresses or swaps profiles in transit. | Client recomputes canonical SHA-256 digest and verifies Schnorr signature; fails verification. | Client executes verification in local memory; signature unforgeability. | Resolver can withhold data, causing denial of service (`Unavailable`). |
 | **Compromised Server / Registry** | Registry replaces Alice's identity key with an attacker's key. | Client verifies sequential history chain; registration requires initial key; updates require dual-signed `KeyRotation`. | Client validates full historical chain or pins predecessor checkpoint. | First-contact without history pin relies on TOFU or independent attestations. |
-| **Malicious Namespace Provider** | Provider revokes Alice's account or points `alice@domain.com` to Bob. | Client detects break in key continuity; UI flags conflicting provider identity; history chain proves provider censorship. | Client maintains pin of prior identity key for existing contacts. | Provider can refuse to resolve (censorship), forcing Alice to migrate domains. |
+| **Malicious Namespace Provider** | Provider revokes Alice's account or points `alice@domain.com` to Bob. | Client detects break in key continuity; UI flags conflicting provider identity; some forms of equivocation or history inconsistency can be cryptographically detected. | Client maintains pin of prior identity key for existing contacts. | Pure refusal to serve or publish data is an availability/censorship event and may not produce cryptographic proof. |
 | **Malicious Witness / Collusion** | Rogue witness cosigns a fraudulent or split-view checkpoint. | Quorum policy requires $K$-of-$N$ distinct signatures ($K \ge 2$); single witness cannot satisfy threshold. | At most $(K - 1)$ witnesses are compromised or collude with rogue operator. | If $\ge K$ witnesses collude with the operator, split views are undetected until audited out-of-band. |
-| **Compromised Transport (MITM)** | Network attacker intercepts HTTP or DNS traffic. | TLS certificate checks, DNSSEC validation, and end-to-end Schnorr profile signatures. | CA root store or DNS root trust anchor remains uncompromised. | Passive metadata leakage (IP address, timing, identifier hash). |
+| **Compromised Transport (MITM)** | Network attacker intercepts HTTP or DNS traffic. | TLS certificate checks, strict DNSSEC fail-closed policy, and end-to-end Schnorr profile signatures. | CA root store or DNS root trust anchor remains uncompromised. | Passive metadata leakage (IP address, timing, identifier hash). |
 | **Replay Attacker** | Attacker replays a valid 6-month-old profile pointing to decommissioned addresses. | Client strictly evaluates `expires_at` against current time and rejects expired profiles. | Client local clock is reasonably accurate ($\pm$ hours, not years). | Valid profiles remain replayable until their explicit `expires_at` deadline. |
 | **Rollback Attacker** | Attacker serves a valid older checkpoint to un-publish a recent rotation. | Client pins highest observed log size and sequence; rejecting any `size < pinned_size`. | Client persists monotonic pin state locally across restarts. | Fresh client without local cache relies on witness quorum freshness timestamps. |
 | **Split-View / Equivocation** | Operator serves Root A to Alice and Root B to Bob for the same log size. | Checkpoint consistency proofs (RFC 6962) and witness cosigning detect distinct roots at the same sequence. | Checkpoints must be presented to common witnesses or public monitors. | Without real-time witness gossip, split views are only detected post-facto. |
 | **Malicious Replica** | Desynchronized or hostile replica serves stale/omitted records. | Clients evaluate self-contained cryptographic envelopes; Merkle inclusion must bind to signed checkpoint. | Envelope contains valid inclusion proof to a fresh, witnessed checkpoint. | Replica can delay synchronization, appearing temporarily unreachable. |
-| **DNS Manipulation / Cache Poisoning** | Attacker injects fraudulent DNS records for BIP-353 names. | `DnssecPolicy::Strict` requires authentic DNSSEC signatures; unsigned responses fail closed. | Validating resolver has correct trust anchors (DNS root `.`). | Insecure development modes (`--allow-insecure-dns-for-dev`) disable this protection. |
+| **DNS Manipulation / Cache Poisoning** | Attacker injects fraudulent DNS records for BIP-353 names. | `DnssecPolicy::Strict` requires authentic DNSSEC results and fails closed otherwise. | Validating resolver has correct trust anchors (DNS root `.`). | Default DoH backend does not independently validate the DNSSEC chain; Strict mode therefore fails closed without authenticated DNSSEC results. |
 | **Profile / Key Substitution** | Attacker self-signs a fresh profile with an attacker key for victim's alias. | Log inclusion check verifies that the identity key matches the canonical history in the append-only tree. | Attacker cannot forge the victim's private key signature authorizing rotation. | Relies on client verifying log inclusion rather than bare self-signature. |
 | **Identifier Enumeration** | Attacker iterates rainbow tables against `SHA256(alias)` topics. | Obfuscation limits casual sniffing; rate-limiting on directory daemons. | None (SHA-256 is deterministic and public). | Low-entropy aliases (short names, popular domains) can be enumerated offline. |
 | **Payment Method Substitution** | Attacker compromises a third-party LNURL endpoint listed in profile. | SatsPath verifies LNURL metadata and match bounds; method ownership proofs bind keys to profile. | Host wallet displays payment destination details before execution. | Compromise of third-party LNURL domain can redirect payments if not pinned. |
-| **Server-Side Request Forgery (SSRF)** | Malicious alias causes resolver to query cloud metadata (`169.254.169.254`) or loopback. | `validate_url` blocks private IPv4/IPv6, loopbacks, cloud metadata, and non-whitelisted ports (80, 443). | IP resolution occurs before socket connection and re-checks DNS rebinding. | Resolver requires egress internet access to resolve legitimate public domains. |
+| **Server-Side Request Forgery (SSRF)** | Malicious alias causes resolver to query cloud metadata (`169.254.169.254`) or loopback. | `validate_url` blocks known unsafe schemes, ports, hosts, and literal private/reserved IP addresses. | URL parsing and literal IP check before network request. | DNS rebinding protection requires resolution-aware validation and connection pinning and should not be assumed unless explicitly enabled by the networking backend. |
 | **Denial of Service (DoS / JSON Bomb)** | Attacker serves multi-gigabyte payload or nested JSON. | Resolvers enforce strict byte-size limits (50KB) and stream aborts prior to JSON parsing. | Client runtime terminates connections exceeding size thresholds. | Attacker can temporarily consume network sockets until threshold triggers. |
 | **Unicode / Confusable Identifier Attacks** | Attacker registers `аlice@example.com` (Cyrillic 'а') to impersonate `alice@example.com`. | Canonical normalization: lowercase conversion, whitespace stripping, and punycode domain parsing. | Integrating wallets display punycode (`xn--`) or issue warnings on mixed scripts. | Homograph attacks require vigilance at the UI/wallet display layer. |
 
@@ -79,13 +79,14 @@ SatsPath uses `SHA256(canonical_identifier)` for internal indexation and transpo
 
 ## 6. Silent Payments (BIP-352) Security Model
 
-SatsPath implements BIP-352 Silent Payments for private on-chain settlement, decoupling sender payments from public address reuse:
+SatsPath implements experimental BIP-352 Silent Payments for private on-chain settlement, decoupling sender payments from public address reuse:
 
 ### Cryptographic Foundation
 1. **Computational Diffie-Hellman (CDH) over secp256k1:** Shared secret $S = a \cdot B_{\text{scan}} = b_{\text{scan}} \cdot A$, where $A$ is the sum of eligible input public keys and $B_{\text{scan}}$ is the recipient's scan public key.
 2. **Dual-Key Isolation:** Recipient advertises a scan key ($B_{\text{scan}}$) and spend key ($B_{\text{spend}}$). Online scanning nodes require only $b_{\text{scan}}$ to detect incoming funds, keeping $b_{\text{spend}}$ cold.
-3. **Tagged Hashing Domain Separation:** Hashes conform strictly to BIP-340/352 (`BIP0352/Inputs` and `BIP0352/SharedSecret`) ensuring scalar tweaks cannot collide with Taproot script trees.
+3. **Tagged Hashing Domain Separation:** Hashes conform to BIP-340/352 (`BIP0352/Inputs` and `BIP0352/SharedSecret`) ensuring scalar tweaks cannot collide with Taproot script trees.
 4. **Input Outpoint Binding:** Lexicographically smallest outpoint ($outpoint_L$) is committed to prevent tweak malleability across multi-input transactions.
+5. **Conformance Status:** Implementation is experimental; interoperability is still being validated against official BIP-352 test vectors.
 
 ---
 
@@ -104,7 +105,8 @@ To defend against fee manipulation where compromised or malicious oracles report
 
 Before SatsPath can be recommended for mainnet real-funds settlement:
 
-1. **Independent Cryptographic Audit:** Formal third-party review of canonical serialization, Merkle proof verifiers, and key rotation logic.
+1. **Independent Cryptographic Audit:** Formal third-party review of canonical serialization, Merkle proof verifiers, key rotation, and domain-separated signing schemes.
 2. **Decentralized Witness Quorum Deployment:** Production deployment of heterogeneous, multi-operator witnesses with public alert mechanisms.
-3. **Local DNSSEC Validation:** Native inclusion of a local validating DNSSEC resolver for BIP-353 without reliance on upstream flags.
-4. **Standardized Wallet Handoff:** Finalization of BIP-21/BOLT12 handoff specifications with major open-source Bitcoin wallets.
+3. **Local DNSSEC Validation:** Native inclusion of an embedded validating DNSSEC resolver for BIP-353 without reliance on upstream flags.
+4. **BOLT12 TLV Merkle Tree Validation:** Implementation of official all-TLV Merkle tree hashing and interoperability testing against live Core Lightning and LDK nodes.
+5. **Standardized Wallet Handoff:** Finalization of BIP-21/BOLT12 handoff specifications with major open-source Bitcoin wallets.

@@ -26,11 +26,11 @@ flowchart TD
 
 **SatsPath does not need, and never requests, the user's private spending keys.**
 
-This is not a missing feature—it is a **fundamental security property**:
+This is not a missing feature—it is an intentional **security property**:
 * **No custody of funds:** SatsPath cannot lose, seize, or freeze user funds.
 * **No seed phrases or private keys:** SatsPath never manages BIP-39 seeds, xprv/tprv keys, or node credentials.
 * **Not a wallet:** SatsPath discovers and validates payment capabilities; host wallets retain 100% control over fund authorization, coin selection, transaction signing, and network broadcast.
-* **Reduced attack surface:** Compromise of a SatsPath node or daemon cannot result in fund theft.
+* **Custody Risk vs. Payment Redirection Risk:** Compromising SatsPath does not directly expose wallet spending keys or authorize Bitcoin transactions. However, a compromised discovery or handoff component may attempt payment redirection, which is why authenticated profiles, key continuity, resolver verification, and wallet-side confirmation of destination details remain security-critical.
 
 ---
 
@@ -56,18 +56,18 @@ satspath/
 └── proxy-workers/              # Stateless edge helper workers (e.g. Cloudflare)
 ```
 
-### Crate Responsibilities
+### Crate Responsibilities & Maturity
 
-| Crate | Stability | Role & Safety Boundary |
+| Crate | Maturity Status | Role & Safety Boundary |
 | :--- | :--- | :--- |
-| **`satspath-core`** | **Stable** | Core protocol primitives: profile schemas, canonical RFC 8785 JSON, `secp256k1` Schnorr signatures, append-only Merkle log, Sparse Merkle state map, and resolver chain. |
-| **`satspath-router`** | **Stable** | Evaluates payment methods, aggregates multi-source fee estimates (Bitcoin Core RPC, Esplora, Mempool), resolves BOLT12 offers and blinded paths, computes BIP-352 Silent Payment outputs, and formats wallet handoffs. |
-| **`satspath-cli`** | **Stable** | Developer tool for local profile generation, proof verification, route simulation, and QR generation. Does not execute mainnet payments. |
-| **`satspathd`** | **Stable** | Server-to-server daemon exposing authenticated profile endpoints, transparency logs, signed checkpoints, and rate-limiting defenses. |
-| **`satspath-witness`**| **Implemented** | Lightweight monitor node that tracks daemon checkpoints, independently verifies consistency proofs, cosigns checkpoints via Schnorr signatures, and detects split views. |
-| **`satspath-wasm`** | **Preview** | Compiles core resolution and routing logic to WebAssembly for client-side execution in web apps and sovereign wallets. |
-| **`satspath-swaps`** | **Experimental**| Testnet/regtest scaffolding for Boltz v2 swaps. Encrypted local store (AES-256-GCM) and claim/refund tx builders for testnet only. |
-| **`satspath-pqc`** | **Research** | Research prototype testing hybrid classical + post-quantum signatures (`secp256k1` + ML-DSA-65). Not part of the production safety claim. |
+| **`satspath-core`** | **IMPLEMENTED** | Core protocol primitives: profile schemas, canonical RFC 8785 JSON, `secp256k1` Schnorr signatures, append-only Merkle log, Sparse Merkle state map, and resolver chain. |
+| **`satspath-router`** | **IMPLEMENTED** | Evaluates payment methods, aggregates multi-source fee estimates (Bitcoin Core RPC, Esplora, Mempool), resolves BOLT12 offers and blinded paths, computes BIP-352 Silent Payment outputs, and formats wallet handoffs. |
+| **`satspath-cli`** | **IMPLEMENTED** | Developer tool for local profile generation, proof verification, route simulation, and QR generation. Does not execute mainnet payments. |
+| **`satspathd`** | **IMPLEMENTED** | Server-to-server daemon exposing authenticated profile endpoints, transparency logs, signed checkpoints, and rate-limiting defenses. |
+| **`satspath-witness`**| **IMPLEMENTED** | Lightweight monitor node that tracks daemon checkpoints, independently verifies consistency proofs, cosigns checkpoints via Schnorr signatures, and detects split views. |
+| **`satspath-wasm`** | **PREVIEW** | Compiles core resolution and routing logic to WebAssembly for client-side execution in web apps and sovereign wallets. |
+| **`satspath-swaps`** | **EXPERIMENTAL**| Testnet/regtest scaffolding for Boltz v2 swaps. Encrypted local store (AES-256-GCM) and claim/refund tx builders for testnet only. |
+| **`satspath-pqc`** | **RESEARCH** | Research prototype testing hybrid classical + post-quantum signatures (`secp256k1` + ML-DSA-65). Not part of the production safety claim. |
 
 ---
 

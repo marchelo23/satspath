@@ -2,31 +2,31 @@
 
 **Open-source Bitcoin payment discovery and routing infrastructure.**
 
-> **One human-readable Bitcoin identity. Any compatible wallet. Multiple payment rails. No custody.**
+> **One human-readable Bitcoin identity. Compatible wallets. Multiple payment rails. Wallet-controlled custody.**
 
 [![CI](https://github.com/satspath/satspath/actions/workflows/ci.yml/badge.svg)](https://github.com/satspath/satspath/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
 
-## 60-Second Executive Summary
+## 60–90 Second Executive Summary
 
-### The Problem
-Bitcoin users today navigate a fragmented landscape of payment identifiers:
-* **Lightning Addresses** (`user@domain.com`)
-* **LNURL-pay** links
+### What is SatsPath?
+SatsPath is an open-source discovery and verification layer for human-readable Bitcoin payment identities. It resolves a single recipient identifier (e.g. `alice@example.com`) to an authenticated profile, discovers advertised payment capabilities, and formats a wallet handoff for the sender's host wallet.
+
+### What Problem Does it Solve?
+Bitcoin users face a fragmented landscape of payment identifiers:
+* **Lightning Addresses** (`user@domain.com`) & **LNURL-pay** links
 * **BOLT12 Offers** (`lno1...`)
-* **On-Chain Addresses** (SegWit, Taproot)
-* **BIP-21 URIs**
+* **On-Chain Addresses** (SegWit, Taproot) & **BIP-21 URIs**
 * **BIP-353 DNS Names** (`₿user@domain.com`)
 * **Silent Payments** (`sp1...`)
 * **Ark Payment Pointers**
 * **Nostr Pubkeys / NIP-05**
 
-Different wallets support different subsets of these mechanisms. Today, paying someone in Bitcoin requires the sender to know in advance which rail the recipient supports, what channel liquidity is available, or what fee environment makes the transaction practical.
+Different wallets support different subsets of these mechanisms. Today, paying someone in Bitcoin requires knowing in advance which rail the recipient supports, whether channel liquidity is available, or whether fee conditions make on-chain settlement practical.
 
-### The SatsPath Solution
-SatsPath maps a single human-readable recipient identifier (e.g. `alice@example.com`) to a **cryptographically signed payment profile**, verifies its integrity and provenance, discovers the receiver's advertised payment capabilities, and generates a **wallet handoff payload** for the optimal rail.
+### How SatsPath Works
 
 ```text
 Human-readable identifier (alice@example.com)
@@ -44,17 +44,24 @@ Wallet handoff payload (BIP-21 URI, BOLT11 invoice, BOLT12 offer, Ark pointer)
 Host wallet signs and executes the payment
 ```
 
-### Why SatsPath Exists
-To receive Bitcoin across modern rails, a user should **not** need:
-* A new custodial wallet or intermediary.
-* A new seed phrase or backup ritual.
-* A single centralized directory provider.
-* To lock themselves into a single payment layer.
-* To know which wallet implementation the sender is running.
+### Why Isn't Lightning Address Alone Enough?
+A Lightning Address (`user@domain.com`) exclusively targets a Lightning receiving node. If the receiver's node is offline, channel liquidity is exhausted, or the transaction amount exceeds capacity, the payment fails. SatsPath can consume Lightning Addresses while advertising on-chain addresses, BOLT12 offers, Silent Payments, and Ark pointers as dynamic fallbacks.
 
-SatsPath is public infrastructure that enables seamless interoperability between wallets without introducing a new custody layer, a new token, or a closed network.
+### Why Isn't BIP-353 Alone Enough?
+[BIP-353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki) maps `₿user@domain.com` to payment instructions via DNS TXT records. However, BIP-353 requires the recipient to control their own DNS zone. Users with standard email addresses (e.g. `alice@gmail.com`) cannot publish DNS records on their provider's zone. SatsPath supports BIP-353 as a resolver backend, while providing alternative transports (HTTPS S2S, Nostr NIP-05), key continuity tracking, and transparency logs.
 
-> **Current Maturity & Safety Notice:** SatsPath is experimental, non-custodial open-source software. Mainnet payment discovery and wallet handoff are supported, but **mainnet payment execution and transaction signing by SatsPath are deliberately unsupported**. Real-funds execution remains strictly under the control of user wallets. An independent external cryptographic audit is required before production deployment.
+### What Does SatsPath Trust?
+* **Namespace Authorities (DNS, WebPKI, Platforms):** Acknowledged as having authority to assign, revoke, or censor names. They cannot, however, forge cryptographic identity signatures without detection.
+* **Initial Contact (TOFU):** First-contact lookup relies on Trust-On-First-Use unless corroborated out-of-band or by trusted witness quorums.
+* **Log Operators & Witnesses:** Monitored via append-only Merkle logs and $K$-of-$N$ Schnorr witness quorums to detect split views and rollbacks.
+
+### Who Holds the Private Keys?
+**Host wallets hold all private spending keys.** SatsPath does not have, never generates, and never requests private spending keys or seed phrases. SatsPath holds only a non-custodial `secp256k1` identity keypair used exclusively to sign public metadata profiles and rotation records.
+
+### What Works Today, What is Experimental, and What Has Not Been Audited?
+* **Implemented Today:** Signed profiles, key rotation, HTTPS/Nostr resolvers, multi-source fee consensus, append-only Merkle transparency log, sparse Merkle state map, and witness quorum cosigning.
+* **Preview / Experimental:** BIP-353 (Preview; strict DNSSEC fails closed without local validator), BOLT12 (Experimental; offer parsing and blinded paths implemented; all-TLV Merkle hashing and interop undergoing validation), Silent Payments (Experimental; key derivation and Taproot outputs implemented; official test-vector validation ongoing), Ark routing (Preview; ASP rounds simulated).
+* **Audit Status:** SatsPath has completed internal test suites and automated adversarial simulations, but has **NOT yet undergone an independent third-party cryptographic or security audit**.
 
 Website: <https://satspath.com>
 
@@ -64,7 +71,7 @@ Website: <https://satspath.com>
 
 **SatsPath does not have, and never requests, the user's private spending keys.**
 
-This is not a missing feature—it is an intentional **security property**:
+This is an intentional **security property**:
 
 ```mermaid
 flowchart LR
@@ -88,10 +95,23 @@ flowchart LR
     class F,G,H,I wallet;
 ```
 
-* **No Custody of Funds:** SatsPath cannot seize, freeze, or lose user funds.
+* **No Custody of Funds:** SatsPath cannot seize, freeze, or hold user funds.
 * **No Seed Phrases:** SatsPath never handles BIP-39 seeds, xprv/tprv keys, or node credentials.
 * **Identity Keys Carry No Funds:** The `secp256k1` identity keypair is used exclusively to sign public profiles, authorization statements, and key rotations.
-* **Wallet Retains Final Authority:** The host wallet inspects the payment payload, presents it to the user, signs it using its internal spending keys, and broadcasts it directly to the network.
+* **Wallet Retains Final Authority:** The host wallet inspects payment instructions, presents them to the user, signs with internal spending keys, and broadcasts directly to the network.
+* **Custody Risk vs. Payment Redirection Risk:** Compromising SatsPath does not directly expose wallet spending keys or authorize Bitcoin transactions. However, a compromised discovery or handoff component may attempt payment redirection, which is why authenticated profiles, key continuity, resolver verification, and wallet-side confirmation of amounts and destinations remain security-critical.
+
+---
+
+## Maturity Taxonomy
+
+To provide unambiguous expectations, capabilities and components in this repository are categorized under this taxonomy:
+
+* **IMPLEMENTED:** Functionality exists in the current codebase and is exercised by automated unit, integration, or simulation tests.
+* **PREVIEW:** Usable implementation exists, but protocol interoperability, API stability, or production hardening is incomplete.
+* **EXPERIMENTAL:** Early implementation subject to significant change and not recommended for production reliance.
+* **RESEARCH:** Prototype or exploratory work investigating future cryptographic or architectural primitives.
+* **PLANNED:** Designed architecture not yet implemented in code.
 
 ---
 
@@ -99,32 +119,32 @@ flowchart LR
 
 This table reflects the actual status of the codebase (`crates/`) verified by unit, integration, and security simulation tests.
 
-| Capability | Current Codebase Status | Architectural Details & Limitations |
+| Capability | Current Status | Architectural Details & Limitations |
 | :--- | :--- | :--- |
-| **Signed Payment Profiles** | **Implemented** | Canonical JSON (RFC 8785), domain-separated `secp256k1` Schnorr signatures (`BIP-340`), monotonic sequence and expiry validation. |
-| **Key Continuity & Rotation** | **Implemented** | Dual-signed rotation transitions (`AuthorizationV1` signed by old key, `AcceptanceV1` by new key) bound to canonical history. |
-| **HTTPS S2S Resolver** | **Implemented** | Resolves signed profiles over HTTPS (`.well-known/satspath-authority`) with strict SSRF filtering, loopback/private IP blocking, and 50KB payload limits. |
-| **Nostr Resolver** | **Implemented** | NIP-05 pubkey lookup and kind `30078` event fetching; verifies SatsPath profile signature independently of Nostr relay signatures. |
-| **BIP-353 DNS Resolver** | **Implemented (Preview)** | Parses `₿user@domain` TXT records into `bitcoin:` URIs. Default `DnssecPolicy::Strict` fails closed without local DNSSEC validator. |
-| **Lightning Address / LNURL** | **Implemented** | Resolves public metadata and requests concrete BOLT11 invoices for wallet handoff. |
-| **BOLT12 Offers & Blinded Paths**| **Implemented** | TLV offer decoding (`lno1...`), blinded path extraction, signed invoice request generation (`lnr1...`), and invoice validation (`crates/satspath-router/src/bolt12.rs`). |
-| **On-Chain / BIP-21** | **Implemented** | Network address validation (mainnet, testnet, regtest), dynamic fee estimation, and `bitcoin:` BIP-21 URI formatting. |
-| **Silent Payments (BIP-352)** | **Implemented (Experimental)** | Public scan/spend key derivation, tagged hashing, multi-input key aggregation, and ephemeral Taproot output derivation (`crates/satspath-router/src/silent_payments.rs`). |
-| **Multi-Source Fee Consensus** | **Implemented** | Concurrent queries across Bitcoin Core RPC, Esplora, and Mempool.space with median filtering and decaying cache fallback (`crates/satspath-router/src/fees.rs`). |
-| **S2S v2 Transparency Log** | **Implemented** | Append-only Merkle event log, RFC 6962-style compact consistency proofs, and signed operator checkpoints (`crates/satspath-core/src/transparency.rs`). |
-| **Authenticated State Map** | **Implemented** | Sparse Merkle tree generating cryptographic non-inclusion proofs, bound to checkpoint root (`crates/satspath-core/src/state_map.rs`). |
-| **Witness Quorum Cosigning** | **Implemented** | Standalone witness node (`crates/satspath-witness`) performing $K$-of-$N$ Schnorr cosigning, consistency verification, and local rollback/equivocation detection. |
-| **Ark Payment Routing** | **Preview (Simulated)** | Receive pointer parsing and route scoring exist; live Ark ASP VTXO round execution is simulated (`crates/satspath-router/src/ark.rs`). |
-| **Submarine / Reverse Swaps** | **Experimental (Testnet)** | Boltz Exchange v2 client, AES-256-GCM encrypted store, and claim/refund tx builders for testnet/regtest only (`crates/satspath-swaps`). |
-| **Post-Quantum Cryptography** | **Research (Experimental)** | Hybrid signature module (`secp256k1` + ML-DSA-65) in `crates/satspath-pqc`. Research primitive; not part of production safety claim. |
-| **Mainnet Payment Execution** | **Deliberately Unsupported** | SatsPath does not execute mainnet payments, broadcast transactions, or sign with spending keys. Execution is delegated to wallets. |
+| **Signed Payment Profiles** | **IMPLEMENTED** | Canonical JSON (RFC 8785), domain-separated `secp256k1` Schnorr signatures (`BIP-340`), monotonic sequence and expiry validation. |
+| **Key Continuity & Rotation** | **IMPLEMENTED** | Dual-signed rotation transitions (`AuthorizationV1` signed by old key, `AcceptanceV1` by new key) bound to canonical history. |
+| **HTTPS S2S Resolver** | **IMPLEMENTED** | Resolves signed profiles over HTTPS (`.well-known/satspath-authority`). URL validation blocks known unsafe schemes, ports, hosts, and literal private/reserved IP addresses. (DNS rebinding protection requires resolution-aware validation and connection pinning and should not be assumed unless explicitly enabled by the networking backend). |
+| **Nostr Resolver** | **IMPLEMENTED** | NIP-05 pubkey lookup and kind `30078` event fetching; verifies SatsPath profile signature independently of Nostr relay signatures. |
+| **BIP-353 DNS Resolver** | **PREVIEW** | BIP-353 support is currently Preview. Record parsing and strict DNSSEC policy enforcement are implemented. The default DoH backend does not independently validate the DNSSEC chain; Strict mode therefore requires authenticated DNSSEC results and fails closed otherwise. |
+| **Lightning Address / LNURL** | **IMPLEMENTED** | Resolves public metadata and requests concrete BOLT11 invoices for wallet handoff. |
+| **BOLT12 Offers & Blinded Paths**| **EXPERIMENTAL (Partial)** | BOLT12 support currently includes offer parsing (`lno1...`), blinded path extraction, and experimental invoice request structures (`crates/satspath-router/src/bolt12.rs`). Official all-TLV Merkle tree hashing and full interoperability against current BOLT12 implementations (CLN/LDK) are still being validated. |
+| **On-Chain / BIP-21** | **IMPLEMENTED** | Network address validation (mainnet, testnet, regtest), dynamic fee estimation, and `bitcoin:` BIP-21 URI formatting. |
+| **Silent Payments (BIP-352)** | **EXPERIMENTAL** | Experimental Silent Payments support: scan/spend key derivation, tagged hashing (`BIP0352/Inputs`, `BIP0352/SharedSecret`), and ephemeral Taproot output derivation (`crates/satspath-router/src/silent_payments.rs`). Interoperability is still being validated against official BIP-352 test vectors. |
+| **Multi-Source Fee Consensus** | **IMPLEMENTED** | Concurrent queries across Bitcoin Core RPC, Esplora, and Mempool.space with median filtering and decaying cache fallback (`crates/satspath-router/src/fees.rs`). |
+| **S2S v2 Transparency Log** | **IMPLEMENTED** | Append-only Merkle event log, RFC 6962-style compact consistency proofs, and signed operator checkpoints (`crates/satspath-core/src/transparency.rs`). |
+| **Authenticated State Map** | **IMPLEMENTED** | Sparse Merkle tree generating cryptographic non-inclusion proofs, bound to checkpoint root (`crates/satspath-core/src/state_map.rs`). |
+| **Witness Quorum Cosigning** | **IMPLEMENTED** | Standalone witness node (`crates/satspath-witness`) performing $K$-of-$N$ Schnorr cosigning, consistency verification, and local rollback/equivocation detection. |
+| **Ark Payment Routing** | **PREVIEW** | Receive pointer parsing and route scoring exist; live Ark ASP VTXO round execution is simulated (`crates/satspath-router/src/ark.rs`). |
+| **Submarine / Reverse Swaps** | **EXPERIMENTAL** | Boltz Exchange v2 client, AES-256-GCM encrypted store, and claim/refund tx builders for testnet/regtest only (`crates/satspath-swaps`). |
+| **Post-Quantum Cryptography** | **RESEARCH** | Hybrid signature module (`secp256k1` + ML-DSA-65) in `crates/satspath-pqc`. Research primitive; not part of production safety claim. |
+| **Mainnet Payment Execution** | **DELIBERATELY UNSUPPORTED** | SatsPath can discover and validate selected mainnet payment capabilities and hand compatible instructions to a wallet. Wallet-controlled software remains responsible for authorization, signing, and payment execution. |
 
 ---
 
 ## SatsPath in the Bitcoin Ecosystem
 
 ### Why Not Just Use a Lightning Address?
-A Lightning Address (`user@domain.com`) is a useful protocol that maps an email-like alias to an HTTP LNURL-pay endpoint to fetch a BOLT11 invoice:
+A Lightning Address (`user@domain.com`) is a protocol that maps an email-like alias to an HTTP LNURL-pay endpoint to fetch a BOLT11 invoice:
 * **Scope:** A Lightning Address exclusively routes to a Lightning receiving node. If the receiver's node is offline, channel liquidity is depleted, or the transaction amount exceeds channel capacity, the payment fails.
 * **SatsPath Complementarity:** SatsPath does not replace Lightning Addresses—it can consume them. A SatsPath profile can advertise a Lightning Address alongside on-chain addresses, BOLT12 offers, Silent Payments, and Ark pointers. The router dynamically selects the optimal rail based on live fees and transaction size.
 * **Conceptually:**
@@ -133,13 +153,13 @@ A Lightning Address (`user@domain.com`) is a useful protocol that maps an email-
 
 ### How Does SatsPath Relate to BIP-353?
 [BIP-353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki) establishes human-readable Bitcoin payment instructions via DNS TXT records (`₿user@domain.com`):
-* **SatsPath Interoperability:** SatsPath natively supports BIP-353 as one of its core resolver backends. A SatsPath client can resolve BIP-353 TXT records directly, validate their DNSSEC signatures, and parse the resulting BIP-21 URI.
+* **SatsPath Interoperability:** SatsPath supports BIP-353 as one of its resolver backends. A SatsPath client can resolve BIP-353 TXT records, validate authenticated DNSSEC results, and parse the resulting BIP-21 URI.
 * **Beyond DNS:** BIP-353 requires the recipient to control their own DNS domain or rely on a managed DNS provider. Users with standard email addresses (e.g. `alice@gmail.com`) cannot publish arbitrary DNS records on their provider's zone. SatsPath provides alternative transports (Nostr NIP-05, S2S HTTP, invite flows) and adds key continuity tracking, transparency logs, and multi-rail negotiation.
 
 ### Why Isn't Nostr Alone Enough?
-Nostr (NIP-05 and kind `30078`) provides an excellent censorship-resistant, decentralized distribution channel:
+Nostr (NIP-05 and kind `30078`) provides a censorship-resistant distribution channel:
 * **SatsPath Integration:** SatsPath uses Nostr relays as an active transport. A profile can be published to and resolved from Nostr relays without central servers.
-* **Separation of Layers:** A Nostr event signature only proves which Nostr key published the event. SatsPath decouples the transport from identity: the profile itself is signed by an independent SatsPath protocol identity key. This prevents relay operators or Nostr key compromises from silently rewriting Bitcoin receiving capabilities.
+* **Separation of Layers:** A Nostr event signature only proves which Nostr key published the event. SatsPath decouples transport from identity: the profile itself is signed by an independent SatsPath protocol identity key. This prevents relay operators or Nostr key compromises from silently rewriting Bitcoin receiving capabilities.
 
 ---
 
@@ -149,7 +169,7 @@ A frequent question from cryptographers and protocol engineers is whether SatsPa
 
 > **SatsPath does NOT claim to solve Zooko's Triangle.**
 
-Instead, SatsPath **separates human-readable namespace authority from cryptographic payment identity**:
+Instead, SatsPath **separates human-readable namespace authority from cryptographic payment identity and payment-method ownership**:
 
 ```mermaid
 flowchart TD
@@ -173,9 +193,9 @@ flowchart TD
     class C,D,E,F crypto;
 ```
 
-1. **Namespace Authority Acknowledged:** Human-readable names (`user@domain.com` or `₿user@domain.com`) ultimately rely on underlying namespace authorities (DNS registrars, DNSSEC zone owners, WebPKI, or platform providers). A domain owner retains the technical ability to censor, revoke, or cease publishing an identifier.
+1. **Namespace Authority Acknowledged:** Human-readable names (`user@domain.com` or `₿user@domain.com`) fundamentally depend on underlying namespace authorities (DNS registrars, DNSSEC zone owners, WebPKI, or platform domain registries). A domain owner retains the technical ability to censor, revoke, or cease publishing an identifier. SatsPath does not claim to eliminate this external dependency.
 2. **Cryptographic Protection Against Impersonation:** While a provider can censor an account, cryptographic verification (BIP-340 Schnorr signatures, sequential hash chains, and witness quorums) is designed to **prevent the provider from silently substituting the user's payment methods or impersonating their identity**.
-3. **Attributable Misbehavior:** If an adversarial server replaces Alice's key or serves an unauthorized profile, clients fail verification (`ERR_KEY_SUBSTITUTION` or `ERR_INCLUSION_MISMATCH`). The server cannot forge transitions without generating cryptographic proof of misbehavior.
+3. **Attributable Misbehavior:** If an adversarial server replaces Alice's key or serves an unauthorized profile, clients fail verification (such as an unauthorized key replacement or checkpoint inclusion mismatch failure). The server cannot forge transitions without generating cryptographic proof of misbehavior.
 
 ---
 
@@ -186,13 +206,14 @@ A resolver acts only as an untrusted transport. It returns signed profile payloa
 
 ### 2. What happens if the namespace provider is malicious?
 If the operator of `example.com` attempts to hijack `alice@example.com` by generating a new key and signing a fake profile:
-* **Existing Contacts:** Any client that previously resolved Alice holds a local pin of her identity key or predecessor checkpoint. The client detects the un-authorized key swap (missing a dual-signed `KeyRotation`) and aborts with `ERR_KEY_SUBSTITUTION`.
+* **Existing Contacts:** Any client that previously resolved Alice holds a local pin of her identity key or predecessor checkpoint. The client detects the unauthorized key swap (missing a dual-signed `KeyRotation`) and aborts with an unauthorized key replacement failure.
 * **New Contacts (First Contact):** S2S v2 requires checkpoints to be cosigned by an independent witness quorum ($K$-of-$N$). If the operator creates a split view for new contacts, witnesses refusing to cosign inconsistent roots prevent un-witnessed profiles from passing.
 
 ### 3. What are the limits of Trust-On-First-Use (TOFU)?
 When a client contacts an identifier for the very first time without prior key pinning or out-of-band verification:
 * **Protected:** Once pinned, all future updates require monotonic append-only continuity.
 * **Unprotected:** If an active adversary controls resolution during the *very first lookup*, the client may pin the attacker's initial state unless validated against an independent witness quorum or out-of-band fingerprint. TOFU guarantees subsequent continuity, not absolute first-contact authentication.
+* **Gossip & Witness Boundaries:** Independent witness quorums ($K$-of-$N$) and future cross-witness gossip can reduce first-contact consistency risk and improve split-view detection, but do not by themselves authenticate the initial namespace-to-key binding without out-of-band verification or trusted anchors.
 
 ### 4. Is hashing identifiers with SHA-256 private?
 **No, not against an offline dictionary attacker.** SatsPath hashes aliases (`SHA256(canonical_alias)`) for transport indexing to prevent passive cleartext eavesdropping on network wires. However, because human-readable names (email addresses, usernames) have low entropy, an attacker can enumerate common names using offline dictionary attacks or rainbow tables. Deterministic hashing provides pseudonymity and transit obfuscation, **not absolute privacy**.
@@ -211,16 +232,16 @@ The witness protocol requires a $K$-of-$N$ threshold (e.g. 2-of-3 or 3-of-5). If
 
 ## Workspace Structure
 
-| Crate | Purpose | Status |
+| Crate | Purpose | Maturity Status |
 | :--- | :--- | :--- |
-| **`crates/satspath-core`** | Canonical JSON, Schnorr crypto, Merkle log, Sparse Merkle state map, resolvers | **Implemented** |
-| **`crates/satspath-router`** | Routing engine, fee consensus, BOLT12 handling, BIP-352 Silent Payments | **Implemented** |
-| **`crates/satspath-cli`** | Reference command-line client for development and preview flows | **Implemented** |
-| **`crates/satspathd`** | Server daemon, REST API, transparency endpoint, token-bucket rate limiting | **Implemented** |
-| **`crates/satspath-witness`** | Independent witness node, $K$-of-$N$ checkpoint cosigning, split-view detector | **Implemented** |
-| **`crates/satspath-wasm`** | WebAssembly bindings for web browsers and wallet integration | **Preview** |
-| **`crates/satspath-swaps`** | Experimental Boltz v2 swap scaffolding (testnet/regtest only) | **Experimental** |
-| **`crates/satspath-pqc`** | Hybrid classical + post-quantum signature research module (ML-DSA-65) | **Research** |
+| **`crates/satspath-core`** | Canonical JSON, Schnorr crypto, Merkle log, Sparse Merkle state map, resolvers | **IMPLEMENTED** |
+| **`crates/satspath-router`** | Routing engine, fee consensus, BOLT12 handling, BIP-352 Silent Payments | **IMPLEMENTED** |
+| **`crates/satspath-cli`** | Reference command-line client for development and preview flows | **IMPLEMENTED** |
+| **`crates/satspathd`** | Server daemon, REST API, transparency endpoint, token-bucket rate limiting | **IMPLEMENTED** |
+| **`crates/satspath-witness`** | Independent witness node, $K$-of-$N$ checkpoint cosigning, split-view detector | **IMPLEMENTED** |
+| **`crates/satspath-wasm`** | WebAssembly bindings for web browsers and wallet integration | **PREVIEW** |
+| **`crates/satspath-swaps`** | Experimental Boltz v2 swap scaffolding (testnet/regtest only) | **EXPERIMENTAL** |
+| **`crates/satspath-pqc`** | Hybrid classical + post-quantum signature research module (ML-DSA-65) | **RESEARCH** |
 
 ---
 
@@ -277,6 +298,7 @@ SatsPath is developed as **free and open-source public infrastructure** for the 
 * **Key Transparency:** [`docs/key_transparency.md`](docs/key_transparency.md)
 * **Mainnet Safety Boundaries:** [`docs/mainnet_safety.md`](docs/mainnet_safety.md)
 * **Implementation Mapping:** [`docs/implementations.md`](docs/implementations.md)
+* **Security Simulations & Testing:** [`security_tests.md`](security_tests.md)
 * **Protocol v1 Specification:** [`docs/protocol.md`](docs/protocol.md)
 * **Resolvers Specification:** [`docs/resolvers.md`](docs/resolvers.md)
 * **BIP-353 DNS Resolution:** [`docs/bip353_dns_resolution.md`](docs/bip353_dns_resolution.md)

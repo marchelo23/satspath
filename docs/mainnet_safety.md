@@ -13,7 +13,7 @@
 * **Why SatsPath Delegates Execution:**
   1. *Preserves self-custody:* Eliminates the risk of SatsPath becoming a custodial honeypot.
   2. *Avoids redundant wallet engineering:* Integrates with existing, battle-tested Bitcoin wallets rather than competing with them.
-  3. *Eliminates key-handling attack surface:* Without private keys or broadcast capabilities, SatsPath cannot be tricked into draining user funds.
+  3. *Custody Risk vs. Payment Redirection Risk:* Compromising SatsPath does not directly expose wallet spending keys or authorize Bitcoin transactions. However, a compromised discovery or handoff component may attempt payment redirection, which is why authenticated profiles, key continuity, resolver verification, and wallet-side confirmation of destination details remain security-critical.
 
 ---
 
@@ -23,7 +23,7 @@
 | :--- | :--- | :--- |
 | **Mainnet Profile Resolution** | **Supported** | SatsPath (Core / Resolvers) |
 | **Mainnet Lightning Discovery (LNURL/LN Address)** | **Supported** | SatsPath (Router) |
-| **Mainnet BOLT12 Discovery & Blinded Paths** | **Supported** | SatsPath (Router) |
+| **Mainnet BOLT12 Discovery & Blinded Paths** | **Supported (Experimental / Partial)** | SatsPath (Router) |
 | **Mainnet On-Chain Address Discovery (BIP-21)** | **Supported** | SatsPath (Router) |
 | **Mainnet Silent Payments (BIP-352) Output Computation** | **Supported (Experimental)** | SatsPath (Router) |
 | **Mainnet Ark Receive Pointer Discovery** | **Supported (Preview)** | SatsPath (Router) |
@@ -62,7 +62,7 @@ satspath quote alice@satspath.dev 21000 --mainnet-preview --json
 
 BIP-353 resolution is a preview layer: SatsPath resolves and displays DNSSEC-backed payment instructions but never pays, signs, or broadcasts.
 
-* **DNSSEC is Mandatory:** The default `Strict` policy fails closed and does not trust an unvalidated upstream resolver's AD bit. `DevInsecure` mode is for local testing only, requires `--allow-insecure-dns-for-dev`, and prints a loud warning.
+* **DNSSEC Policy Enforcement:** The default `Strict` policy fails closed and does not trust an unvalidated upstream resolver's AD bit. The default DoH backend does not independently validate the DNSSEC chain; Strict mode therefore requires authenticated DNSSEC results and fails closed otherwise. `DevInsecure` mode is for local testing only, requires `--allow-insecure-dns-for-dev`, and prints a loud warning.
 * **Ambiguity is Invalid:** More than one `bitcoin:` TXT record at a single name, or an unknown `req-*` parameter, causes resolution to fail closed.
 * **Zero Private Material:** No private material may ever appear in a published or resolved DNS payload (`seed`, `xprv`, `mnemonic`, `macaroon`, `cert`, `api_key`, `claim_key`, `refund_key`, `preimage`) — screened on both publish and resolve.
 * **Cryptographic Authorization:** DNSSEC cryptographically authorizes the DNS record, while the signed profile (including its `secp256k1` identity-key signature) remains strictly required for profile-based payments. Email inbox access alone never authorizes a payment-instruction change.
