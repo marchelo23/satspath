@@ -27,7 +27,7 @@ flowchart TD
 **SatsPath does not need, and never requests, the user's private spending keys.**
 
 This is not a missing feature—it is an intentional **security property**:
-* **No custody of funds:** SatsPath cannot lose, seize, or freeze user funds.
+* **No custody of funds:** SatsPath does not custody, seize, or freeze user funds.
 * **No seed phrases or private keys:** SatsPath never manages BIP-39 seeds, xprv/tprv keys, or node credentials.
 * **Not a wallet:** SatsPath discovers and validates payment capabilities; host wallets retain 100% control over fund authorization, coin selection, transaction signing, and network broadcast.
 * **Custody Risk vs. Payment Redirection Risk:** Compromising SatsPath does not directly expose wallet spending keys or authorize Bitcoin transactions. However, a compromised discovery or handoff component may attempt payment redirection, which is why authenticated profiles, key continuity, resolver verification, and wallet-side confirmation of destination details remain security-critical.

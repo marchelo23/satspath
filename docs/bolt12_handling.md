@@ -8,7 +8,7 @@ BOLT12 (Lightning Offers) provides reusable, static payment codes that support:
 - Recipient and payer privacy via **blinded paths**.
 - Native integration with BIP-353 (`user@domain` TXT record resolution to `lno1...`).
 
-BOLT12 support in SatsPath is currently EXPERIMENTAL / PARTIAL. The engine implements offer parsing, blinded path extraction, and experimental invoice request structures. Real-world interoperability against full BOLT12 specifications and implementations (such as Core Lightning and LDK) is ongoing and serves as a release gate.
+BOLT12 — EXPERIMENTAL / PARTIAL. Prototype TLV, offer-handling, and blinded-path primitives exist, but standards-conformant checksumless BOLT12 string decoding, invoice-request construction, Merkle signing, and interoperability with implementations such as Core Lightning and LDK remain incomplete.
 
 ---
 

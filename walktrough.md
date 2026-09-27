@@ -10,8 +10,8 @@ It can:
 - Resolve a local or remote signed profile via multiple resolution methods (Local Registry, BIP-353 DNS, HTTP Well-Known, Nostr).
 - Select an optimal payment rail (Lightning, On-chain, Ark) based on live mempool fees and routing rules.
 - Authenticate and verify hybrid Post-Quantum signatures (ML-DSA-65 + Schnorr).
-- Fetch real LNURL invoices and parse BOLT12 offers.
-- Evaluate Silent Payments (BIP-352) and build BIP-21 on-chain URIs.
+- Fetch real LNURL invoices and inspect prototype BOLT12 offers.
+- Evaluate experimental Silent Payments (BIP-352) and build BIP-21 on-chain URIs.
 - Preview swap directives (testnet only).
 
 It cannot (and intentionally does not):
@@ -41,7 +41,7 @@ SatsPath is built around a strict cryptographic separation of identity and trans
 
 - **Identity Cryptography:** Classical `secp256k1` Schnorr signatures (BIP-340) form the primary identity layer. A hybrid post-quantum module (`ML-DSA-65-Schnorr`) is provided in `crates/satspath-pqc` as an experimental research primitive.
 - **SSRF Protection:** Resolvers strictly validate URLs and block loopback, private, and internal metadata IP ranges (e.g., `169.254.169.254`) on literal IP inputs and blocked hostnames. (DNS rebinding protection requires resolution-aware connection pinning and is not currently provided by the HTTP resolver).
-- **Nostr Concurrency & Tombstoning:** Downloads profiles from multiple Nostr relays concurrently to ensure the most recent sequence is used, effectively preventing downgrade attacks. It strictly rejects revoked (tombstoned) profiles.
+- **Nostr Concurrency & Tombstoning:** Concurrent multi-relay resolution reduces stale-profile selection by choosing the highest valid sequence observed across queried relays. It does not by itself prevent downgrade through coordinated withholding, malicious relay collusion, or network partitioning. It strictly rejects revoked (tombstoned) profiles.
 - **Safe Persistence:** Local state uses SHA-256 keyed indexing (preventing accidental plaintext disclosure, though low-entropy aliases remain susceptible to offline dictionary enumeration). Sensitive swap material is encrypted via AES-256-GCM.
 
 ## Supported Payment Rails
@@ -49,7 +49,7 @@ SatsPath is built around a strict cryptographic separation of identity and trans
 1. **Lightning Network:** Selected for smaller amounts (< 100k sats). It handles LNURL-pay two-step fetches and parses BOLT11 invoices to verify amounts.
 2. **On-chain:** Selected for larger amounts when fees are acceptable. Includes support for Silent Payments (`sp1...` keys) which are seamlessly integrated into the generated `bitcoin:` URIs.
 3. **Ark:** Fallback for when fees are high. Provides Ark payment pointers. (Client-side DAG validation is delegated to the integrating wallet).
-4. **BOLT12 (Experimental / Partial):** Offer parsing, TLV decoding, blinded path extraction, and experimental invoice request structures are implemented in `satspath-router`. Official all-TLV Merkle tree hashing and full live CLN/LDK node interoperability are undergoing validation. An optional HTTP proxy scaffold (`proxy-workers/bolt12`) is available for environments without direct node RPC.
+4. **BOLT12 (Experimental / Partial):** Prototype TLV, offer-handling, and blinded-path primitives exist in `satspath-router`, but standards-conformant checksumless BOLT12 string decoding, invoice-request construction, Merkle signing, and interoperability with implementations such as Core Lightning and LDK remain incomplete. An optional HTTP proxy scaffold (`proxy-workers/bolt12`) is available for environments without direct node RPC.
 
 ## What is Implemented vs. What is Not
 
@@ -62,8 +62,8 @@ SatsPath is built around a strict cryptographic separation of identity and trans
 | Live multi-source fee consensus | **IMPLEMENTED** | Core RPC, Esplora, Mempool median filtering |
 | Lightning rail selection & LNURL invoice fetch | **IMPLEMENTED** | Generates handoff invoice payload |
 | On-chain rail & BIP-21 URI formatting | **IMPLEMENTED** | Generates standard `bitcoin:` URI |
-| BOLT12 offer parsing & blinded path extraction | **EXPERIMENTAL** | Interop and TLV Merkle hashing ongoing |
-| Silent Payments (BIP-352) URI injection | **EXPERIMENTAL** | Interop testing against BIP-352 vectors ongoing |
+| BOLT12 prototype primitives & blinded paths | **EXPERIMENTAL (Partial)** | Standards-conformant string parsing and CLN/LDK interop unverified |
+| Experimental Silent Payments (BIP-352) | **EXPERIMENTAL** | Primitives implemented; official BIP-352 test vectors unverified |
 | Ark fallback rail selection | **PREVIEW** | Pointers and routing exist; ASP rounds simulated |
 | Terminal QR code (Dense1x2 unicode) | **IMPLEMENTED** | CLI preview display |
 | LocalPeerRegistry (SHA-256 keyed, no raw email) | **IMPLEMENTED** | Local state storage |

@@ -149,6 +149,6 @@ Read APIs cover status, paginated events/checkpoints, identifier/event/checkpoin
 
 SatsPath addresses practical aspects of Zooko's Triangle by separating **human-readable namespace authority** from **cryptographic payment identity**. SatsPath does not claim to solve the classical trilemma without external authority: human-readable identifiers (`alice@example.com` or `₿alice@example.com`) ultimately rely on DNS, DNSSEC, WebPKI, or platform domain registries. However, SatsPath reduces the trust placed in that infrastructure:
 1. The namespace authority can censor or stop publishing an identifier, but
-2. Cryptographic verification (Schnorr profile signatures, Merkle inclusion, and witness cosigning) is designed to prevent the authority from silently substituting or impersonating the user's payment capabilities without triggering a detectable verification failure.
+2. Once an identity binding has been independently authenticated or pinned, cryptographic verification and key continuity are designed to prevent a namespace provider from silently replacing the user's authenticated payment capabilities or identity keys without triggering a detectable verification failure.
 
 Conceptual prior art: Zooko's Triangle, Certificate Transparency (RFC 6962), CONIKS, Keybase, Catena, and append-only authenticated data structures.

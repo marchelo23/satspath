@@ -60,7 +60,7 @@ A Lightning Address (`user@domain.com`) exclusively targets a Lightning receivin
 
 ### What Works Today, What is Experimental, and What Has Not Been Audited?
 * **Implemented Today:** Signed profiles, key rotation, HTTPS/Nostr resolvers, multi-source fee consensus, append-only Merkle transparency log, sparse Merkle state map, and witness quorum cosigning.
-* **Preview / Experimental:** BIP-353 (Preview; strict DNSSEC fails closed without local validator), BOLT12 (Experimental; offer parsing and blinded paths implemented; all-TLV Merkle hashing and interop undergoing validation), Silent Payments (Experimental; key derivation and Taproot outputs implemented; official test-vector validation ongoing), Ark routing (Preview; ASP rounds simulated).
+* **Preview / Experimental:** BIP-353 (Preview; strict DNSSEC fails closed without local validator), BOLT12 (Experimental / Partial; prototype TLV, offer-handling, and blinded-path primitives exist; standards-conformant checksumless BOLT12 string decoding, invoice-request construction, Merkle signing, and CLN/LDK interop remain incomplete), Silent Payments (Experimental; primitives and address/output construction implemented; official BIP-352 test vectors and interop remain unverified), Ark routing (Preview; ASP rounds simulated).
 * **Audit Status:** SatsPath has completed internal test suites and automated adversarial simulations, but has **NOT yet undergone an independent third-party cryptographic or security audit**.
 
 Website: <https://satspath.com>
@@ -95,7 +95,7 @@ flowchart LR
     class F,G,H,I wallet;
 ```
 
-* **No Custody of Funds:** SatsPath cannot seize, freeze, or hold user funds.
+* **No Custody of Funds:** SatsPath does not custody, seize, freeze, or hold user funds.
 * **No Seed Phrases:** SatsPath never handles BIP-39 seeds, xprv/tprv keys, or node credentials.
 * **Identity Keys Carry No Funds:** The `secp256k1` identity keypair is used exclusively to sign public profiles, authorization statements, and key rotations.
 * **Wallet Retains Final Authority:** The host wallet inspects payment instructions, presents them to the user, signs with internal spending keys, and broadcasts directly to the network.
@@ -127,9 +127,9 @@ This table reflects the actual status of the codebase (`crates/`) verified by un
 | **Nostr Resolver** | **IMPLEMENTED** | NIP-05 pubkey lookup and kind `30078` event fetching; verifies SatsPath profile signature independently of Nostr relay signatures. |
 | **BIP-353 DNS Resolver** | **PREVIEW** | BIP-353 support is currently Preview. Record parsing and strict DNSSEC policy enforcement are implemented. The default DoH backend does not independently validate the DNSSEC chain; Strict mode therefore requires authenticated DNSSEC results and fails closed otherwise. |
 | **Lightning Address / LNURL** | **IMPLEMENTED** | Resolves public metadata and requests concrete BOLT11 invoices for wallet handoff. |
-| **BOLT12 Offers & Blinded Paths**| **EXPERIMENTAL (Partial)** | BOLT12 support currently includes selected parsing, TLV, and blinded-path primitives (`crates/satspath-router/src/bolt12.rs`). The current encoding/decoding and invoice-request construction are not yet fully conformant with the latest BOLT12 specification (including all-TLV Merkle root hashing and native bech32 formatting), and real-world interoperability with implementations such as Core Lightning and LDK remains a release gate. |
+| **BOLT12 Offers & Blinded Paths**| **EXPERIMENTAL (Partial)** | Prototype TLV, offer-handling, and blinded-path primitives exist (`crates/satspath-router/src/bolt12.rs`), but standards-conformant checksumless BOLT12 string decoding, invoice-request construction, Merkle signing, and interoperability with implementations such as Core Lightning and LDK remain incomplete. |
 | **On-Chain / BIP-21** | **IMPLEMENTED** | Network address validation (mainnet, testnet, regtest), dynamic fee estimation, and `bitcoin:` BIP-21 URI formatting. |
-| **Silent Payments (BIP-352)** | **EXPERIMENTAL** | Experimental Silent Payments support: scan/spend key derivation, tagged hashing (`BIP0352/Inputs`, `BIP0352/SharedSecret`), and ephemeral Taproot output derivation (`crates/satspath-router/src/silent_payments.rs`). Interoperability is still being validated against official BIP-352 test vectors. |
+| **Silent Payments (BIP-352)** | **EXPERIMENTAL** | Experimental Silent Payments primitives and address/output construction are implemented (`crates/satspath-router/src/silent_payments.rs`). BIP-352 conformance and interoperability remain unverified until the official send/receive test vectors pass. |
 | **Multi-Source Fee Consensus** | **IMPLEMENTED** | Concurrent queries across Bitcoin Core RPC, Esplora, and Mempool.space with median filtering and decaying cache fallback (`crates/satspath-router/src/fees.rs`). |
 | **S2S v2 Transparency Log** | **IMPLEMENTED** | Append-only Merkle event log, RFC 6962-style compact consistency proofs, and signed operator checkpoints (`crates/satspath-core/src/transparency.rs`). |
 | **Authenticated State Map** | **IMPLEMENTED** | Sparse Merkle tree generating cryptographic non-inclusion proofs, bound to checkpoint root (`crates/satspath-core/src/state_map.rs`). |
@@ -194,7 +194,7 @@ flowchart TD
 ```
 
 1. **Namespace Authority Acknowledged:** Human-readable names (`user@domain.com` or `₿user@domain.com`) fundamentally depend on underlying namespace authorities (DNS registrars, DNSSEC zone owners, WebPKI, or platform domain registries). A domain owner retains the technical ability to censor, revoke, or cease publishing an identifier. SatsPath does not claim to eliminate this external dependency.
-2. **Cryptographic Protection Against Impersonation:** While a provider can censor an account, cryptographic verification (BIP-340 Schnorr signatures, sequential hash chains, and witness quorums) is designed to **prevent the provider from silently substituting the user's payment methods or impersonating their identity**.
+2. **Cryptographic Protection Against Impersonation:** Once an identity binding has been independently authenticated or pinned, cryptographic verification and key continuity are designed to prevent a namespace provider from silently replacing the user's authenticated payment capabilities or identity keys.
 3. **Attributable Misbehavior:** If an adversarial server replaces Alice's key or serves an unauthorized profile, clients fail verification (such as an unauthorized key replacement or checkpoint inclusion mismatch failure). The server cannot forge an authorized transition without the required signing key. Invalid transitions fail verification, while signed equivocation can produce attributable cryptographic evidence.
 
 ---
@@ -222,7 +222,7 @@ When a client contacts an identifier for the very first time without prior key p
 The witness protocol requires a $K$-of-$N$ threshold (e.g. 2-of-3 or 3-of-5). If fewer than $K$ witnesses are compromised, the rogue operator cannot obtain the cosignatures needed to validate an equivocation. If $K$ or more witnesses collude with the operator to forge a split view, clients on disparate branches cannot detect the fork locally until checkpoints are audited or gossiped out-of-band.
 
 ### 6. Does SatsPath work on Bitcoin Mainnet today?
-**For public discovery and wallet handoff: YES.** SatsPath can resolve mainnet Lightning Addresses, fetch mainnet BOLT11 invoices, parse mainnet BOLT12 offers, derive mainnet BIP-352 Silent Payment addresses, and generate mainnet BIP-21 URIs.  
+**For public discovery and wallet handoff: YES (with documented limitations).** SatsPath can resolve mainnet Lightning Addresses, fetch mainnet BOLT11 invoices, inspect prototype BOLT12 offer payloads, construct experimental BIP-352 Silent Payment addresses, and generate mainnet BIP-21 URIs. Standards-conformant BOLT12 string decoding and official BIP-352 vector validation remain experimental.  
 **For transaction execution: NO.** SatsPath does not connect to the Bitcoin P2P network to broadcast transactions, does not manage UTXOs, and does not hold spending keys. Execution is delegated to the user's wallet.
 
 ### 7. Has SatsPath been externally audited?

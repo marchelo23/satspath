@@ -23,9 +23,9 @@
 | :--- | :--- | :--- |
 | **Mainnet Profile Resolution** | **Supported** | SatsPath (Core / Resolvers) |
 | **Mainnet Lightning Discovery (LNURL/LN Address)** | **Supported** | SatsPath (Router) |
-| **Mainnet BOLT12 Discovery & Blinded Paths** | **Supported (Experimental / Partial)** | SatsPath (Router) |
+| **BOLT12 Discovery & Blinded Paths (Experimental / Partial)** | **Experimental / Partial** (Prototype primitives; standards-conformant string parsing & CLN/LDK interop unverified) | SatsPath (Router) |
 | **Mainnet On-Chain Address Discovery (BIP-21)** | **Supported** | SatsPath (Router) |
-| **Mainnet Silent Payments (BIP-352) Output Computation** | **Supported (Experimental)** | SatsPath (Router) |
+| **Silent Payments (BIP-352) Primitives** | **Experimental** (Address/output construction implemented; official BIP-352 test vectors unverified) | SatsPath (Router) |
 | **Mainnet Ark Receive Pointer Discovery** | **Supported (Preview)** | SatsPath (Router) |
 | **Wallet Handoff Generation (URIs, QR codes)** | **Supported** | SatsPath (Router / CLI) |
 | **Mainnet Payment Execution by SatsPath** | **Unsupported / Out of Scope** | **Host Wallet Only** |

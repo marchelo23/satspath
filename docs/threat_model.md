@@ -24,7 +24,7 @@ SatsPath avoids collapsing security guarantees into an ambiguous `verified: true
 
 | Property | Definition | Component Guaranteeing It | Underlying Assumption | Failure Mode / Limitation |
 | :--- | :--- | :--- | :--- | :--- |
-| **Integrity** | Payload has not been modified in transit. | Profile Schnorr Signature (`BIP-340`) over canonical JSON | `secp256k1` signature unforgeability (ECDLP/ROM) | Fails closed on any single byte modification. |
+| **Integrity** | Payload has not been modified in transit. | Profile Schnorr Signature (`BIP-340`) over canonical JSON | `secp256k1` signature unforgeability (ECDLP/ROM) | Fails closed on semantic modification of signed profile fields that changes their RFC 8785 canonical representation. |
 | **Authenticity** | Profile is authorized by the current controller of the identity key. | Domain-separated signature (`SatsPathProfileV1`) | Private key generated securely on user device and never leaked | Does not prove initial domain/namespace ownership. |
 | **Freshness** | Profile represents current, unexpired payment capabilities. | `expires_at` timestamps, monotonic sequence numbers | Synchronized client wall clock within acceptable drift | Stale profiles are rejected once expiration timestamp passes. |
 | **Consistency** | All verifiers observe identical, append-only history without forks. | RFC 6962-style Merkle log, signed checkpoints, witness quorum ($K$-of-$N$) | At least $(N - K + 1)$ honest, non-colluding witnesses | Local pinning detects local forks; global split-views require gossip monitors. |
@@ -86,7 +86,7 @@ SatsPath implements experimental BIP-352 Silent Payments for private on-chain se
 2. **Dual-Key Isolation:** Recipient advertises a scan key ($B_{\text{scan}}$) and spend key ($B_{\text{spend}}$). Online scanning nodes require only $b_{\text{scan}}$ to detect incoming funds, keeping $b_{\text{spend}}$ cold.
 3. **Tagged Hashing Domain Separation:** Hashes conform to BIP-340/352 (`BIP0352/Inputs` and `BIP0352/SharedSecret`) ensuring scalar tweaks cannot collide with Taproot script trees.
 4. **Input Outpoint Binding:** Lexicographically smallest outpoint ($outpoint_L$) is committed to prevent tweak malleability across multi-input transactions.
-5. **Conformance Status:** Implementation is experimental; interoperability is still being validated against official BIP-352 test vectors.
+5. **Conformance Status:** Experimental Silent Payments primitives and address/output construction are implemented. BIP-352 conformance and interoperability remain unverified until the official send/receive test vectors pass.
 
 ---
 
@@ -108,5 +108,5 @@ Before SatsPath can be recommended for mainnet real-funds settlement:
 1. **Independent Cryptographic Audit:** Formal third-party review of canonical serialization, Merkle proof verifiers, key rotation, and domain-separated signing schemes.
 2. **Decentralized Witness Quorum Deployment:** Production deployment of heterogeneous, multi-operator witnesses with public alert mechanisms.
 3. **Local DNSSEC Validation:** Native inclusion of an embedded validating DNSSEC resolver for BIP-353 without reliance on upstream flags.
-4. **BOLT12 TLV Merkle Tree Validation:** Implementation of official all-TLV Merkle tree hashing and interoperability testing against live Core Lightning and LDK nodes.
+4. **BOLT12 Conformance & Interoperability:** Implementation of standards-conformant checksumless BOLT12 string decoding, all-TLV Merkle tree root hashing, invoice-request construction, and interoperability testing against live Core Lightning and LDK nodes.
 5. **Standardized Wallet Handoff:** Finalization of BIP-21/BOLT12 handoff specifications with major open-source Bitcoin wallets.
