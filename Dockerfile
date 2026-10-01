@@ -1,4 +1,10 @@
 # ─────────────────────────────────────────────────────────────────────────────
+# OpenSSL version pin — bump this ARG to force a cache-bust when new
+# security patches land in Debian bookworm (currently 3.0.22-1~deb12u1).
+# ─────────────────────────────────────────────────────────────────────────────
+ARG OPENSSL_VERSION="3.0.22"
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Stage 0 — Chef Planner
 #   Computes the exact dependency recipe from Cargo manifests.
 #   Rebuilds ONLY when Cargo.toml / Cargo.lock change, not when src/ changes.
@@ -53,11 +59,16 @@ LABEL org.opencontainers.image.title="satspath-cli" \
       org.opencontainers.image.source="https://github.com/satspath/satspath" \
       org.opencontainers.image.documentation="https://github.com/satspath/satspath/blob/main/README.md"
 
-# Security: install only the minimum required CA certificates (needed for HTTPS).
+# Security: install CA certs and pin OpenSSL to the patched version.
+# Fixes: CVE-2026-63076, CVE-2026-63072, and related OpenSSL advisories.
+ARG OPENSSL_VERSION
 RUN apt-get update -qq \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        openssl \
+        libssl3 \
+    && dpkg -l openssl | grep -q "${OPENSSL_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 # Security: create a dedicated non-root user for running the binary.
@@ -94,11 +105,16 @@ LABEL org.opencontainers.image.title="satspathd" \
       org.opencontainers.image.vendor="SatsPath" \
       org.opencontainers.image.licenses="MIT"
 
-# Security: install CA certificates and curl (for docker healthchecks).
+# Security: install CA certs, curl, and pin OpenSSL to the patched version.
+# Fixes: CVE-2026-63076, CVE-2026-63072, and related OpenSSL advisories.
+ARG OPENSSL_VERSION
 RUN apt-get update -qq \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl \
+        openssl \
+        libssl3 \
+    && dpkg -l openssl | grep -q "${OPENSSL_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 # Security: create a dedicated non-root user.
