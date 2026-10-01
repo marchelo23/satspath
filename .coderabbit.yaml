@@ -67,9 +67,11 @@ reviews:
       - name: "Reverse Proxy Rate Limiting Integrity"
         mode: "error"
         instructions: |
-          Verify that IP extraction for rate limiting behind a reverse proxy uses the trusted proxy-appended
-          address (the rightmost IP in X-Forwarded-For or X-Real-IP) rather than spoofable client-supplied
-          headers (leftmost XFF), preventing rate limiter circumvention and memory denial of service.
+          Verify that IP extraction for rate limiting adheres to the configured trusted proxy chain.
+          When proxy headers are trusted, the client address must be determined by inspecting trusted
+          proxy hops rather than blindly trusting spoofable client-supplied headers (leftmost XFF).
+          When no trusted proxy path is configured or headers are invalid, the socket peer address
+          must be used as the authoritative client IP.
       - name: "Swap Fail-Closed & Cryptographic Safety"
         mode: "error"
         instructions: |
