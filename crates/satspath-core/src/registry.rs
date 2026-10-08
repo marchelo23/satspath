@@ -101,6 +101,7 @@ impl Registry {
         self.update_profile_for(&requested, signed)
     }
 
+    /// Overwrite the profile registered under `requested_alias` after validating it.
     pub fn update_profile_for(
         &mut self,
         requested_alias: &str,
@@ -174,6 +175,7 @@ impl Registry {
         self.save()
     }
 
+    /// Look up a registered profile; a revoked profile is refused with ProfileRevoked.
     pub fn resolve_alias(&self, alias: &str) -> Result<&SignedPaymentProfile> {
         let canonical = canonical_identifier(alias);
         let key = identifier_hash(&canonical);
@@ -185,10 +187,7 @@ impl Registry {
             .ok_or_else(|| SatsPathError::AliasNotFound(canonical.clone()))?;
 
         if profile.profile.revoked {
-            return Err(SatsPathError::RegistryError(format!(
-                "Alias {} has been revoked",
-                canonical
-            )));
+            return Err(SatsPathError::ProfileRevoked(canonical));
         }
 
         Ok(profile)

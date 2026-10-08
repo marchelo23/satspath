@@ -144,6 +144,7 @@ impl ChainResolver {
         }
     }
 
+    /// Append `resolver` to the chain.
     pub fn push<R: ProfileResolver + Send + Sync + 'static>(mut self, resolver: R) -> Self {
         self.resolvers.push(Box::new(resolver));
         self
@@ -151,6 +152,7 @@ impl ChainResolver {
 }
 
 impl Default for ChainResolver {
+    /// An empty chain.
     fn default() -> Self {
         Self::new()
     }
@@ -158,6 +160,7 @@ impl Default for ChainResolver {
 
 #[async_trait]
 impl ProfileResolver for ChainResolver {
+    /// Try each resolver in order. A substituted alias or a revoked profile stops the chain.
     async fn resolve_alias(&self, alias: &str) -> Result<SignedPaymentProfile> {
         let requested_canonical = canonical_identifier(alias);
         for resolver in &self.resolvers {
@@ -172,6 +175,13 @@ impl ProfileResolver for ChainResolver {
                             "security failure: requested {}, but got profile for {}",
                             requested_canonical, returned_canonical
                         )));
+                    }
+                    // SEC-03: revocation is enforced for every transport, not
+                    // only the ones that remember to check it. A revoked result
+                    // is a hard stop — never fall through to another resolver,
+                    // which could be serving an older, non-revoked copy.
+                    if profile.profile.revoked {
+                        return Err(SatsPathError::ProfileRevoked(returned_canonical));
                     }
                     return Ok(profile);
                 }

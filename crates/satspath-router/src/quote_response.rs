@@ -226,6 +226,10 @@ fn sats_to_btc(amount_sats: u64) -> String {
 /// `None` fetches live mempool fees.
 /// `fetch_ln_invoice`: when `true`, a Lightning rail is upgraded to a real
 /// BOLT11 invoice (best effort).
+/// `NoRoute` reason for a recipient whose profile was revoked by its owner.
+pub const PROFILE_REVOKED_REASON: &str = "Profile revoked by its owner.";
+
+/// Quote a payment: resolve, verify, and pick a route; only an unregistered recipient gets an invite.
 async fn quote_inner<R>(
     resolver: &R,
     recipient: &str,
@@ -236,9 +240,16 @@ async fn quote_inner<R>(
 where
     R: ProfileResolver + Sync + ?Sized,
 {
-    // 1. Resolve. Anything unresolvable becomes an invite — never a hard error.
+    // 1. Resolve. Anything unresolvable becomes an invite — never a hard error —
+    // except a revoked profile: its owner withdrew it, so inviting them to
+    // register again would route the sender around the revocation.
     let signed = match resolver.resolve_alias(recipient).await {
         Ok(signed) => signed,
+        Err(SatsPathError::ProfileRevoked(_)) => {
+            return QuoteResponse::NoRoute {
+                reason: PROFILE_REVOKED_REASON.into(),
+            };
+        }
         Err(_) => {
             return QuoteResponse::NotRegistered {
                 // No sender key in preview mode; invite is unsigned (no sender identity binding)
@@ -260,6 +271,7 @@ where
     route_verified_signed(signed, recipient, amount_sats, fees, fetch_ln_invoice).await
 }
 
+/// Pick a route for a recipient whose signed profile has been verified.
 async fn route_verified_signed(
     signed: satspath_core::SignedPaymentProfile,
     recipient: &str,
@@ -273,6 +285,11 @@ async fn route_verified_signed(
     if check_profile_expiry(&signed.profile).is_err() {
         return QuoteResponse::NoRoute {
             reason: "Profile expired.".into(),
+        };
+    }
+    if signed.profile.revoked {
+        return QuoteResponse::NoRoute {
+            reason: PROFILE_REVOKED_REASON.into(),
         };
     }
 
@@ -408,6 +425,7 @@ mod tests {
     use satspath_core::{BitcoinNetwork, PaymentProfile, SignedPaymentProfile};
 
     // Deterministic fees: cheap next block (on-chain viable when a method exists).
+    /// A low fee estimate that keeps on-chain routes viable.
     fn cheap_fees() -> FeeEstimate {
         FeeEstimate {
             fastest_fee: 5,
@@ -419,6 +437,7 @@ mod tests {
     }
 
     // Expensive next block (> 20 sat/vB): on-chain not acceptable.
+    /// A fee estimate high enough to rule out on-chain routes.
     fn expensive_fees() -> FeeEstimate {
         FeeEstimate {
             fastest_fee: 35,
@@ -435,10 +454,70 @@ mod tests {
 
     #[async_trait]
     impl ProfileResolver for MockResolver {
+        /// Fail every lookup with the configured error.
         async fn resolve_alias(&self, alias: &str) -> satspath_core::Result<SignedPaymentProfile> {
             self.signed
                 .clone()
                 .ok_or_else(|| SatsPathError::AliasNotFound(alias.to_string()))
+        }
+    }
+
+    /// Resolver whose backend reports the profile as revoked.
+    struct RevokedResolver;
+
+    #[async_trait]
+    impl ProfileResolver for RevokedResolver {
+        /// Report every alias as revoked by its owner.
+        async fn resolve_alias(&self, alias: &str) -> satspath_core::Result<SignedPaymentProfile> {
+            Err(SatsPathError::ProfileRevoked(alias.to_string()))
+        }
+    }
+
+    /// A resolver-reported revocation must be a no-route, never a fresh invite.
+    #[tokio::test]
+    async fn resolver_revocation_returns_no_route_not_invite() {
+        let resp = quote_inner(
+            &RevokedResolver,
+            "gone@satspath.dev",
+            1_000,
+            Some(cheap_fees()),
+            false,
+        )
+        .await;
+        match resp {
+            QuoteResponse::NoRoute { reason } => assert_eq!(reason, PROFILE_REVOKED_REASON),
+            other => panic!(
+                "expected no_route for a revoked profile, got {}",
+                other.status()
+            ),
+        }
+    }
+
+    /// A verified profile carrying `revoked: true` hits the router-side guard.
+    #[tokio::test]
+    async fn revoked_flag_on_verified_profile_returns_no_route() {
+        let (mut profile, secret) = base_profile(
+            "gone@satspath.dev",
+            vec![lightning_method("gone@getalby.com")],
+        );
+        profile.revoked = true;
+        let resolver = MockResolver {
+            signed: Some(sign(profile, &secret)),
+        };
+        let resp = quote_inner(
+            &resolver,
+            "gone@satspath.dev",
+            1_000,
+            Some(cheap_fees()),
+            false,
+        )
+        .await;
+        match resp {
+            QuoteResponse::NoRoute { reason } => assert_eq!(reason, PROFILE_REVOKED_REASON),
+            other => panic!(
+                "expected no_route for a revoked profile, got {}",
+                other.status()
+            ),
         }
     }
 

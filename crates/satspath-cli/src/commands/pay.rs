@@ -16,6 +16,7 @@ use satspath_router::{select_route, RouteRequest, SwapDirective};
 
 use super::get_resolver;
 
+/// `satspath pay`: resolve and verify the recipient, then preview a route. Never moves funds.
 pub async fn cmd_pay(
     alias: &str,
     amount_sats: u64,
@@ -91,7 +92,7 @@ pub async fn cmd_pay(
             println!("No private keys touched.");
             return Ok(());
         }
-        Err(e) => return Err(anyhow::anyhow!("{}", e)),
+        Err(e) => return Err(resolution_error(e, debug)),
     };
     println!("  Found signed profile.");
 
@@ -102,6 +103,7 @@ pub async fn cmd_pay(
     validate_compressed_pubkey(&signed.profile.identity_pubkey)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
     println!("  Signature valid.");
+    ensure_not_revoked(&signed.profile)?;
 
     println!("Selecting public payment route...");
     let req = RouteRequest {
@@ -166,6 +168,28 @@ pub async fn cmd_pay(
 
     for line in preview_safety_lines() {
         println!("{line}");
+    }
+    Ok(())
+}
+
+/// Turn a resolver error into the user-facing error. A revoked profile is
+/// reported without the identifier unless `debug` is set, since the error's
+/// own text carries the full alias.
+fn resolution_error(err: SatsPathError, debug: bool) -> anyhow::Error {
+    match err {
+        SatsPathError::ProfileRevoked(_) if !debug => anyhow::anyhow!(
+            "Profile has been REVOKED by its owner. Do not pay this key. Aborting preview."
+        ),
+        e => anyhow::anyhow!("{}", e),
+    }
+}
+
+/// Abort before route selection if the recipient's owner revoked the profile.
+fn ensure_not_revoked(profile: &satspath_core::PaymentProfile) -> Result<()> {
+    if profile.revoked {
+        anyhow::bail!(
+            "Profile has been REVOKED by its owner. Do not pay this key. Aborting preview."
+        );
     }
     Ok(())
 }
@@ -482,6 +506,7 @@ fn display_payload(pointer: &PaymentPointer, payload: &str, debug: bool) -> Stri
     }
 }
 
+/// Show `value` in full with --debug, masked otherwise.
 fn display_value(value: &str, mask: fn(&str) -> String, debug: bool) -> String {
     if debug {
         value.to_string()
@@ -490,6 +515,7 @@ fn display_value(value: &str, mask: fn(&str) -> String, debug: bool) -> String {
     }
 }
 
+/// Human-readable network name.
 fn network_name(network: BitcoinNetwork) -> &'static str {
     match network {
         BitcoinNetwork::Mainnet => "mainnet",
@@ -498,6 +524,7 @@ fn network_name(network: BitcoinNetwork) -> &'static str {
     }
 }
 
+/// The fixed safety lines printed after every preview.
 fn preview_safety_lines() -> [&'static str; 5] {
     [
         "SatsPath Preview Mode",
@@ -512,12 +539,48 @@ fn preview_safety_lines() -> [&'static str; 5] {
 mod tests {
     use super::*;
 
+    /// Route preview never reaches swap execution.
     #[test]
     fn route_preview_does_not_call_swap_execution() {
         let joined = preview_safety_lines().join("\n").to_ascii_lowercase();
         assert!(joined.contains("no funds moved"));
         assert!(joined.contains("no signing performed"));
         assert!(!joined.contains("broadcast"));
+    }
+
+    /// A revoked-profile error omits the alias unless debug output is on.
+    #[test]
+    fn revoked_resolution_error_hides_alias_unless_debug() {
+        let err = || SatsPathError::ProfileRevoked("alice@example.com".into());
+        let quiet = resolution_error(err(), false).to_string();
+        assert!(quiet.contains("REVOKED"), "{quiet}");
+        assert!(!quiet.contains("alice"), "alias leaked: {quiet}");
+        let verbose = resolution_error(err(), true).to_string();
+        assert!(verbose.contains("alice@example.com"), "{verbose}");
+    }
+
+    /// pay refuses a revoked recipient before any route is selected.
+    #[test]
+    fn revoked_profile_is_refused_before_routing() {
+        let mut profile = satspath_core::PaymentProfile {
+            alias: "gone@satspath.dev".into(),
+            identity_pubkey: "02".to_string() + &"11".repeat(32),
+            methods: vec![],
+            updated_at: 0,
+            expires_at: None,
+            sequence: Some(0),
+            preferences: vec![],
+            nonce: None,
+            rotation: None,
+            method_verifications: vec![],
+            hybrid_pubkey: None,
+            pqc_required: false,
+            revoked: false,
+        };
+        assert!(ensure_not_revoked(&profile).is_ok());
+        profile.revoked = true;
+        let err = ensure_not_revoked(&profile).unwrap_err().to_string();
+        assert!(err.contains("REVOKED"), "{err}");
     }
 
     #[test]
