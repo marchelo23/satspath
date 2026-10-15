@@ -26,9 +26,10 @@ use satspath_router::quote_response::{
     build_qr_payload, quote_with_resolver, QuoteRecipient, QuoteResponse,
 };
 use satspath_router::wallet_executor::{
-    execute_quote_handoff, BdkHostWallet, BdkOnchainBridge, BdkUtxoDescriptor,
-    BoltzHostSignerBroadcaster, BoltzTestnetSwapBridge, HandoffExecutionReceipt,
-    HostWalletSdkBridge, LdkHostNode, LdkLightningBridge,
+    execute_quote_handoff as execute_verified_handoff, BdkHostWallet, BdkOnchainBridge,
+    BdkUtxoDescriptor, BoltzHostSignerBroadcaster, BoltzSwapEvidence, BoltzTestnetSwapBridge,
+    HandoffExecutionReceipt, HandoffTransparencyEvidence, HandoffTrust, HostWalletSdkBridge,
+    LdkHostNode, LdkLightningBridge,
 };
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -267,7 +268,7 @@ async fn test_ldk_lightning_bridge_validates_and_executes_bolt11() {
 
 /// Reject claims and refunds on every network without signing or broadcasting.
 #[tokio::test]
-async fn boltz_claims_and_refunds_fail_closed_on_every_network() {
+async fn boltz_unsupported_scripts_and_missing_evidence_fail_closed() {
     let preimage = [0x99; 32];
     let mut formerly_accepted_script = vec![0x82, 0x01, 0x20, 0x87, 0x63, 0xa8, 0x20];
     formerly_accepted_script.extend_from_slice(&Sha256::digest(preimage));
@@ -297,7 +298,7 @@ async fn boltz_claims_and_refunds_fail_closed_on_every_network() {
                 )
                 .await
                 .unwrap_err();
-            assert!(claim.to_string().contains("execution is disabled"));
+            assert!(claim.to_string().contains("Boltz swap"));
             for height in [799_999, 800_000, 800_001] {
                 let refund = bridge
                     .execute_submarine_refund(
@@ -313,7 +314,7 @@ async fn boltz_claims_and_refunds_fail_closed_on_every_network() {
                     )
                     .await
                     .unwrap_err();
-                assert!(refund.to_string().contains("execution is disabled"));
+                assert!(refund.to_string().contains("Boltz swap"));
             }
         }
     }
@@ -895,4 +896,520 @@ async fn fetched_invoice_requires_current_signed_payee_key() {
             usize::from(bind_payee)
         );
     }
+}
+
+/// Supply real signed witness/gossip evidence for existing handoff regression tests.
+fn transparency_fixture(
+    store: &TransactionalTransparencyStore,
+    alias: &str,
+    pins_dir: &std::path::Path,
+) -> satspath_core::Result<(HandoffTrust, HandoffTransparencyEvidence)> {
+    use satspath_core::transparency::{CheckpointStore, GossipObservation, WitnessCosignature};
+    let log = store.load_log()?;
+    let cp = log.checkpoints().last().ok_or_else(|| {
+        satspath_core::SatsPathError::ValidationError("missing checkpoint".into())
+    })?;
+    let pins = CheckpointStore::new(pins_dir);
+    pins.pin_verified(cp)?;
+    let mut signatures = vec![];
+    let mut witnesses = vec![];
+    for byte in [0x71, 0x72] {
+        let key = SecretKey::from_slice(&[byte; 32]).unwrap();
+        let pubkey =
+            bitcoin::secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &key).to_string();
+        let mut signature = WitnessCosignature {
+            version: 1,
+            witness_id: format!("witness-{byte}"),
+            witness_pubkey: pubkey.clone(),
+            checkpoint_hash: cp.checkpoint_hash()?,
+            tree_size: cp.log_size,
+            timestamp: chrono::Utc::now().timestamp(),
+            signature: String::new(),
+        };
+        signature.signature =
+            satspath_core::crypto::sign_message(&signature.signing_message(), &key);
+        signatures.push(signature);
+        witnesses.push(pubkey);
+    }
+    let observer = SecretKey::from_slice(&[0x73; 32]).unwrap();
+    let gossip = GossipObservation::sign(cp.clone(), &observer, chrono::Utc::now().timestamp())?;
+    Ok((
+        HandoffTrust {
+            checkpoints: std::sync::Mutex::new(pins),
+            witness_quorum: 2,
+            witness_pubkeys: witnesses,
+            observer_pubkeys: vec![gossip.observer_pubkey.clone()],
+        },
+        HandoffTransparencyEvidence {
+            current_state_proof: log.prove_state(&satspath_core::identifier_hash(alias))?,
+            witness_cosignatures: signatures,
+            gossip_observations: vec![gossip],
+        },
+    ))
+}
+
+async fn execute_quote_handoff(
+    executor: &dyn WalletExecutor,
+    store: &TransactionalTransparencyStore,
+    quote: &QuoteResponse,
+    amount: u64,
+    policy: &ExecutionGatePolicy,
+    confirmed: bool,
+) -> satspath_core::Result<HandoffExecutionReceipt> {
+    let QuoteResponse::Ok { recipient, .. } = quote else {
+        return Err(satspath_core::SatsPathError::ValidationError(
+            "invalid test quote".into(),
+        ));
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (trust, evidence) = transparency_fixture(store, &recipient.alias, dir.path())?;
+    execute_verified_handoff(
+        executor, store, &trust, &evidence, quote, amount, policy, confirmed,
+    )
+    .await
+}
+
+/// Every transparency dimension must fail before dispatch; a complete 2-of-2 proof succeeds.
+#[tokio::test]
+async fn handoff_requires_state_quorum_gossip_and_persisted_checkpoint() {
+    let identity = generate_identity_keypair();
+    let signed = signed_lightning_profile(&identity, &make_testnet_bolt11(1_000));
+    let home = tempfile::tempdir().unwrap();
+    let store = TransactionalTransparencyStore::open(home.path()).unwrap();
+    commit_profile(&store, &signed, &identity, NameAction::Register);
+    let executor = CountingExecutor {
+        network: BitcoinNetwork::Testnet,
+        calls: AtomicUsize::new(0),
+    };
+    let quote = quote_for(&signed, 1_000);
+    for case in 0..19 {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut trust, mut evidence) =
+            transparency_fixture(&store, &signed.profile.alias, dir.path()).unwrap();
+        match case {
+            0 => evidence.current_state_proof.audit_path.clear(),
+            1 => evidence.current_state_proof.key_hash = "ff".repeat(32),
+            2 => {
+                evidence
+                    .current_state_proof
+                    .value
+                    .as_mut()
+                    .unwrap()
+                    .latest_event_hash = "ff".repeat(32)
+            }
+            3 => evidence.current_state_proof.value = None,
+            4 => evidence.witness_cosignatures.clear(),
+            5 => evidence.witness_cosignatures[1] = evidence.witness_cosignatures[0].clone(),
+            6 => evidence.witness_cosignatures[0].checkpoint_hash = "ff".repeat(32),
+            7 => evidence.witness_cosignatures[0].tree_size += 1,
+            8 => evidence.witness_cosignatures[0].signature = "00".repeat(64),
+            9 => trust.witness_quorum = 0,
+            10 => {
+                trust.witness_pubkeys.remove(0);
+            }
+            11 => evidence.gossip_observations.clear(),
+            12 => trust.observer_pubkeys.clear(),
+            13 => {
+                let cp = &mut evidence.gossip_observations[0].checkpoint;
+                cp.map_root = Some("ff".repeat(32));
+                cp.sign(&SecretKey::from_slice(&[0x66; 32]).unwrap())
+                    .unwrap();
+                evidence.gossip_observations[0] =
+                    satspath_core::transparency::GossipObservation::sign(
+                        cp.clone(),
+                        &SecretKey::from_slice(&[0x73; 32]).unwrap(),
+                        chrono::Utc::now().timestamp(),
+                    )
+                    .unwrap();
+            }
+            14 => {
+                let mut cp = store
+                    .load_log()
+                    .unwrap()
+                    .checkpoints()
+                    .last()
+                    .unwrap()
+                    .clone();
+                cp.log_size += 1;
+                cp.sign(&SecretKey::from_slice(&[0x66; 32]).unwrap())
+                    .unwrap();
+                trust.checkpoints.lock().unwrap().pin_verified(&cp).unwrap();
+            }
+            15 => {
+                let mut cp = store
+                    .load_log()
+                    .unwrap()
+                    .checkpoints()
+                    .last()
+                    .unwrap()
+                    .clone();
+                cp.map_root = Some("ff".repeat(32));
+                cp.sign(&SecretKey::from_slice(&[0x66; 32]).unwrap())
+                    .unwrap();
+                trust.checkpoints.lock().unwrap().pin_verified(&cp).unwrap();
+            }
+            16 => {
+                std::fs::remove_file(dir.path().join("transparency-pins.json")).unwrap();
+            }
+            17 => {
+                evidence.current_state_proof = store
+                    .load_log()
+                    .unwrap()
+                    .prove_state(&satspath_core::identifier_hash("absent@example.com"))
+                    .unwrap();
+            }
+            18 => {
+                let key =
+                    bitcoin::secp256k1::PublicKey::from_str(&trust.witness_pubkeys[0]).unwrap();
+                trust.witness_pubkeys[1] = key.negate(&Secp256k1::new()).to_string();
+            }
+            _ => unreachable!(),
+        };
+        assert!(
+            execute_verified_handoff(
+                &executor,
+                &store,
+                &trust,
+                &evidence,
+                &quote,
+                1_000,
+                &ExecutionGatePolicy::testnet_default(),
+                true
+            )
+            .await
+            .is_err(),
+            "case {case}"
+        );
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 0, "case {case}");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (mut trust, mut evidence) =
+        transparency_fixture(&store, &signed.profile.alias, dir.path()).unwrap();
+    // X-only and compressed public keys both identify BIP340 witnesses.
+    let key = bitcoin::secp256k1::PublicKey::from_str(&trust.witness_pubkeys[0]).unwrap();
+    trust.witness_pubkeys[0] = key.x_only_public_key().0.to_string();
+    evidence.witness_cosignatures[0].witness_pubkey = trust.witness_pubkeys[0].clone();
+    let previous_observation = evidence.gossip_observations[0].clone();
+    execute_verified_handoff(
+        &executor,
+        &store,
+        &trust,
+        &evidence,
+        &quote,
+        1_000,
+        &ExecutionGatePolicy::testnet_default(),
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+    // A later profile/checkpoint must extend the persisted pin with an RFC6962 proof.
+    let mut updated = signed.profile.clone();
+    updated.sequence = Some(1);
+    let updated = sign_profile(updated, &identity.secret_key).unwrap();
+    commit_profile(&store, &updated, &identity, NameAction::UpdateProfile);
+    let other = tempfile::tempdir().unwrap();
+    let (_, mut evidence) =
+        transparency_fixture(&store, &updated.profile.alias, other.path()).unwrap();
+    evidence.witness_cosignatures[0].witness_pubkey = trust.witness_pubkeys[0].clone();
+    evidence
+        .gossip_observations
+        .push(previous_observation.clone());
+    // A consistent log-root extension must not hide a fork in the pinned map root.
+    let mut fork = previous_observation.checkpoint.clone();
+    fork.map_root = Some("ff".repeat(32));
+    fork.sign(&SecretKey::from_slice(&[0x66; 32]).unwrap())
+        .unwrap();
+    trust
+        .checkpoints
+        .lock()
+        .unwrap()
+        .pin_verified(&fork)
+        .unwrap();
+    assert!(execute_verified_handoff(
+        &executor,
+        &store,
+        &trust,
+        &evidence,
+        &quote_for(&updated, 1_000),
+        1_000,
+        &ExecutionGatePolicy::testnet_default(),
+        true
+    )
+    .await
+    .is_err());
+    assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+    trust
+        .checkpoints
+        .lock()
+        .unwrap()
+        .pin_verified(&previous_observation.checkpoint)
+        .unwrap();
+    execute_verified_handoff(
+        &executor,
+        &store,
+        &trust,
+        &evidence,
+        &quote_for(&updated, 1_000),
+        1_000,
+        &ExecutionGatePolicy::testnet_default(),
+        true,
+    )
+    .await
+    .unwrap();
+    let reloaded = satspath_core::transparency::CheckpointStore::new(dir.path())
+        .load()
+        .unwrap();
+    assert_eq!(reloaded[0].tree_size, 2);
+}
+
+struct SimulatedBoltzHost {
+    evidence: BoltzSwapEvidence,
+    key: SecretKey,
+    signs: std::sync::Arc<AtomicUsize>,
+    broadcasts: std::sync::Arc<AtomicUsize>,
+    wrong_txid: bool,
+}
+
+#[async_trait]
+impl BoltzHostSignerBroadcaster for SimulatedBoltzHost {
+    async fn swap_evidence(&self, _: &str) -> Result<BoltzSwapEvidence> {
+        Ok(self.evidence.clone())
+    }
+    async fn sign_swap_digest(&self, _: &str, digest: [u8; 32]) -> Result<Vec<u8>> {
+        self.signs.fetch_add(1, Ordering::SeqCst);
+        let sig = Secp256k1::new()
+            .sign_ecdsa(&bitcoin::secp256k1::Message::from_digest(digest), &self.key);
+        let mut bytes = sig.serialize_der().to_vec();
+        bytes.push(1);
+        Ok(bytes)
+    }
+    async fn broadcast_swap_tx(&self, raw: &str) -> Result<String> {
+        let tx: bitcoin::Transaction = bitcoin::consensus::deserialize(&hex::decode(raw)?)?;
+        assert_eq!(tx.input.len(), 1);
+        assert_eq!(tx.output.len(), 1);
+        assert_eq!(
+            tx.input[0].sequence,
+            bitcoin::Sequence::ENABLE_LOCKTIME_NO_RBF
+        );
+        assert_eq!(tx.output[0].value.to_sat(), 49_500);
+        let stack: Vec<_> = tx.input[0].witness.iter().collect();
+        assert_eq!(stack.len(), 3);
+        let script = bitcoin::ScriptBuf::from_bytes(stack[2].to_vec());
+        assert_eq!(
+            script.to_p2wsh(),
+            self.evidence.lockup_transaction.output[0].script_pubkey
+        );
+        let claim = !stack[1].is_empty();
+        let key = if claim {
+            assert_eq!(
+                sha256::Hash::hash(stack[1]).to_byte_array(),
+                self.evidence.payment_hash
+            );
+            assert_eq!(tx.lock_time, bitcoin::absolute::LockTime::ZERO);
+            self.evidence.claim_pubkey
+        } else {
+            assert_eq!(
+                tx.lock_time.to_consensus_u32(),
+                self.evidence.timeout_block_height
+            );
+            self.evidence.refund_pubkey
+        };
+        let hash = bitcoin::sighash::SighashCache::new(&tx).p2wsh_signature_hash(
+            0,
+            &script,
+            bitcoin::Amount::from_sat(50_000),
+            bitcoin::sighash::EcdsaSighashType::All,
+        )?;
+        let sig = bitcoin::ecdsa::Signature::from_slice(stack[0])?;
+        Secp256k1::new().verify_ecdsa(
+            &bitcoin::secp256k1::Message::from_digest(hash.to_byte_array()),
+            &sig.signature,
+            &key.inner,
+        )?;
+        self.broadcasts.fetch_add(1, Ordering::SeqCst);
+        Ok(if self.wrong_txid {
+            "ff".repeat(32)
+        } else {
+            tx.compute_txid().to_string()
+        })
+    }
+}
+
+/// Independently encode the legacy Boltz scripts (800000 = 0x0c3500).
+fn swap_fixture(reverse: bool) -> (SimulatedBoltzHost, String) {
+    swap_fixture_with_hash(reverse, sha256::Hash::hash(&[0x99; 32]).to_byte_array())
+}
+
+fn swap_fixture_with_hash(reverse: bool, payment_hash: [u8; 32]) -> (SimulatedBoltzHost, String) {
+    use bitcoin::hashes::ripemd160;
+    let claim = SecretKey::from_slice(&[0x21; 32]).unwrap();
+    let refund = SecretKey::from_slice(&[0x22; 32]).unwrap();
+    let claim_pubkey = bitcoin::PublicKey::new(claim.public_key(&Secp256k1::new()));
+    let refund_pubkey = bitcoin::PublicKey::new(refund.public_key(&Secp256k1::new()));
+    let hash = ripemd160::Hash::hash(&payment_hash);
+    let script_hex = if reverse {
+        format!("8201208763a914{hash}8821{claim_pubkey}67750300350cb17521{refund_pubkey}68ac")
+    } else {
+        format!("a914{hash}876321{claim_pubkey}670300350cb17521{refund_pubkey}68ac")
+    };
+    let script = bitcoin::ScriptBuf::from_bytes(hex::decode(&script_hex).unwrap());
+    let lockup_transaction = bitcoin::Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint::null(),
+            script_sig: bitcoin::ScriptBuf::new(),
+            sequence: bitcoin::Sequence::MAX,
+            witness: bitcoin::Witness::new(),
+        }],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(50_000),
+            script_pubkey: script.to_p2wsh(),
+        }],
+    };
+    (
+        SimulatedBoltzHost {
+            evidence: BoltzSwapEvidence {
+                network: BitcoinNetwork::Testnet,
+                lockup_transaction,
+                lockup_vout: 0,
+                confirmations: 1,
+                unspent: true,
+                current_block_height: 800_000,
+                payment_hash,
+                claim_pubkey,
+                refund_pubkey,
+                timeout_block_height: 800_000,
+                destination_address: "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn".into(),
+                max_fee_sats: 1_000,
+            },
+            key: if reverse { claim } else { refund },
+            signs: Default::default(),
+            broadcasts: Default::default(),
+            wrong_txid: false,
+        },
+        script_hex,
+    )
+}
+
+/// Valid testnet claim/refund paths use real BIP143 signatures; malformed inputs never sign.
+#[tokio::test]
+async fn boltz_testnet_claim_refund_validation_and_host_execution() {
+    for reverse in [true, false] {
+        for case in 0..18 {
+            let (mut host, mut script) = swap_fixture(reverse);
+            let mut txid = host.evidence.lockup_transaction.compute_txid().to_string();
+            let mut network = BitcoinNetwork::Testnet;
+            let mut destination = host.evidence.destination_address.clone();
+            let mut amount = 50_000;
+            let mut fee = 500;
+            let mut preimage = hex::encode([0x99; 32]);
+            let mut height = 800_000;
+            match case {
+                0 => {} // successful spend
+                1 => network = BitcoinNetwork::Mainnet,
+                2 => script.push_str("51"),
+                3 => amount += 1,
+                4 => destination = "1BoatSLRHtKNngkdXEeobR76b53LETtpyT".into(),
+                5 => fee = 10_001,
+                6 => fee = 0,
+                7 => host.evidence.unspent = false,
+                8 => host.evidence.confirmations = 0,
+                9 => {
+                    host.evidence.lockup_transaction.output[0].value =
+                        bitcoin::Amount::from_sat(50_001)
+                }
+                10 => {
+                    host.evidence.lockup_transaction.output[0].script_pubkey =
+                        bitcoin::ScriptBuf::new()
+                }
+                11 => {
+                    preimage = hex::encode([0x88; 32]);
+                    height -= 1;
+                }
+                12 => host.evidence.network = BitcoinNetwork::Regtest,
+                13 => host.evidence.max_fee_sats = 499,
+                14 => host.evidence.destination_address = "another destination".into(),
+                15 => host.key = SecretKey::from_slice(&[0x23; 32]).unwrap(),
+                16 => host.wrong_txid = true,
+                17 => host.evidence.timeout_block_height += 1,
+                _ => unreachable!(),
+            }
+            if matches!(case, 9 | 10) {
+                txid = host.evidence.lockup_transaction.compute_txid().to_string();
+            }
+            let signs = host.signs.clone();
+            let broadcasts = host.broadcasts.clone();
+            let bridge = BoltzTestnetSwapBridge::new(network, host);
+            let result = if reverse {
+                bridge
+                    .execute_reverse_claim(
+                        "swap",
+                        &txid,
+                        0,
+                        amount,
+                        &preimage,
+                        &script,
+                        &destination,
+                        fee,
+                    )
+                    .await
+            } else {
+                bridge
+                    .execute_submarine_refund(
+                        "swap",
+                        &txid,
+                        0,
+                        amount,
+                        800_000,
+                        height,
+                        &script,
+                        &destination,
+                        fee,
+                    )
+                    .await
+            };
+            assert_eq!(
+                result.is_ok(),
+                case == 0,
+                "reverse={reverse} case={case}: {result:?}"
+            );
+            assert_eq!(
+                signs.load(Ordering::SeqCst),
+                usize::from(matches!(case, 0 | 15 | 16)),
+                "case {case}"
+            );
+            assert_eq!(
+                broadcasts.load(Ordering::SeqCst),
+                usize::from(matches!(case, 0 | 16)),
+                "case {case}"
+            );
+        }
+    }
+}
+
+/// The empty refund selector must actually select CLTV, even for adversarial hash commitments.
+#[tokio::test]
+async fn boltz_refund_rejects_hash_that_selects_claim_branch() {
+    let (host, script) = swap_fixture_with_hash(false, sha256::Hash::hash(&[]).to_byte_array());
+    let txid = host.evidence.lockup_transaction.compute_txid().to_string();
+    let destination = host.evidence.destination_address.clone();
+    let signs = host.signs.clone();
+    let bridge = BoltzTestnetSwapBridge::new(BitcoinNetwork::Testnet, host);
+    let result = bridge
+        .execute_submarine_refund(
+            "swap",
+            &txid,
+            0,
+            50_000,
+            800_000,
+            800_000,
+            &script,
+            &destination,
+            500,
+        )
+        .await;
+    assert!(result.unwrap_err().to_string().contains("claim branch"));
+    assert_eq!(signs.load(Ordering::SeqCst), 0);
 }

@@ -44,7 +44,7 @@ pub enum HandoffExecutionReceipt {
     Onchain(OnchainReceipt),
     /// Lightning BOLT11 payment executed by the host wallet (e.g. LDK).
     Lightning(PaymentReceipt),
-    /// Reserved for verified swap settlement; current swap execution APIs always fail closed.
+    /// Host-broadcast swap spend; confirmations must be tracked separately.
     SwapSettlement {
         /// Swap identifier.
         swap_id: String,
@@ -440,102 +440,486 @@ fn base64_encode_psbt(psbt: &Psbt) -> String {
 // 4. Boltz Testnet Swap Claim/Refund Host-Wallet Execution Bridge
 // ============================================================================
 
-/// Reserved host-wallet swap callbacks. The current bridge never invokes them.
-///
-/// Enabling execution requires a separate verified lockup, witness and chain-evidence
-/// interface; the signature bytes and transaction ID returned here cannot prove settlement.
+/// Public swap terms and fresh chain evidence obtained by the sovereign host wallet.
+/// The host must authenticate these terms against its saved swap agreement and query
+/// its trusted Bitcoin node for the confirmed, unspent lockup and current tip.
+#[derive(Debug, Clone)]
+pub struct BoltzSwapEvidence {
+    pub network: BitcoinNetwork,
+    pub lockup_transaction: Transaction,
+    pub lockup_vout: u32,
+    pub confirmations: u32,
+    pub unspent: bool,
+    pub current_block_height: u32,
+    pub payment_hash: [u8; 32],
+    pub claim_pubkey: bitcoin::PublicKey,
+    pub refund_pubkey: bitcoin::PublicKey,
+    pub timeout_block_height: u32,
+    pub destination_address: String,
+    pub max_fee_sats: u64,
+}
+
+/// Host-owned signing, chain verification and broadcasting boundary.
 #[async_trait]
 pub trait BoltzHostSignerBroadcaster: Send + Sync {
-    /// Sign a 32-byte sighash digest with the host wallet's ephemeral swap key (`claim` or `refund`)
-    /// and return a DER-encoded ECDSA signature (with sighash byte) or 64-byte Schnorr signature.
+    /// Load authenticated swap terms and fresh chain evidence, independently of
+    /// caller-supplied outpoints/amounts. Missing evidence disables execution.
+    async fn swap_evidence(&self, _swap_id: &str) -> Result<BoltzSwapEvidence> {
+        anyhow::bail!("verified swap evidence unavailable")
+    }
+
+    /// Inspect/authorize the spend and return a low-S DER ECDSA signature followed
+    /// by SIGHASH_ALL (0x01), using the saved swap's claim or refund spending key.
     async fn sign_swap_digest(&self, swap_id: &str, sighash: [u8; 32]) -> Result<Vec<u8>>;
 
-    /// Broadcast a fully constructed raw transaction hex to the Testnet/Regtest network and
-    /// return the confirmed/verified 64-char hex `txid`.
+    /// Broadcast on the configured test network; return the transaction's txid.
+    /// A broadcast receipt does not attest to settlement confirmations.
     async fn broadcast_swap_tx(&self, raw_tx_hex: &str) -> Result<String>;
 }
 
-/// Reserved Boltz swap bridge. Claims and refunds are disabled on every network.
-///
-/// The current API cannot authenticate the lockup UTXO, supported witness script,
-/// spending sighash, signature, or independent chain settlement evidence. It must
-/// never invoke the signer/broadcaster or issue a settlement receipt, including
-/// for Taproot and cross-chain swaps, until that verification flow exists.
+/// Testnet/Regtest legacy Boltz native P2WSH HTLC spends. Mainnet, Taproot,
+/// nested SegWit and cross-chain scripts are deliberately unsupported.
 pub struct BoltzTestnetSwapBridge<S: BoltzHostSignerBroadcaster> {
-    _network: BitcoinNetwork,
-    _signer: S,
+    network: BitcoinNetwork,
+    signer: S,
 }
 
 impl<S: BoltzHostSignerBroadcaster> BoltzTestnetSwapBridge<S> {
-    /// Retain the host integration configuration without enabling swap execution.
     pub fn new(network: BitcoinNetwork, signer: S) -> Self {
-        Self {
-            _network: network,
-            _signer: signer,
-        }
+        Self { network, signer }
     }
 
-    /// Reject every reverse claim before signing or broadcasting.
-    ///
-    /// Caller-supplied outpoints, amounts, preimages and scripts are insufficient
-    /// to authenticate a spend or demonstrate settlement.
+    /// Claim a confirmed reverse-swap lockup using its committed 32-byte preimage.
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_reverse_claim(
         &self,
-        _swap_id: &str,
-        _lockup_txid: &str,
-        _lockup_vout: u32,
-        _lockup_amount_sats: u64,
-        _preimage_hex: &str,
-        _redeem_script_hex: &str,
-        _destination_address: &str,
-        _miner_fee_sats: u64,
+        swap_id: &str,
+        lockup_txid: &str,
+        lockup_vout: u32,
+        lockup_amount_sats: u64,
+        preimage_hex: &str,
+        redeem_script_hex: &str,
+        destination_address: &str,
+        miner_fee_sats: u64,
     ) -> CoreResult<HandoffExecutionReceipt> {
-        Err(SatsPathError::ValidationError(
-            "Boltz swap execution is disabled: verified lockup, witness and chain evidence are required".into(),
-        ))
+        let preimage: [u8; 32] = hex::decode(preimage_hex)
+            .map_err(|_| invalid_swap("invalid preimage"))?
+            .try_into()
+            .map_err(|_| invalid_swap("preimage must be 32 bytes"))?;
+        self.execute_swap(
+            swap_id,
+            lockup_txid,
+            lockup_vout,
+            lockup_amount_sats,
+            Some(preimage),
+            None,
+            redeem_script_hex,
+            destination_address,
+            miner_fee_sats,
+        )
+        .await
     }
 
-    /// Reject every submarine refund before signing or broadcasting.
-    ///
-    /// Caller-supplied block heights do not prove the timelock or spend rules.
+    /// Refund a submarine swap after its block-height CLTV has matured.
+    /// The supplied height is cross-checked against the host's trusted node.
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_submarine_refund(
         &self,
-        _swap_id: &str,
-        _lockup_txid: &str,
-        _lockup_vout: u32,
-        _lockup_amount_sats: u64,
-        _timeout_block_height: u32,
-        _current_block_height: u32,
-        _redeem_script_hex: &str,
-        _destination_address: &str,
-        _miner_fee_sats: u64,
+        swap_id: &str,
+        lockup_txid: &str,
+        lockup_vout: u32,
+        lockup_amount_sats: u64,
+        timeout_block_height: u32,
+        current_block_height: u32,
+        redeem_script_hex: &str,
+        destination_address: &str,
+        miner_fee_sats: u64,
     ) -> CoreResult<HandoffExecutionReceipt> {
-        Err(SatsPathError::ValidationError(
-            "Boltz swap execution is disabled: verified lockup, witness and chain evidence are required".into(),
-        ))
+        self.execute_swap(
+            swap_id,
+            lockup_txid,
+            lockup_vout,
+            lockup_amount_sats,
+            None,
+            Some((timeout_block_height, current_block_height)),
+            redeem_script_hex,
+            destination_address,
+            miner_fee_sats,
+        )
+        .await
     }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_swap(
+        &self,
+        swap_id: &str,
+        lockup_txid: &str,
+        lockup_vout: u32,
+        amount: u64,
+        preimage: Option<[u8; 32]>,
+        refund_heights: Option<(u32, u32)>,
+        script_hex: &str,
+        destination: &str,
+        fee: u64,
+    ) -> CoreResult<HandoffExecutionReceipt> {
+        use bitcoin::hashes::{hash160, ripemd160, sha256, Hash};
+        use bitcoin::secp256k1::{Message, Secp256k1};
+        use bitcoin::sighash::{EcdsaSighashType, SighashCache};
+        if self.network == BitcoinNetwork::Mainnet {
+            return Err(invalid_swap("Mainnet execution is disabled"));
+        }
+        validate_amount_sats(amount)?;
+        validate_bitcoin_address(destination, self.network)?;
+        if swap_id.trim().is_empty() || fee == 0 || fee > 10_000 {
+            return Err(invalid_swap(
+                "invalid swap ID or miner fee (1..=10000 sats)",
+            ));
+        }
+        let output_amount = amount
+            .checked_sub(fee)
+            .filter(|value| *value >= 546)
+            .ok_or_else(|| invalid_swap("fee exceeds amount or output is dust"))?;
+        let evidence = self
+            .signer
+            .swap_evidence(swap_id)
+            .await
+            .map_err(|e| invalid_swap(&format!("lockup evidence: {e}")))?;
+        let outpoint = OutPoint::from_str(&format!("{lockup_txid}:{lockup_vout}"))
+            .map_err(|_| invalid_swap("invalid lockup outpoint"))?;
+        let script = ScriptBuf::from_bytes(
+            hex::decode(script_hex).map_err(|_| invalid_swap("invalid witness script hex"))?,
+        );
+        if evidence.network != self.network
+            || evidence.confirmations == 0
+            || !evidence.unspent
+            || evidence.lockup_transaction.compute_txid() != outpoint.txid
+            || evidence.lockup_vout != lockup_vout
+            || evidence.destination_address != destination
+            || fee > evidence.max_fee_sats
+            || evidence.timeout_block_height == 0
+            || evidence.timeout_block_height >= 500_000_000
+            || !evidence.claim_pubkey.compressed
+            || !evidence.refund_pubkey.compressed
+            || script != boltz_witness_script(&evidence, preimage.is_some())
+        {
+            return Err(invalid_swap(
+                "swap terms, witness script or lockup evidence mismatch",
+            ));
+        }
+        let lockup = evidence
+            .lockup_transaction
+            .output
+            .get(lockup_vout as usize)
+            .ok_or_else(|| invalid_swap("lockup output missing"))?;
+        if lockup.value.to_sat() != amount || lockup.script_pubkey != script.to_p2wsh() {
+            return Err(invalid_swap("lockup amount or P2WSH commitment mismatch"));
+        }
+        let (lock_time, key, selector, kind) = if let Some(preimage) = preimage {
+            if sha256::Hash::hash(&preimage).to_byte_array() != evidence.payment_hash {
+                return Err(invalid_swap("preimage does not match payment hash"));
+            }
+            (
+                LockTime::ZERO,
+                evidence.claim_pubkey,
+                preimage.to_vec(),
+                "reverse_claim",
+            )
+        } else {
+            let (timeout, height) =
+                refund_heights.ok_or_else(|| invalid_swap("missing refund height"))?;
+            if hash160::Hash::hash(&[]).to_byte_array()
+                == ripemd160::Hash::hash(&evidence.payment_hash).to_byte_array()
+            {
+                return Err(invalid_swap(
+                    "empty refund selector would take the claim branch",
+                ));
+            }
+            if timeout != evidence.timeout_block_height
+                || height != evidence.current_block_height
+                || height < timeout
+            {
+                return Err(invalid_swap(
+                    "CLTV has not matured or height evidence mismatch",
+                ));
+            }
+            (
+                LockTime::from_height(timeout).map_err(|_| invalid_swap("invalid CLTV height"))?,
+                evidence.refund_pubkey,
+                vec![],
+                "submarine_refund",
+            )
+        };
+        let address = Address::from_str(destination)
+            .map_err(|_| invalid_swap("invalid destination"))?
+            .assume_checked();
+        let mut tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time,
+            input: vec![TxIn {
+                previous_output: outpoint,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_LOCKTIME_NO_RBF,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(output_amount),
+                script_pubkey: address.script_pubkey(),
+            }],
+        };
+        let sighash = SighashCache::new(&tx)
+            .p2wsh_signature_hash(0, &script, lockup.value, EcdsaSighashType::All)
+            .map_err(|_| invalid_swap("cannot compute BIP143 sighash"))?
+            .to_byte_array();
+        let bytes = self
+            .signer
+            .sign_swap_digest(swap_id, sighash)
+            .await
+            .map_err(|e| invalid_swap(&format!("host signing failed: {e}")))?;
+        let signature = bitcoin::ecdsa::Signature::from_slice(&bytes)
+            .map_err(|_| invalid_swap("invalid host ECDSA signature"))?;
+        let mut normalized = signature.signature;
+        normalized.normalize_s();
+        if signature.sighash_type != EcdsaSighashType::All
+            || normalized != signature.signature
+            || Secp256k1::verification_only()
+                .verify_ecdsa(
+                    &Message::from_digest(sighash),
+                    &signature.signature,
+                    &key.inner,
+                )
+                .is_err()
+        {
+            return Err(invalid_swap("host signature does not authorize this spend"));
+        }
+        tx.input[0].witness = bitcoin::Witness::from_slice(&[bytes, selector, script.into_bytes()]);
+        let expected_txid = tx.compute_txid().to_string();
+        let txid = self
+            .signer
+            .broadcast_swap_tx(&bitcoin::consensus::encode::serialize_hex(&tx))
+            .await
+            .map_err(|e| SatsPathError::NetworkError(format!("host broadcast failed: {e}")))?;
+        if txid != expected_txid {
+            return Err(invalid_swap("broadcast transaction ID mismatch"));
+        }
+        Ok(HandoffExecutionReceipt::SwapSettlement {
+            swap_id: swap_id.into(),
+            settlement_kind: kind.into(),
+            txid,
+            output_amount_sats: output_amount,
+            fee_sats: fee,
+        })
+    }
+}
+
+fn invalid_swap(message: &str) -> SatsPathError {
+    SatsPathError::ValidationError(format!("Boltz swap: {message}"))
+}
+
+/// Reconstruct the complete legacy Boltz script from authenticated public terms.
+/// Exact byte equality rejects extra opcodes, alternate branches and nonminimal pushes.
+fn boltz_witness_script(terms: &BoltzSwapEvidence, reverse: bool) -> ScriptBuf {
+    use bitcoin::hashes::{ripemd160, Hash};
+    use bitcoin::opcodes::all::*;
+    use bitcoin::script::Builder;
+    let commitment = ripemd160::Hash::hash(&terms.payment_hash).to_byte_array();
+    let builder = if reverse {
+        Builder::new()
+            .push_opcode(OP_SIZE)
+            .push_int(32)
+            .push_opcode(OP_EQUAL)
+            .push_opcode(OP_IF)
+            .push_opcode(OP_HASH160)
+            .push_slice(commitment)
+            .push_opcode(OP_EQUALVERIFY)
+            .push_key(&terms.claim_pubkey)
+            .push_opcode(OP_ELSE)
+            .push_opcode(OP_DROP)
+    } else {
+        Builder::new()
+            .push_opcode(OP_HASH160)
+            .push_slice(commitment)
+            .push_opcode(OP_EQUAL)
+            .push_opcode(OP_IF)
+            .push_key(&terms.claim_pubkey)
+            .push_opcode(OP_ELSE)
+    };
+    builder
+        .push_int(terms.timeout_block_height as i64)
+        .push_opcode(OP_CLTV)
+        .push_opcode(OP_DROP)
+        .push_key(&terms.refund_pubkey)
+        .push_opcode(OP_ENDIF)
+        .push_opcode(OP_CHECKSIG)
+        .into_script()
 }
 
 // ============================================================================
 // 5. End-to-End QuoteResponse -> WalletExecutor Dispatcher
 // ============================================================================
 
+/// Host-configured trust anchors, kept outside serialized quotes. Bootstrap the
+/// checkpoint store out of band from a trusted checkpoint before executing. Reuse
+/// this instance across calls and give its pin directory a single process owner.
+pub struct HandoffTrust {
+    pub checkpoints: std::sync::Mutex<satspath_core::transparency::CheckpointStore>,
+    pub witness_quorum: u8,
+    pub witness_pubkeys: Vec<String>,
+    pub observer_pubkeys: Vec<String>,
+}
+
+/// Required evidence fetched from witnesses and independent observers for this
+/// resolution. Serialized status flags are never used as proof of verification.
+pub struct HandoffTransparencyEvidence {
+    pub current_state_proof: satspath_core::transparency::StateMapProof,
+    pub witness_cosignatures: Vec<satspath_core::transparency::WitnessCosignature>,
+    pub gossip_observations: Vec<satspath_core::transparency::GossipObservation>,
+}
+
+fn verify_handoff_transparency(
+    trust: &HandoffTrust,
+    evidence: &HandoffTransparencyEvidence,
+    log: &satspath_core::transparency::TransparencyLog,
+    checkpoint: &satspath_core::transparency::TransparencyCheckpoint,
+    latest: &satspath_core::transparency::NameEvent,
+) -> CoreResult<()> {
+    use satspath_core::transparency::{
+        verify_checkpoint_state_binding, verify_checkpoint_transition,
+        verify_witness_quorum_against_checkpoint, DimensionStatus, IdentifierStatus,
+        PinnedCheckpoint, StateMapValue,
+    };
+    let invalid = || {
+        SatsPathError::ValidationError(
+            "handoff transparency evidence or trust policy invalid".into(),
+        )
+    };
+    let proof = &evidence.current_state_proof;
+    verify_checkpoint_state_binding(proof, checkpoint)?;
+    if proof.key_hash != latest.identifier_hash
+        || proof.value
+            != Some(StateMapValue {
+                latest_event_hash: latest.event_hash()?,
+                sequence: latest.sequence,
+                status: IdentifierStatus::Registered,
+            })
+    {
+        // A valid non-inclusion proof authenticates absence, never a payable alias.
+        return Err(invalid());
+    }
+    // BIP340 identities are x-only. Reject duplicate encodings and opposite-parity
+    // aliases in the configured policy before using the core quorum verifier.
+    let mut identities = std::collections::HashSet::new();
+    for key in &trust.witness_pubkeys {
+        let identity = if key.len() == 64 {
+            bitcoin::secp256k1::XOnlyPublicKey::from_str(key).map_err(|_| invalid())?
+        } else {
+            bitcoin::secp256k1::PublicKey::from_str(key)
+                .map_err(|_| invalid())?
+                .x_only_public_key()
+                .0
+        };
+        if !identities.insert(identity.serialize()) {
+            return Err(invalid());
+        }
+    }
+    if trust.witness_quorum == 0
+        || verify_witness_quorum_against_checkpoint(
+            Some(checkpoint),
+            &evidence.witness_cosignatures,
+            trust.witness_quorum,
+            &trust.witness_pubkeys,
+        ) != DimensionStatus::Verified
+        || evidence.gossip_observations.is_empty()
+    {
+        return Err(invalid());
+    }
+    let pins = trust.checkpoints.lock().map_err(|_| invalid())?;
+    let pin = pins
+        .load()?
+        .into_iter()
+        .find(|pin| pin.log_id == checkpoint.log_id)
+        .ok_or_else(invalid)?;
+    let consistency = if pin.tree_size < checkpoint.log_size {
+        if !log.checkpoints().iter().any(|cp| {
+            cp.log_size == pin.tree_size
+                && cp.checkpoint_hash().ok().as_deref() == Some(pin.checkpoint_hash.as_str())
+        }) {
+            return Err(invalid());
+        }
+        Some(log.consistency(pin.tree_size, checkpoint.log_size)?)
+    } else {
+        None
+    };
+    verify_checkpoint_transition(&pin, checkpoint, consistency.as_ref())?;
+    // The core transition verifier compares log roots at equal size; also bind
+    // the entire signed checkpoint, including map_root, against the persisted pin.
+    if pin.tree_size == checkpoint.log_size
+        && pin.checkpoint_hash != checkpoint.checkpoint_hash()?
+    {
+        return Err(invalid());
+    }
+    for observation in &evidence.gossip_observations {
+        observation.verify(
+            &checkpoint.log_id,
+            &checkpoint.operator_pubkey,
+            &trust.observer_pubkeys,
+            chrono::Utc::now().timestamp(),
+        )?;
+        let observed = &observation.checkpoint;
+        // Ahead observations must be synchronized before dispatch. Old views
+        // need an RFC6962 proof into our view; equal-size views must be identical.
+        if observed.log_size > checkpoint.log_size
+            || (observed.log_size == checkpoint.log_size
+                && observed.checkpoint_hash()? != checkpoint.checkpoint_hash()?)
+        {
+            return Err(invalid());
+        }
+        let observed_pin = PinnedCheckpoint {
+            log_id: observed.log_id.clone(),
+            operator_pubkey: observed.operator_pubkey.clone(),
+            operator_sequence: observed.operator_sequence,
+            tree_size: observed.log_size,
+            root_hash: observed.log_root.clone(),
+            checkpoint_hash: observed.checkpoint_hash()?,
+            first_seen_at: observation.observed_at,
+            last_seen_at: observation.observed_at,
+        };
+        let consistency = if observed.log_size < checkpoint.log_size {
+            // Require the full historical checkpoint too: a log-root proof alone
+            // cannot authenticate an older observation's state-map root.
+            if !log.checkpoints().iter().any(|cp| {
+                cp.checkpoint_hash().ok().as_deref() == Some(observed_pin.checkpoint_hash.as_str())
+            }) {
+                return Err(invalid());
+            }
+            Some(log.consistency(observed.log_size, checkpoint.log_size)?)
+        } else {
+            None
+        };
+        verify_checkpoint_transition(&observed_pin, checkpoint, consistency.as_ref())?;
+    }
+    // Persist before dispatch. IO failure must never result in a wallet call.
+    pins.pin_verified(checkpoint)?;
+    Ok(())
+}
+
 /// Verify current local identity state and a payment payload before host dispatch.
 ///
 /// `profile_store` must be the caller's authoritative, continuously updated local
 /// transparency store. The profile and history are loaded afresh for each call;
 /// missing state, revocations, unauthorized key changes and stale payment methods
-/// fail closed. The serialized quote verification flags are never sufficient.
+/// fail closed. A state-map proof, nonzero witness quorum, independent gossip and
+/// a persisted checkpoint pin are required. The serialized quote flags are insufficient.
 ///
 /// BOLT11 invoices must match the configured network and exact amount. A fetched
 /// invoice also requires a payee key bound to the current signed Lightning method;
 /// an LNURL/address alone cannot authenticate an arbitrary invoice. Unsupported
 /// BOLT12, Ark, Silent Payment and swap handoffs remain disabled.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_quote_handoff(
     executor: &dyn WalletExecutor,
     profile_store: &TransactionalTransparencyStore,
+    trust: &HandoffTrust,
+    transparency: &HandoffTransparencyEvidence,
     quote_response: &QuoteResponse,
     expected_amount_sats: u64,
     policy: &ExecutionGatePolicy,
@@ -560,7 +944,13 @@ pub async fn execute_quote_handoff(
         return Err(SatsPathError::InvalidSignature);
     }
 
-    verify_current_handoff_profile(profile_store, recipient, selected_method)?;
+    verify_current_handoff_profile(
+        profile_store,
+        trust,
+        transparency,
+        recipient,
+        selected_method,
+    )?;
 
     assert_no_private_material(qr)?;
     let trimmed = qr.trim();
@@ -658,6 +1048,8 @@ fn validate_handoff_bolt11(
 /// Reload and verify the alias history and bind the selected method to its current profile.
 fn verify_current_handoff_profile(
     store: &TransactionalTransparencyStore,
+    trust: &HandoffTrust,
+    transparency: &HandoffTransparencyEvidence,
     recipient: &crate::quote_response::QuoteRecipient,
     selected_method: &PaymentMethod,
 ) -> CoreResult<()> {
@@ -702,5 +1094,6 @@ fn verify_current_handoff_profile(
             "quote no longer matches the current recipient profile".into(),
         ));
     }
+    verify_handoff_transparency(trust, transparency, &log, checkpoint, latest)?;
     Ok(())
 }

@@ -28,7 +28,7 @@
 | **Silent Payments (BIP-352) Primitives** | **Prototype / Experimental** (Address/output construction implemented; standards conformance & mainnet interop unverified until official vectors pass) | SatsPath (Router) |
 | **Mainnet Ark Receive Pointer Discovery** | **Supported (Preview)** | SatsPath (Router) |
 | **Wallet Handoff Generation (URIs, QR codes)** | **Supported** | SatsPath (Router / CLI) |
-| **Non-Custodial Host-Wallet SDK Bridges (`WalletExecutor`)** | **Supported** for BDK/LDK; quote execution requires the current authoritative local transparency store. Boltz claims/refunds are **disabled on all networks** pending lockup, witness, and chain-evidence verification (`crates/satspath-router/src/wallet_executor.rs`) | Host Wallet Signs & Broadcasts |
+| **Non-Custodial Host-Wallet SDK Bridges (`WalletExecutor`)** | **Supported** for BDK/LDK; quote execution requires current local state, SMT and log proofs, a pinned checkpoint, a nonzero witness quorum, and independent gossip evidence. Legacy Boltz P2WSH claims/refunds support **Testnet/Regtest only** with authenticated host-provided swap terms and confirmed unspent lockup evidence; Mainnet, Taproot and cross-chain execution remain disabled (`crates/satspath-router/src/wallet_executor.rs`) | Host Wallet Signs & Broadcasts |
 | **Mainnet Payment Execution by SatsPath** | **Unsupported / Out of Scope** | **Host Wallet Only** |
 | **Transaction Signing (PSBT / Schnorr / ECDSA)** | **Unsupported / Out of Scope** | **Host Wallet Only** |
 | **Mempool Transaction Broadcast** | **Unsupported / Out of Scope** | **Host Wallet Only** |
@@ -78,3 +78,9 @@ BIP-353 resolution is a preview layer: SatsPath resolves and displays DNSSEC-bac
 * **Exclusion from Production Safety Claim:** Production mainnet profile resolution and validation rely exclusively on classical, battle-tested `secp256k1` BIP-340 Schnorr signatures. PQC is not part of the production mainnet safety claim.
 * **Fail-Closed Default:** When the `pqc` feature is not enabled (the default for production builds), any profile specifying `pqc_required: true` or supplying `hybrid_pubkey` or `hybrid_signature` (even when `pqc_required` is false) is rejected (`Ok(false)`). In builds with the `pqc` feature disabled, this guarantees that verifiers never accept unverified post-quantum assertions, unverified hybrid extensions, or false security guarantees.
 
+
+## Wallet bridge integration requirements
+
+`execute_quote_handoff` accepts host-configured `HandoffTrust` and fresh `HandoffTransparencyEvidence`. Bootstrap its `CheckpointStore` from a trusted checkpoint out of band, keep the pin directory under a single process owner, and reuse the trust instance across calls. Obtain witness and observer keys independently of the quote. Missing evidence, absent/revoked state, rollback, inconsistent extensions, and conflicting observed checkpoints fail before wallet dispatch. An observer ahead of the local log requires synchronization first. Gossip only detects views actually observed; it cannot prove that undisclosed forks do not exist.
+
+`BoltzHostSignerBroadcaster::swap_evidence` must load the wallet’s authenticated saved swap agreement and query its trusted node for the configured network, lockup confirmations, unspent status, and tip height. The bridge validates the full legacy Boltz witness script, funding transaction/output, destination and bounded fee, preimage or block-height CLTV, and the host’s low-S SIGHASH_ALL signature. Spending keys remain inside the host. A `SwapSettlement` receipt acknowledges broadcast of the verified transaction; it does not claim on-chain confirmation.

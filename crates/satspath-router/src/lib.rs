@@ -58,6 +58,7 @@ pub use split_payments::{
 pub use urgency::PaymentUrgency;
 pub use wallet_executor::{
     execute_quote_handoff, BdkHostWallet, BdkOnchainBridge, BdkUtxoDescriptor,
-    BoltzHostSignerBroadcaster, BoltzTestnetSwapBridge, HandoffExecutionReceipt,
-    HostWalletSdkBridge, LdkHostNode, LdkLightningBridge,
+    BoltzHostSignerBroadcaster, BoltzSwapEvidence, BoltzTestnetSwapBridge, HandoffExecutionReceipt,
+    HandoffTransparencyEvidence, HandoffTrust, HostWalletSdkBridge, LdkHostNode,
+    LdkLightningBridge,
 };
