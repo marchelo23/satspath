@@ -28,6 +28,7 @@
 | **Silent Payments (BIP-352) Primitives** | **Prototype / Experimental** (Address/output construction implemented; standards conformance & mainnet interop unverified until official vectors pass) | SatsPath (Router) |
 | **Mainnet Ark Receive Pointer Discovery** | **Supported (Preview)** | SatsPath (Router) |
 | **Wallet Handoff Generation (URIs, QR codes)** | **Supported** | SatsPath (Router / CLI) |
+| **Non-Custodial Host-Wallet SDK Bridges (`WalletExecutor`)** | **Supported** (`BdkOnchainBridge`, `LdkLightningBridge`, `BoltzTestnetSwapBridge` in `crates/satspath-router/src/wallet_executor.rs`) | Host Wallet Signs & Broadcasts |
 | **Mainnet Payment Execution by SatsPath** | **Unsupported / Out of Scope** | **Host Wallet Only** |
 | **Transaction Signing (PSBT / Schnorr / ECDSA)** | **Unsupported / Out of Scope** | **Host Wallet Only** |
 | **Mempool Transaction Broadcast** | **Unsupported / Out of Scope** | **Host Wallet Only** |
@@ -44,7 +45,7 @@ SatsPath operates strictly on **public payment data** to generate wallet handoff
 2. **Verify:** Validates cryptographic signatures, sequence freshness, and expiration.
 3. **Route:** Evaluates fees and policies across available receiving methods.
 4. **Handoff:** Formats the selected method into a wallet handoff payload (`bitcoin:` URI, BOLT11 invoice, experimental BOLT12 structure, Ark pointer, or QR code), subject to the capability-specific maturity and interoperability limits documented above.
-5. **Execution:** The host wallet scans or receives the handoff payload, prompts the user for confirmation, signs with the user's spending key, and broadcasts to the Bitcoin or Lightning network.
+5. **Execution:** The host wallet scans or receives the handoff payload (or integrates via `WalletExecutor` / `HostWalletSdkBridge`), prompts the user for confirmation, signs with the user's spending key, and broadcasts to the Bitcoin or Lightning network.
 
 Safe CLI preview commands:
 

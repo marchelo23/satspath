@@ -13,6 +13,7 @@ pub mod scoring;
 pub mod silent_payments;
 pub mod split_payments;
 pub mod urgency;
+pub mod wallet_executor;
 
 pub use ark_routes::{plan_ark_route, ArkRoutePlan, SenderCapabilities};
 pub use bip353_preview::quote_from_bip353_resolution;
@@ -55,3 +56,8 @@ pub use split_payments::{
     SplitPaymentRoutingRequest, SplitPaymentRoutingResult,
 };
 pub use urgency::PaymentUrgency;
+pub use wallet_executor::{
+    execute_quote_handoff, BdkHostWallet, BdkOnchainBridge, BdkUtxoDescriptor,
+    BoltzHostSignerBroadcaster, BoltzTestnetSwapBridge, HandoffExecutionReceipt,
+    HostWalletSdkBridge, LdkHostNode, LdkLightningBridge,
+};
