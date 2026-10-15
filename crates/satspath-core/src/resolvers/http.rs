@@ -83,7 +83,7 @@ impl HttpResolver {
             && parsed.password().is_none()
             && matches!(parsed.host_str(), Some("localhost" | "127.0.0.1"));
 
-        if is_test_build && is_local {
+        let client = if is_test_build && is_local {
             if let Some(port) = parsed.port() {
                 if matches!(port, 22 | 3306 | 5432 | 6379 | 27017) {
                     return Err(SatsPathError::ValidationError(format!(
@@ -91,11 +91,12 @@ impl HttpResolver {
                     )));
                 }
             }
+            self.client.clone()
         } else {
-            validate_url(url, false)?;
-        }
+            crate::ssrf::build_pinned_http_client(url, Duration::from_secs(10), false).await?
+        };
 
-        let mut resp = self.client.get(url).send().await.map_err(|e| {
+        let mut resp = client.get(url).send().await.map_err(|e| {
             SatsPathError::NetworkError(format!("Failed to connect to {}: {}", url, e))
         })?;
 

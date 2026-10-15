@@ -7,11 +7,11 @@
 //!
 //! # DNSSEC is mandatory
 //!
-//! Per BIP-353 all payment instructions must be DNSSEC-signed. This crate does
-//! not ship a local DNSSEC validator, so the default [`resolve_bip353`] runs in
-//! [`DnssecPolicy::Strict`] and **fails closed** ([`SatsPathError::DnssecUnavailable`])
-//! rather than trusting an upstream resolver's AD bit. [`DnssecPolicy::DevInsecure`]
-//! exists for local testing only, is never the default, and emits loud warnings.
+//! Per BIP-353 all payment instructions must be DNSSEC-signed. The default
+//! [`resolve_bip353`] runs in [`DnssecPolicy::Strict`] and validates DNSSEC
+//! locally against bundled ICANN root trust anchors via [`HickoryDnssecTxtResolver`],
+//! failing closed if validation fails. [`DnssecPolicy::DevInsecure`] exists for
+//! local testing only, is never the default, and emits loud warnings.
 
 use std::collections::HashMap;
 
@@ -253,17 +253,26 @@ pub fn validated_bitcoin_record(records: &[DnsTxtRecord]) -> Result<(&DnsTxtReco
     Ok((record, uri))
 }
 
-/// Resolve a BIP-353 name with the default backend and **Strict** policy.
+/// Resolve a BIP-353 name with local cryptographic DNSSEC validation and **Strict** policy.
 ///
-/// The default backend does not perform local DNSSEC validation, so in Strict
-/// mode this fails closed with [`SatsPathError::DnssecUnavailable`]. Use
-/// [`resolve_bip353_with`] + a DNSSEC-validating resolver (or `DevInsecure` for
-/// local testing) to obtain a resolution.
+/// Validates the DNSSEC trust chain locally against bundled ICANN root trust anchors
+/// using [`HickoryDnssecTxtResolver`]. Any unsigned or tampered zone fails closed.
 pub async fn resolve_bip353(name: &str) -> Result<Bip353Resolution> {
-    let resolver = DohTxtResolver::new();
-    let now = chrono::Utc::now().timestamp();
-    resolve_bip353_with(&resolver, name, DnssecPolicy::Strict, now).await
+    #[cfg(feature = "std")]
+    {
+        let resolver = crate::resolvers::bip353::HickoryDnssecTxtResolver::new();
+        let now = chrono::Utc::now().timestamp();
+        resolve_bip353_with(&resolver, name, DnssecPolicy::Strict, now).await
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        let _ = name;
+        Err(SatsPathError::DnssecUnavailable)
+    }
 }
+
+#[cfg(feature = "std")]
+pub use crate::resolvers::bip353::HickoryDnssecTxtResolver;
 
 // ─── Ownership verification ─────────────────────────────────────────────────────
 
@@ -368,10 +377,12 @@ impl DohTxtResolver {
 #[async_trait]
 impl DnsTxtResolver for DohTxtResolver {
     async fn query_txt(&self, fqdn: &str) -> Result<Vec<DnsTxtRecord>> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|e| SatsPathError::NetworkError(e.to_string()))?;
+        let client = crate::ssrf::build_pinned_http_client(
+            &self.endpoint,
+            std::time::Duration::from_secs(10),
+            false,
+        )
+        .await?;
         let resp = client
             .get(&self.endpoint)
             .query(&[("name", fqdn), ("type", "TXT")])
@@ -379,9 +390,8 @@ impl DnsTxtResolver for DohTxtResolver {
             .send()
             .await
             .map_err(|e| SatsPathError::NetworkError(e.to_string()))?;
-        let json: serde_json::Value = resp
-            .json()
-            .await
+        let body = crate::ssrf::read_bounded_response(resp, 64 * 1024).await?;
+        let json: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|e| SatsPathError::NetworkError(e.to_string()))?;
 
         let mut out = Vec::new();

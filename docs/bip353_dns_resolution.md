@@ -66,14 +66,23 @@ malicious resolver.
 
 | Mode               | Behavior                                                                                                                       |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| `Strict` (default) | Require real DNSSEC validation; **fail closed** otherwise.                                                                     |
+| `Strict` (default) | Require local cryptographic DNSSEC validation; **fail closed** otherwise.                                                      |
 | `DevInsecure`      | Local testing only. Accept unvalidated records with loud warnings. Never the default; requires `--allow-insecure-dns-for-dev`. |
 
-This build does not ship a local DNSSEC validator, so `Strict` resolution **fails
-closed** with a clear message (option C of the BIP-353 DNSSEC guidance). A future
-release can plug in a validating resolver without changing the contract. The
-`--allow-insecure-dns-for-dev` flag prints a scary warning and must never be used
-on mainnet.
+### Embedded Local DNSSEC Validation Engine (`HickoryDnssecTxtResolver` & `verify_dnssec_zone_chain`)
+
+SatsPath ships an embedded local DNSSEC cryptographic validation engine in `crates/satspath-core/src/resolvers/bip353.rs`:
+
+1. **Bundled Root Trust Anchors (`root_trust_anchors()`):**
+   - Explicitly bundles and verifies the active ICANN Root KSK (key tag `38696`), while inheriting historical and standby root keys (`19036` and `20326`) from Hickory's default `TrustAnchor`.
+   - Verifies that the decoded RSA public key matches RFC 4034 key tag `38696` at initialization.
+2. **Cryptographic Chain Verification (`verify_dnssec_zone_chain` & `DnssecDnsHandle`):**
+   - Verifies `RRSIG` signatures and `DS` delegation digests across the entire zone hierarchy (`DNSKEY` $\to$ `DS` $\to$ `DNSKEY` $\to$ `TXT`).
+   - Unsigned zones (missing `DS` or `RRSIG`) fail closed with `SatsPathError::DnssecUnavailable`.
+   - Tampered or expired `RRSIG` signatures and mismatched `DS` digests fail closed with `SatsPathError::NetworkError`.
+3. **Profile Resolution Separation (`Bip353Resolver::resolve_alias`):**
+   - A DNS `bitcoin:` instruction without an authenticated `sp-profile` pointer returns `SatsPathError::Bip353Unauthenticated` and never fabricates a synthetic `SignedPaymentProfile`.
+   - When an `sp-profile` pointer is present, it is fetched over an SSRF-protected, IP-pinned HTTPS connection with a 50 KB response bound and verified via `verify_bip353_ownership`.
 
 ## Direct TXT model (Option A)
 
