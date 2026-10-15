@@ -1,24 +1,34 @@
-//! Silent Payments (BIP-352) — Standards-Compliant Implementation.
+//! Public BIP-352 address, input validation, and output detection helpers.
 //!
-//! Implements BIP-352 Silent Payments address encoding/decoding, eligible input public-key
-//! and private-key extraction (P2TR, P2WPKH, P2SH-P2WPKH, P2PKH), NUMS point filtering,
-//! Taproot Y-parity adjustment, label derivation, multi-recipient output generation,
-//! and scanner output detection validated against the official BIP-352 test vectors.
+//! The host wallet computes ECDH points and labeled spend public keys. It retains
+//! all private keys, derives spending keys, verifies the final transaction, signs,
+//! and broadcasts. This module accepts only public transaction data and curve points.
+//!
+//! Spending APIs are deliberately unavailable:
+//! ```compile_fail
+//! use satspath_router::extract_bip352_sender_privkey;
+//! ```
+//! ```compile_fail
+//! use satspath_router::derive_spending_privkey;
+//! ```
+//! ```compile_fail
+//! use satspath_router::derive_spending_privkey_from_scan;
+//! ```
+//! ```compile_fail
+//! use satspath_router::generate_silent_payment_keys;
+//! ```
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 
 use anyhow::{anyhow, Result};
 use bech32::{u5, FromBase32, ToBase32, Variant};
 use bitcoin::consensus::Decodable;
 use bitcoin::hashes::{hash160, Hash};
 use bitcoin::script::Instruction;
-use bitcoin::secp256k1::{Parity, PublicKey, Scalar, Secp256k1, SecretKey, XOnlyPublicKey};
+use bitcoin::secp256k1::{Parity, PublicKey, Scalar, Secp256k1, XOnlyPublicKey};
 use bitcoin::{Network, Script, Witness};
-use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
 
 /// BIP-352 tagged hash domain tag for input hash computation.
 pub const BIP0352_TAG_INPUTS: &str = "BIP0352/Inputs";
@@ -96,38 +106,20 @@ pub fn compute_input_hash(
     tagged_hash(BIP0352_TAG_INPUTS, &data)
 }
 
-/// Compute BIP-352 label tweak scalar bytes:
-/// `TaggedHash("BIP0352/Label", ser_256(b_scan) || ser_32(m))`.
-pub fn compute_label_tweak(scan_privkey: &SecretKey, m: u32) -> [u8; 32] {
-    let mut data = Vec::with_capacity(36);
-    data.extend_from_slice(&scan_privkey.secret_bytes());
-    data.extend_from_slice(&m.to_be_bytes());
-    tagged_hash(BIP0352_TAG_LABEL, &data)
-}
-
-/// Derive a labeled spend public key `B_m = B_spend + TaggedHash("BIP0352/Label", b_scan || m) * G`.
-///
-/// # Errors
-/// Returns an error if the derived label tweak is not a valid secp256k1 scalar or point addition fails.
-pub fn derive_labeled_spend_pubkey(
-    spend_pubkey: &PublicKey,
-    scan_privkey: &SecretKey,
-    m: u32,
-) -> Result<PublicKey> {
-    let secp = Secp256k1::new();
-    let tweak_bytes = compute_label_tweak(scan_privkey, m);
-    let tweak_scalar =
-        Scalar::from_be_bytes(tweak_bytes).map_err(|e| anyhow!("Invalid label scalar: {e}"))?;
-    spend_pubkey
-        .add_exp_tweak(&secp, &tweak_scalar)
-        .map_err(|e| anyhow!("Failed to derive labeled spend public key: {e}"))
-}
-
 /// Full transaction input descriptor for BIP-352 eligibility and public-key extraction.
-///
-/// Sender inputs must supply the final `script_sig` / `txinwitness` shape or a placeholder
-/// with the same shape exposing the real public key (and Taproot script-path control block).
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Supply the final scriptSig/witness or placeholders with the same structure
+/// exposing the real public key and any Taproot script-path control block.
+/// Private spending fields are not part of this type:
+/// ```compile_fail
+/// use satspath_router::Bip352PrevoutInput;
+/// let input = Bip352PrevoutInput {
+///     txid: String::new(), vout: 0, script_sig: String::new(),
+///     txinwitness: String::new(), prevout_script_pubkey: String::new(),
+///     private_key: None,
+/// };
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Bip352PrevoutInput {
     /// Transaction ID in display hex (64 characters).
     pub txid: String,
@@ -139,22 +131,6 @@ pub struct Bip352PrevoutInput {
     pub txinwitness: String,
     /// Hex-encoded prevout `scriptPubKey`.
     pub prevout_script_pubkey: String,
-    /// Optional hex-encoded 32-byte spending private key (used by sender).
-    #[serde(default, skip_serializing)]
-    pub private_key: Option<Zeroizing<String>>,
-}
-
-impl fmt::Debug for Bip352PrevoutInput {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Bip352PrevoutInput")
-            .field("txid", &self.txid)
-            .field("vout", &self.vout)
-            .field("script_sig", &self.script_sig)
-            .field("txinwitness", &self.txinwitness)
-            .field("prevout_script_pubkey", &self.prevout_script_pubkey)
-            .field("private_key", &"[REDACTED]")
-            .finish()
-    }
 }
 
 impl Bip352PrevoutInput {
@@ -183,7 +159,7 @@ impl Bip352PrevoutInput {
 /// Returns `Ok(Some((pubkey, is_taproot)))` when eligible, or `Ok(None)` when the input must be skipped.
 ///
 /// # Errors
-/// Returns an error if hex fields cannot be decoded.
+/// Returns an error for malformed encodings, curve points, or witness hash bindings.
 pub fn extract_bip352_input_pubkey(
     input: &Bip352PrevoutInput,
 ) -> Result<Option<(PublicKey, bool)>> {
@@ -198,16 +174,18 @@ pub fn extract_bip352_input_pubkey(
         Vec::new()
     } else {
         let mut cursor = std::io::Cursor::new(&witness_bytes);
-        match Witness::consensus_decode(&mut cursor) {
-            Ok(w) => w.to_vec(),
-            Err(_) => return Ok(None),
+        let witness = Witness::consensus_decode(&mut cursor)
+            .map_err(|e| anyhow!("Invalid witness encoding: {e}"))?;
+        if cursor.position() != witness_bytes.len() as u64 {
+            return Err(anyhow!("Trailing bytes in witness encoding"));
         }
+        witness.to_vec()
     };
 
     // 1. P2TR: OP_1 (0x51) OP_PUSHBYTES_32 (0x20) <32-byte x-only key>
     if spk.len() == 34 && spk[0] == 0x51 && spk[1] == 0x20 {
         if !script_sig.is_empty() || witness_items.is_empty() {
-            return Ok(None);
+            return Err(anyhow!("Invalid or missing Taproot spend data"));
         }
         // Strip optional Taproot annex (last item starting with 0x50 when stack has >= 2 items)
         let stack_len = if witness_items.len() > 1
@@ -221,15 +199,19 @@ pub fn extract_bip352_input_pubkey(
         // Script-path spend has > 1 elements remaining; last element is control block
         if stack_len > 1 {
             let control_block = &witness_items[stack_len - 1];
-            if control_block.len() >= 33 && control_block[1..33] == BIP0352_NUMS_H {
+            if control_block.len() < 33
+                || control_block.len() > 33 + 32 * 128
+                || !(control_block.len() - 33).is_multiple_of(32)
+            {
+                return Err(anyhow!("Invalid Taproot control block length"));
+            }
+            if control_block[1..33] == BIP0352_NUMS_H {
                 return Ok(None);
             }
         }
 
-        let xonly = match XOnlyPublicKey::from_slice(&spk[2..34]) {
-            Ok(x) => x,
-            Err(_) => return Ok(None),
-        };
+        let xonly = XOnlyPublicKey::from_slice(&spk[2..34])
+            .map_err(|e| anyhow!("Invalid Taproot output key: {e}"))?;
         let pk = PublicKey::from_x_only_public_key(xonly, Parity::Even);
         return Ok(Some((pk, true)));
     }
@@ -237,31 +219,54 @@ pub fn extract_bip352_input_pubkey(
     // 2. P2WPKH: OP_0 (0x00) OP_PUSHBYTES_20 (0x14) <20-byte pubkey hash>
     if spk.len() == 22 && spk[0] == 0x00 && spk[1] == 0x14 {
         if !script_sig.is_empty() || witness_items.len() != 2 {
-            return Ok(None);
+            return Err(anyhow!("Invalid or missing P2WPKH spend data"));
         }
         let pk_bytes = &witness_items[1];
         if pk_bytes.len() == 33 && (pk_bytes[0] == 0x02 || pk_bytes[0] == 0x03) {
-            if let Ok(pk) = PublicKey::from_slice(pk_bytes) {
-                return Ok(Some((pk, false)));
+            if hash160::Hash::hash(pk_bytes).as_byte_array() != &spk[2..22] {
+                return Err(anyhow!("P2WPKH witness key does not match prevout hash"));
             }
+            let pk = PublicKey::from_slice(pk_bytes)
+                .map_err(|e| anyhow!("Invalid P2WPKH public key: {e}"))?;
+            return Ok(Some((pk, false)));
         }
-        return Ok(None);
+        if pk_bytes.len() == 65 && pk_bytes[0] == 0x04 {
+            return Ok(None); // Uncompressed keys are ineligible under BIP-352.
+        }
+        return Err(anyhow!("Malformed P2WPKH witness key"));
     }
 
     // 3. P2SH-P2WPKH: spk = a914<20-byte hash>87, scriptSig = 160014<20-byte hash>
     if spk.len() == 23 && spk[0] == 0xa9 && spk[1] == 0x14 && spk[22] == 0x87 {
+        if script_sig.is_empty() {
+            return Err(anyhow!("Missing P2SH redeem script"));
+        }
         if script_sig.len() == 23
             && script_sig[0] == 0x16
             && script_sig[1] == 0x00
             && script_sig[2] == 0x14
-            && witness_items.len() == 2
         {
+            if hash160::Hash::hash(&script_sig[1..]).as_byte_array() != &spk[2..22] {
+                return Err(anyhow!("P2SH redeem script does not match prevout hash"));
+            }
+            if witness_items.len() != 2 {
+                return Err(anyhow!("Invalid or missing P2SH-P2WPKH spend data"));
+            }
             let pk_bytes = &witness_items[1];
             if pk_bytes.len() == 33 && (pk_bytes[0] == 0x02 || pk_bytes[0] == 0x03) {
-                if let Ok(pk) = PublicKey::from_slice(pk_bytes) {
-                    return Ok(Some((pk, false)));
+                if hash160::Hash::hash(pk_bytes).as_byte_array() != &script_sig[3..23] {
+                    return Err(anyhow!(
+                        "P2SH-P2WPKH witness key does not match redeem script hash"
+                    ));
                 }
+                let pk = PublicKey::from_slice(pk_bytes)
+                    .map_err(|e| anyhow!("Invalid P2SH-P2WPKH public key: {e}"))?;
+                return Ok(Some((pk, false)));
             }
+            if pk_bytes.len() == 65 && pk_bytes[0] == 0x04 {
+                return Ok(None);
+            }
+            return Err(anyhow!("Malformed P2SH-P2WPKH witness key"));
         }
         return Ok(None);
     }
@@ -277,19 +282,27 @@ pub fn extract_bip352_input_pubkey(
         let expected_pkh = &spk[3..23];
         let script = Script::from_bytes(&script_sig);
         let mut matched_pk: Option<PublicKey> = None;
+        let mut matched_uncompressed = false;
         for ins in script.instructions() {
-            let Ok(Instruction::PushBytes(push)) = ins else {
+            let Instruction::PushBytes(push) =
+                ins.map_err(|e| anyhow!("Invalid P2PKH scriptSig: {e}"))?
+            else {
                 continue;
             };
             let bytes = push.as_bytes();
-            if bytes.len() == 33 && (bytes[0] == 0x02 || bytes[0] == 0x03) {
-                let pkh = hash160::Hash::hash(bytes);
-                if pkh.to_byte_array() == expected_pkh {
-                    if let Ok(pk) = PublicKey::from_slice(bytes) {
-                        matched_pk = Some(pk);
-                    }
+            if hash160::Hash::hash(bytes).as_byte_array() == expected_pkh {
+                if bytes.len() == 65 && bytes[0] == 0x04 {
+                    matched_uncompressed = true;
+                } else if bytes.len() == 33 && (bytes[0] == 0x02 || bytes[0] == 0x03) {
+                    matched_pk = Some(
+                        PublicKey::from_slice(bytes)
+                            .map_err(|e| anyhow!("Invalid P2PKH public key: {e}"))?,
+                    );
                 }
             }
+        }
+        if matched_pk.is_none() && !matched_uncompressed {
+            return Err(anyhow!("Missing P2PKH key matching the prevout hash"));
         }
         return Ok(matched_pk.map(|pk| (pk, false)));
     }
@@ -297,471 +310,269 @@ pub fn extract_bip352_input_pubkey(
     Ok(None)
 }
 
-/// Extract the eligible sender private key and public key from a [`Bip352PrevoutInput`].
-///
-/// For Taproot (P2TR) inputs, if the private key produces a public key with odd Y coordinate,
-/// the secret key is negated per BIP-352 so that it matches the even-Y x-only public key.
-///
-/// # Errors
-/// Returns an error if an eligible input's `private_key` is missing, invalid, or does not
-/// match its extracted public key, or if a supplied key lacks the required spend-time data.
-pub fn extract_bip352_sender_privkey(
-    input: &Bip352PrevoutInput,
-) -> Result<Option<(SecretKey, PublicKey)>> {
-    let Some((extracted_pk, is_taproot)) = extract_bip352_input_pubkey(input)? else {
-        if input.private_key.is_some() {
-            // Preserve skipping of genuinely ineligible inputs (e.g. NUMS and uncompressed
-            // keys), but do not silently omit a sender input whose spend data is absent.
-            let spk_bytes = hex::decode(input.prevout_script_pubkey.trim())?;
-            let spk = Script::from_bytes(&spk_bytes);
-            let script_sig = hex::decode(input.script_sig.trim())?;
-            let witness = hex::decode(input.txinwitness.trim())?;
-            let witness = if witness.is_empty() {
-                Witness::default()
-            } else {
-                Witness::consensus_decode(&mut std::io::Cursor::new(&witness))
-                    .map_err(|e| anyhow!("Invalid sender witness: {e}"))?
-            };
-            let missing_witness_key =
-                witness.len() != 2 || witness.last().is_some_and(|key| key.is_empty());
-            let has_script_pubkey = Script::from_bytes(&script_sig).instructions().any(|ins| {
-                matches!(ins, Ok(Instruction::PushBytes(push))
-                    if PublicKey::from_slice(push.as_bytes()).is_ok())
-            });
-            let missing_spend_data = (spk.is_p2pkh() && !has_script_pubkey)
-                || (spk.is_p2wpkh() && missing_witness_key)
-                || (spk.is_p2tr() && witness.is_empty())
-                || (spk.is_p2sh()
-                    && (script_sig.is_empty()
-                        || (script_sig.len() == 23
-                            && script_sig[..3] == [0x16, 0x00, 0x14]
-                            && missing_witness_key)));
-            if missing_spend_data {
-                return Err(anyhow!(
-                    "Missing script_sig or txinwitness spend data for BIP-352 sender input"
-                ));
-            }
-        }
-        return Ok(None);
-    };
-    let priv_hex = input
-        .private_key
-        .as_ref()
-        .ok_or_else(|| anyhow!("Missing private_key for eligible BIP-352 input"))?;
-    let priv_bytes = Zeroizing::new(
-        hex::decode(priv_hex.trim()).map_err(|e| anyhow!("Invalid private_key hex: {e}"))?,
-    );
-    let mut sk =
-        SecretKey::from_slice(&priv_bytes).map_err(|e| anyhow!("Invalid SecretKey: {e}"))?;
+/// Public input context for host-wallet ECDH computation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bip352InputContext {
+    /// Eligible input public keys, including duplicate keys from distinct inputs.
+    pub input_pub_keys: Vec<PublicKey>,
+    /// Aggregate public key A, absent for no eligible keys or a sum at infinity.
+    pub aggregate_pubkey: Option<PublicKey>,
+    /// Input hash bound to the smallest outpoint across all inputs.
+    pub input_hash: Option<[u8; 32]>,
+    /// Public point input_hash * A for the receiver's host wallet.
+    pub tweak: Option<PublicKey>,
+}
 
-    let secp = Secp256k1::new();
-    let pk = PublicKey::from_secret_key(&secp, &sk);
-    let matches = if is_taproot {
-        pk.x_only_public_key().0 == extracted_pk.x_only_public_key().0
+/// Validate public transaction input data and compute the BIP-352 input context.
+/// Prevouts must come from an authenticated transaction source. This helper does
+/// not execute scripts or verify transaction signatures.
+pub fn bip352_input_context(inputs: &[Bip352PrevoutInput]) -> Result<Bip352InputContext> {
+    let mut outpoints = Vec::with_capacity(inputs.len());
+    let mut input_pub_keys = Vec::new();
+    let mut seen = HashSet::new();
+    for input in inputs {
+        let outpoint = input.outpoint_bytes()?;
+        if !seen.insert(outpoint) {
+            return Err(anyhow!("Duplicate transaction outpoint"));
+        }
+        outpoints.push(outpoint);
+        if let Some((pk, _)) = extract_bip352_input_pubkey(input)? {
+            input_pub_keys.push(pk);
+        }
+    }
+    let refs: Vec<_> = input_pub_keys.iter().collect();
+    // Combining all keys together handles intermediate point cancellation.
+    let aggregate_pubkey = if refs.is_empty() {
+        None
     } else {
-        pk == extracted_pk
+        PublicKey::combine_keys(&refs).ok()
     };
-    if !matches {
-        return Err(anyhow!(
-            "private_key does not match extracted BIP-352 input public key"
-        ));
-    }
-    if is_taproot {
-        let (_, parity) = pk.x_only_public_key();
-        if parity == Parity::Odd {
-            sk = sk.negate();
+    let input_hash = aggregate_pubkey
+        .zip(find_smallest_outpoint(&outpoints))
+        .map(|(pk, outpoint)| compute_input_hash(&outpoint, &pk));
+    let tweak = match (aggregate_pubkey, input_hash) {
+        (Some(pk), Some(hash)) => {
+            let scalar = Scalar::from_be_bytes(hash)
+                .map_err(|e| anyhow!("Invalid input hash scalar: {e}"))?;
+            Some(
+                pk.mul_tweak(&Secp256k1::verification_only(), &scalar)
+                    .map_err(|e| anyhow!("Invalid input tweak point: {e}"))?,
+            )
         }
-    }
-    let final_pk = PublicKey::from_secret_key(&secp, &sk);
-    Ok(Some((sk, final_pk)))
-}
-
-/// Result of a standards-compliant BIP-352 sender output generation run.
-#[derive(Clone, PartialEq, Eq)]
-pub struct Bip352SendResult {
-    /// Generated 32-byte x-only output public keys (hex).
-    pub outputs: Vec<String>,
-    /// Derived ECDH shared secrets per recipient entry, in scan-group order (33-byte compressed hex).
-    pub shared_secrets: Vec<String>,
-    /// Sum of eligible input private keys (32-byte hex), if non-empty and non-zero.
-    pub input_private_key_sum: Option<Zeroizing<String>>,
-    /// Extracted eligible input public keys (33-byte compressed hex).
-    pub input_pub_keys: Vec<String>,
-}
-
-impl fmt::Debug for Bip352SendResult {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Bip352SendResult")
-            .field("outputs", &self.outputs)
-            .field("shared_secrets", &self.shared_secrets)
-            .field("input_private_key_sum", &"[REDACTED]")
-            .field("input_pub_keys", &self.input_pub_keys)
-            .finish()
-    }
-}
-
-#[derive(Default)]
-struct Bip352RecipientGroup {
-    total: usize,
-    recipients: Vec<(PublicKey, usize)>,
-}
-
-/// Generate BIP-352 Silent Payment x-only output public keys for a list of `(address, count)` recipients.
-///
-/// Groups recipients by `scan_pubkey` as required by BIP-352, enforces `BIP0352_MAX_K` (`2323`),
-/// and handles intermediate scalar cancellation cleanly.
-///
-/// # Errors
-/// Returns an error if any recipient address or input hex is malformed.
-pub fn create_bip352_outputs(
-    inputs: &[Bip352PrevoutInput],
-    recipients: &[(String, usize)],
-) -> Result<Bip352SendResult> {
-    let secp = Secp256k1::new();
-
-    // Collect all outpoints (including non-eligible inputs) to find outpoint_L
-    let mut all_outpoints = Vec::with_capacity(inputs.len());
-    for inp in inputs {
-        all_outpoints.push(inp.outpoint_bytes()?);
-    }
-    let Some(smallest_outpoint) = find_smallest_outpoint(&all_outpoints) else {
-        return Ok(Bip352SendResult {
-            outputs: Vec::new(),
-            shared_secrets: Vec::new(),
-            input_private_key_sum: None,
-            input_pub_keys: Vec::new(),
-        });
+        _ => None,
     };
-
-    // Extract eligible input keys and accumulate private key sum (handling intermediate zero sum)
-    let mut eligible_pks = Vec::new();
-    let mut eligible_sks = Vec::new();
-    for inp in inputs {
-        if let Some((sk, pk)) = extract_bip352_sender_privkey(inp)? {
-            eligible_pks.push(hex::encode(pk.serialize()));
-            eligible_sks.push(sk);
-        }
-    }
-
-    if eligible_sks.is_empty() {
-        return Ok(Bip352SendResult {
-            outputs: Vec::new(),
-            shared_secrets: Vec::new(),
-            input_private_key_sum: None,
-            input_pub_keys: Vec::new(),
-        });
-    }
-
-    let mut acc_sk: Option<SecretKey> = None;
-    for sk in &eligible_sks {
-        acc_sk = match acc_sk {
-            None => Some(*sk),
-            Some(current) => {
-                let sc = Scalar::from_be_bytes(sk.secret_bytes())
-                    .map_err(|e| anyhow!("Invalid input scalar: {e}"))?;
-                // If current + sk == 0 mod n, add_tweak fails and the intermediate sum is 0 (None)
-                current.add_tweak(&sc).ok()
-            }
-        };
-    }
-
-    // If final sum is 0 (point at infinity), sending fails and produces no outputs
-    let Some(sum_sk) = acc_sk else {
-        return Ok(Bip352SendResult {
-            outputs: Vec::new(),
-            shared_secrets: Vec::new(),
-            input_private_key_sum: None,
-            input_pub_keys: eligible_pks,
-        });
-    };
-
-    let sum_pk = PublicKey::from_secret_key(&secp, &sum_sk);
-    let input_hash = compute_input_hash(&smallest_outpoint, &sum_pk);
-    let hash_scalar =
-        Scalar::from_be_bytes(input_hash).map_err(|e| anyhow!("Invalid input_hash scalar: {e}"))?;
-    let sum_scalar = Scalar::from_be_bytes(sum_sk.secret_bytes())
-        .map_err(|e| anyhow!("Invalid sum_sk scalar: {e}"))?;
-
-    // Group recipients by scan_pubkey preserving order of first appearance
-    let mut group_order: Vec<PublicKey> = Vec::new();
-    let mut groups: HashMap<Vec<u8>, Bip352RecipientGroup> = HashMap::new();
-
-    for (addr, count) in recipients {
-        let (scan_pk, spend_pk, _) = parse_silent_payment_address(addr)?;
-        let key = scan_pk.serialize().to_vec();
-        if !groups.contains_key(&key) {
-            group_order.push(scan_pk);
-        }
-        let entry = groups.entry(key).or_default();
-        let Some(total) = entry
-            .total
-            .checked_add(*count)
-            .filter(|n| *n <= BIP0352_MAX_K as usize)
-        else {
-            return Ok(Bip352SendResult {
-                outputs: Vec::new(),
-                shared_secrets: Vec::new(),
-                input_private_key_sum: Some(Zeroizing::new(hex::encode(sum_sk.secret_bytes()))),
-                input_pub_keys: eligible_pks,
-            });
-        };
-        entry.total = total;
-        entry.recipients.push((spend_pk, *count));
-    }
-
-    let mut outputs = Vec::new();
-    let mut shared_secrets = Vec::new();
-
-    for scan_pk in &group_order {
-        let ecdh_shared_secret = scan_pk
-            .mul_tweak(&secp, &sum_scalar)
-            .map_err(|e| anyhow!("ECDH mul_tweak failed: {e}"))?
-            .mul_tweak(&secp, &hash_scalar)
-            .map_err(|e| anyhow!("Input hash mul_tweak failed: {e}"))?;
-
-        let recipients = &groups[&scan_pk.serialize().to_vec()].recipients;
-        let mut k = 0u32;
-        for (spend_pk, count) in recipients {
-            shared_secrets.push(hex::encode(ecdh_shared_secret.serialize()));
-            for _ in 0..*count {
-                let mut data = Vec::with_capacity(37);
-                data.extend_from_slice(&ecdh_shared_secret.serialize());
-                data.extend_from_slice(&k.to_be_bytes());
-                let t_k = tagged_hash(BIP0352_TAG_SHARED_SECRET, &data);
-                let t_k_scalar =
-                    Scalar::from_be_bytes(t_k).map_err(|e| anyhow!("Invalid t_k scalar: {e}"))?;
-                let p_k = spend_pk
-                    .add_exp_tweak(&secp, &t_k_scalar)
-                    .map_err(|e| anyhow!("Failed to compute output pubkey P_k: {e}"))?;
-                let (xonly, _) = p_k.x_only_public_key();
-                outputs.push(hex::encode(xonly.serialize()));
-                k += 1;
-            }
-        }
-    }
-
-    Ok(Bip352SendResult {
-        outputs,
-        shared_secrets,
-        input_private_key_sum: Some(Zeroizing::new(hex::encode(sum_sk.secret_bytes()))),
-        input_pub_keys: eligible_pks,
+    Ok(Bip352InputContext {
+        input_pub_keys,
+        aggregate_pubkey,
+        input_hash,
+        tweak,
     })
 }
 
-/// Detected Silent Payment output details from scanning a transaction as receiver.
+/// Public output generation result. Contains no private keys or signing data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bip352SendResult {
+    /// Generated 32-byte x-only output public keys (hex).
+    pub outputs: Vec<String>,
+    /// Eligible input public keys (33-byte compressed hex).
+    pub input_pub_keys: Vec<String>,
+}
+
+/// Generate output public keys using ECDH points supplied by the host wallet.
+///
+/// `shared_secrets` maps each recipient scan public key to the point
+/// `input_hash * a * B_scan`, computed inside the wallet using its input keys.
+/// The wallet must bind these points to this exact input set and independently
+/// verify destinations and amounts before signing the final transaction.
+///
+/// All addresses are checked against `expected_network` before any empty-input
+/// shortcut. Testnet and Signet share the `tsp` HRP; Regtest requires `sprt`.
+/// Counts are bounded before allocating recipient output groups.
+pub fn create_bip352_outputs(
+    inputs: &[Bip352PrevoutInput],
+    recipients: &[(String, usize)],
+    shared_secrets: &HashMap<PublicKey, PublicKey>,
+    expected_network: Network,
+) -> Result<Bip352SendResult> {
+    let mut group_order = Vec::new();
+    let mut groups: HashMap<PublicKey, Vec<PublicKey>> = HashMap::new();
+    for (address, count) in recipients {
+        let (scan, spend, network) = parse_silent_payment_address(address)?;
+        if silent_payment_hrp(network) != silent_payment_hrp(expected_network) {
+            return Err(anyhow!("Silent Payment address network mismatch"));
+        }
+        if *count == 0 {
+            return Err(anyhow!("Recipient output count must be positive"));
+        }
+        let entry = groups.entry(scan).or_insert_with(|| {
+            group_order.push(scan);
+            Vec::new()
+        });
+        if *count > BIP0352_MAX_K as usize - entry.len() {
+            return Err(anyhow!("BIP-352 recipient group exceeds K_max"));
+        }
+        entry.extend(std::iter::repeat_n(spend, *count));
+    }
+
+    let context = bip352_input_context(inputs)?;
+    let mut result = Bip352SendResult {
+        outputs: Vec::new(),
+        input_pub_keys: context
+            .input_pub_keys
+            .iter()
+            .map(|pk| hex::encode(pk.serialize()))
+            .collect(),
+    };
+    if context.tweak.is_none() {
+        return Ok(result);
+    }
+    let secp = Secp256k1::verification_only();
+    for scan in group_order {
+        let shared = shared_secrets
+            .get(&scan)
+            .ok_or_else(|| anyhow!("Missing host-wallet ECDH point for recipient scan key"))?;
+        for (k, spend) in groups[&scan].iter().enumerate() {
+            let pk = derive_output_pubkey(&secp, spend, shared, k as u32)?;
+            result
+                .outputs
+                .push(hex::encode(pk.x_only_public_key().0.serialize()));
+        }
+    }
+    Ok(result)
+}
+
+/// Public receiver keys supplied by the host wallet, including labeled spend keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bip352ScanKeys {
+    pub scan_pubkey: PublicKey,
+    pub spend_pubkey: PublicKey,
+    /// `(label, B_spend + label_tweak * G)` pairs, in address display order.
+    pub labels: Vec<(u32, PublicKey)>,
+}
+
+/// Public metadata identifying an output for further processing by the host wallet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bip352DetectedOutput {
     /// 32-byte x-only output public key (hex).
     pub pub_key: String,
-    /// 32-byte private key tweak `t_k (+ label_tweak)` (hex).
-    pub priv_key_tweak: String,
+    /// BIP-352 output derivation index k (not the transaction's vout).
+    pub output_index: u32,
+    /// Matching wallet label, or None for an unlabeled output.
+    pub label: Option<u32>,
 }
 
-/// Result of scanning a transaction as a BIP-352 receiver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bip352ReceiveResult {
-    /// Derived receiving addresses (unlabeled address followed by labeled addresses).
     pub addresses: Vec<String>,
-    /// Detected outputs belonging to the receiver.
     pub outputs: Vec<Bip352DetectedOutput>,
-    /// `input_hash * A` tweak point (33-byte compressed hex), if eligible inputs were valid.
+    /// Public point input_hash * A, if eligible inputs have a nonzero sum.
     pub tweak: Option<String>,
-    /// `b_scan * tweak` ECDH shared secret point (33-byte compressed hex), if eligible inputs were valid.
-    pub shared_secret: Option<String>,
-    /// Aggregate input public key `A` (33-byte compressed hex), if eligible inputs were valid.
     pub input_pub_key_sum: Option<String>,
 }
 
-/// Scan a transaction as a BIP-352 recipient given a scan private key and spend public key, optional label integers,
-/// transaction inputs, and candidate 32-byte x-only output keys.
-/// Returns output keys and tweaks; spending-key reconstruction and signing belong to the wallet.
+/// Detect outputs using only public keys and a host-wallet ECDH point.
 ///
-/// # Errors
-/// Returns an error if key derivation fails.
+/// The wallet supplies `shared_secret = b_scan * input_hash * A` for this exact
+/// input set, plus labeled public keys. It retains all key derivation and signing
+/// authority. No spending key or private tweak is accepted or returned.
+/// Every candidate output is parsed before scanning, including transactions with
+/// no eligible inputs; malformed hex, lengths, and curve points return errors.
+/// Returned addresses use `expected_network`.
 pub fn scan_bip352_transaction(
-    scan_privkey: &SecretKey,
-    spend_pubkey: &PublicKey,
-    labels: &[u32],
+    keys: &Bip352ScanKeys,
     inputs: &[Bip352PrevoutInput],
     outputs_xonly: &[String],
+    shared_secret: Option<&PublicKey>,
+    expected_network: Network,
 ) -> Result<Bip352ReceiveResult> {
-    let secp = Secp256k1::new();
-    let scan_pubkey = PublicKey::from_secret_key(&secp, scan_privkey);
-
-    // Build receiving address list (unlabeled first, then each label in order)
-    let mut addresses = vec![create_silent_payment_address(&scan_pubkey, spend_pubkey)?];
-    // Map serialized label public key M_m (33 bytes) -> [u8; 32] label tweak
-    let mut label_map: HashMap<[u8; 33], [u8; 32]> = HashMap::new();
-    for &m in labels {
-        let tweak_m = compute_label_tweak(scan_privkey, m);
-        let tweak_sk = SecretKey::from_slice(&tweak_m)
-            .map_err(|e| anyhow!("Invalid label secret key: {e}"))?;
-        let label_pk = PublicKey::from_secret_key(&secp, &tweak_sk);
-        label_map.insert(label_pk.serialize(), tweak_m);
-
-        let b_m = derive_labeled_spend_pubkey(spend_pubkey, scan_privkey, m)?;
-        addresses.push(create_silent_payment_address(&scan_pubkey, &b_m)?);
-    }
-
-    // Collect all outpoints for outpoint_L
-    let mut all_outpoints = Vec::with_capacity(inputs.len());
-    for inp in inputs {
-        all_outpoints.push(inp.outpoint_bytes()?);
-    }
-    let Some(smallest_outpoint) = find_smallest_outpoint(&all_outpoints) else {
-        return Ok(Bip352ReceiveResult {
-            addresses,
-            outputs: Vec::new(),
-            tweak: None,
-            shared_secret: None,
-            input_pub_key_sum: None,
-        });
-    };
-
-    // Extract eligible input public keys
-    let mut eligible_pks: Vec<PublicKey> = Vec::new();
-    for inp in inputs {
-        if let Some((pk, _)) = extract_bip352_input_pubkey(inp)? {
-            eligible_pks.push(pk);
-        }
-    }
-
-    if eligible_pks.is_empty() {
-        return Ok(Bip352ReceiveResult {
-            addresses,
-            outputs: Vec::new(),
-            tweak: None,
-            shared_secret: None,
-            input_pub_key_sum: None,
-        });
-    }
-
-    // Combine all eligible input public keys at once (handles intermediate point-at-infinity)
-    let pk_refs: Vec<&PublicKey> = eligible_pks.iter().collect();
-    let Ok(aggregate_a) = PublicKey::combine_keys(&pk_refs) else {
-        // Point at infinity -> skip transaction
-        return Ok(Bip352ReceiveResult {
-            addresses,
-            outputs: Vec::new(),
-            tweak: None,
-            shared_secret: None,
-            input_pub_key_sum: None,
-        });
-    };
-
-    let input_hash = compute_input_hash(&smallest_outpoint, &aggregate_a);
-    let Ok(hash_scalar) = Scalar::from_be_bytes(input_hash) else {
-        return Ok(Bip352ReceiveResult {
-            addresses,
-            outputs: Vec::new(),
-            tweak: None,
-            shared_secret: None,
-            input_pub_key_sum: None,
-        });
-    };
-
-    let Ok(tweak_point) = aggregate_a.mul_tweak(&secp, &hash_scalar) else {
-        return Ok(Bip352ReceiveResult {
-            addresses,
-            outputs: Vec::new(),
-            tweak: None,
-            shared_secret: None,
-            input_pub_key_sum: None,
-        });
-    };
-
-    let scan_scalar = Scalar::from_be_bytes(scan_privkey.secret_bytes())
-        .map_err(|e| anyhow!("Invalid scan_privkey scalar: {e}"))?;
-    let ecdh_shared_secret = tweak_point
-        .mul_tweak(&secp, &scan_scalar)
-        .map_err(|e| anyhow!("Failed to compute ECDH shared secret: {e}"))?;
-
-    // Parse valid candidate x-only output keys preserving order
-    let mut remaining_outputs: Vec<(String, XOnlyPublicKey)> = Vec::new();
-    for out_hex in outputs_xonly {
-        if let Ok(bytes) = hex::decode(out_hex.trim()) {
-            if let Ok(xonly) = XOnlyPublicKey::from_slice(&bytes) {
-                remaining_outputs.push((out_hex.trim().to_ascii_lowercase(), xonly));
-            }
-        }
-    }
-
-    let mut detected_outputs = Vec::new();
-    let mut spent_indices: HashSet<usize> = HashSet::new();
-    let mut k: u32 = 0;
-
-    while k < BIP0352_MAX_K {
-        let mut data = Vec::with_capacity(37);
-        data.extend_from_slice(&ecdh_shared_secret.serialize());
-        data.extend_from_slice(&k.to_be_bytes());
-        let t_k = tagged_hash(BIP0352_TAG_SHARED_SECRET, &data);
-        let t_k_scalar =
-            Scalar::from_be_bytes(t_k).map_err(|e| anyhow!("Invalid t_k scalar: {e}"))?;
-        let p_k = spend_pubkey
-            .add_exp_tweak(&secp, &t_k_scalar)
-            .map_err(|e| anyhow!("Failed to compute P_k: {e}"))?;
-        let (p_k_xonly, _) = p_k.x_only_public_key();
-
-        let mut matched_in_round = false;
-
-        for (idx, (out_hex, out_xonly)) in remaining_outputs.iter().enumerate() {
-            if spent_indices.contains(&idx) {
-                continue;
-            }
-
-            let mut matched_tweak: Option<[u8; 32]> = None;
-
-            if *out_xonly == p_k_xonly {
-                matched_tweak = Some(t_k);
-            } else if !label_map.is_empty() {
-                let neg_p_k = p_k.negate(&secp);
-                let out_even = PublicKey::from_x_only_public_key(*out_xonly, Parity::Even);
-                if let Ok(diff_even) = PublicKey::combine_keys(&[&out_even, &neg_p_k]) {
-                    if let Some(label_tweak) = label_map.get(&diff_even.serialize()) {
-                        let t_k_sk = SecretKey::from_slice(&t_k)?;
-                        let lbl_sc = Scalar::from_be_bytes(*label_tweak)?;
-                        let sum_tweak = t_k_sk.add_tweak(&lbl_sc)?;
-                        matched_tweak = Some(sum_tweak.secret_bytes());
-                    }
-                }
-                if matched_tweak.is_none() {
-                    let out_odd = PublicKey::from_x_only_public_key(*out_xonly, Parity::Odd);
-                    if let Ok(diff_odd) = PublicKey::combine_keys(&[&out_odd, &neg_p_k]) {
-                        if let Some(label_tweak) = label_map.get(&diff_odd.serialize()) {
-                            let t_k_sk = SecretKey::from_slice(&t_k)?;
-                            let lbl_sc = Scalar::from_be_bytes(*label_tweak)?;
-                            let sum_tweak = t_k_sk.add_tweak(&lbl_sc)?;
-                            matched_tweak = Some(sum_tweak.secret_bytes());
-                        }
-                    }
-                }
-            }
-
-            if let Some(priv_tweak_bytes) = matched_tweak {
-                spent_indices.insert(idx);
-                detected_outputs.push(Bip352DetectedOutput {
-                    pub_key: out_hex.clone(),
-                    priv_key_tweak: hex::encode(priv_tweak_bytes),
-                });
-
-                k += 1;
-                matched_in_round = true;
-                break;
-            }
-        }
-
-        if !matched_in_round {
-            break;
-        }
-    }
-
-    Ok(Bip352ReceiveResult {
+    let candidates: Vec<XOnlyPublicKey> = outputs_xonly
+        .iter()
+        .map(|out| {
+            let bytes =
+                hex::decode(out.trim()).map_err(|e| anyhow!("Invalid output key hex: {e}"))?;
+            XOnlyPublicKey::from_slice(&bytes)
+                .map_err(|e| anyhow!("Invalid x-only output key: {e}"))
+        })
+        .collect::<Result<_>>()?;
+    let context = bip352_input_context(inputs)?;
+    let mut spend_keys = vec![(None, keys.spend_pubkey)];
+    spend_keys.extend(keys.labels.iter().map(|(label, pk)| (Some(*label), *pk)));
+    let addresses = spend_keys
+        .iter()
+        .map(|(_, spend)| {
+            create_silent_payment_address_for_network(&keys.scan_pubkey, spend, expected_network)
+        })
+        .collect::<Result<_>>()?;
+    let mut result = Bip352ReceiveResult {
         addresses,
-        outputs: detected_outputs,
-        tweak: Some(hex::encode(tweak_point.serialize())),
-        shared_secret: Some(hex::encode(ecdh_shared_secret.serialize())),
-        input_pub_key_sum: Some(hex::encode(aggregate_a.serialize())),
-    })
+        outputs: Vec::new(),
+        tweak: context.tweak.map(|pk| hex::encode(pk.serialize())),
+        input_pub_key_sum: context
+            .aggregate_pubkey
+            .map(|pk| hex::encode(pk.serialize())),
+    };
+    if context.tweak.is_none() {
+        return Ok(result);
+    }
+    let shared = shared_secret.ok_or_else(|| anyhow!("Missing host-wallet ECDH point"))?;
+    let secp = Secp256k1::verification_only();
+    let mut used = HashSet::new();
+    for k in 0..BIP0352_MAX_K {
+        let expected = spend_keys
+            .iter()
+            .map(|(label, spend)| {
+                Ok((
+                    *label,
+                    derive_output_pubkey(&secp, spend, shared, k)?
+                        .x_only_public_key()
+                        .0,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let matched = candidates.iter().enumerate().find_map(|(idx, candidate)| {
+            if used.contains(&idx) {
+                return None;
+            }
+            expected
+                .iter()
+                .find(|(_, pk)| pk == candidate)
+                .map(|(label, _)| (idx, *label))
+        });
+        let Some((idx, label)) = matched else {
+            break;
+        };
+        used.insert(idx);
+        result.outputs.push(Bip352DetectedOutput {
+            pub_key: hex::encode(candidates[idx].serialize()),
+            output_index: k,
+            label,
+        });
+    }
+    Ok(result)
+}
+
+fn derive_output_pubkey<C: bitcoin::secp256k1::Verification>(
+    secp: &Secp256k1<C>,
+    spend: &PublicKey,
+    shared: &PublicKey,
+    k: u32,
+) -> Result<PublicKey> {
+    let mut data = Vec::with_capacity(37);
+    data.extend_from_slice(&shared.serialize());
+    data.extend_from_slice(&k.to_be_bytes());
+    let scalar = Scalar::from_be_bytes(tagged_hash(BIP0352_TAG_SHARED_SECRET, &data))
+        .map_err(|e| anyhow!("Invalid output tweak scalar: {e}"))?;
+    spend
+        .add_exp_tweak(secp, &scalar)
+        .map_err(|e| anyhow!("Invalid output public key: {e}"))
+}
+
+fn silent_payment_hrp(network: Network) -> &'static str {
+    match network {
+        Network::Bitcoin => "sp",
+        Network::Regtest => "sprt",
+        _ => "tsp",
+    }
 }
 
 /// Silent Payment (BIP-352) Scan Public Key.
@@ -823,418 +634,6 @@ impl SilentPaymentAddress {
     }
 }
 
-/// Silent Payment Output - an output that can be detected by the recipient.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SilentPaymentOutput {
-    /// The output script (P2TR, format: "5120" + 32-byte x-only pubkey hex)
-    pub script_pubkey: String,
-    /// The amount in satoshis
-    pub amount_sats: u64,
-    /// The tweaked public key used for this output (hex)
-    pub tweaked_pubkey: String,
-    /// The shared secret used to derive the tweak (hex)
-    pub shared_secret: Option<String>,
-}
-
-/// Silent Payment Input - used when creating a silent payment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SilentPaymentInput {
-    /// The outpoint being spent ("txid:vout")
-    pub outpoint: String,
-    /// The taproot or standard public key of the input
-    pub input_pubkey: String,
-    /// The private key corresponding to the input (for signer)
-    #[serde(skip_serializing)]
-    pub input_privkey: Option<String>,
-}
-
-/// Silent Payment - a payment session using BIP-352 Silent Payments.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SilentPayment {
-    /// The scan public key of the recipient (hex)
-    pub scan_pubkey: String,
-    /// The spend public key of the recipient (hex)
-    pub spend_pubkey: String,
-    /// The amount in satoshis
-    pub amount_sats: u64,
-    /// The inputs being spent
-    pub inputs: Vec<SilentPaymentInput>,
-    /// The change output (optional)
-    pub change_output: Option<SilentPaymentOutput>,
-    /// The target network
-    pub network: Network,
-}
-
-impl SilentPayment {
-    /// Create a new silent payment instance.
-    pub fn new(
-        scan_pubkey: String,
-        spend_pubkey: String,
-        amount_sats: u64,
-        inputs: Vec<SilentPaymentInput>,
-        change_output: Option<SilentPaymentOutput>,
-        network: Network,
-    ) -> Self {
-        Self {
-            scan_pubkey,
-            spend_pubkey,
-            amount_sats,
-            inputs,
-            change_output,
-            network,
-        }
-    }
-
-    /// Create the silent payment address for the recipient (defaults to mainnet).
-    pub fn recipient_address(
-        scan_pubkey: &str,
-        spend_pubkey: &str,
-    ) -> Result<String, anyhow::Error> {
-        let scan_bytes = hex::decode(scan_pubkey.trim())?;
-        let spend_bytes = hex::decode(spend_pubkey.trim())?;
-        let scan = PublicKey::from_slice(&scan_bytes)?;
-        let spend = PublicKey::from_slice(&spend_bytes)?;
-        create_silent_payment_address(&scan, &spend)
-    }
-
-    /// Create the silent payment address for the recipient on a specific network.
-    pub fn recipient_address_for_network(
-        scan_pubkey: &str,
-        spend_pubkey: &str,
-        network: Network,
-    ) -> Result<String, anyhow::Error> {
-        let scan_bytes = hex::decode(scan_pubkey.trim())?;
-        let spend_bytes = hex::decode(spend_pubkey.trim())?;
-        let scan = PublicKey::from_slice(&scan_bytes)?;
-        let spend = PublicKey::from_slice(&spend_bytes)?;
-        create_silent_payment_address_for_network(&scan, &spend, network)
-    }
-
-    /// Derive the tweaked public key for a silent payment output (index `k = 0`).
-    pub fn derive_tweaked_pubkey(
-        sender_privkey: &SecretKey,
-        recipient_scan_pubkey: &PublicKey,
-        recipient_spend_pubkey: &PublicKey,
-    ) -> Result<PublicKey, anyhow::Error> {
-        Self::derive_tweaked_pubkey_with_index(
-            sender_privkey,
-            recipient_scan_pubkey,
-            recipient_spend_pubkey,
-            0,
-        )
-    }
-
-    /// Derive the tweaked public key for a silent payment output with specific index `k`.
-    pub fn derive_tweaked_pubkey_with_index(
-        sender_privkey: &SecretKey,
-        recipient_scan_pubkey: &PublicKey,
-        recipient_spend_pubkey: &PublicKey,
-        k: u32,
-    ) -> Result<PublicKey, anyhow::Error> {
-        let secp = Secp256k1::new();
-        let sender_scalar = Scalar::from_be_bytes(sender_privkey.secret_bytes())
-            .map_err(|e| anyhow!("Invalid scalar: {e}"))?;
-        let shared_secret = recipient_scan_pubkey
-            .mul_tweak(&secp, &sender_scalar)
-            .map_err(|e| anyhow!("Failed to compute shared secret: {e}"))?;
-
-        let mut data = Vec::with_capacity(37);
-        data.extend_from_slice(&shared_secret.serialize());
-        data.extend_from_slice(&k.to_be_bytes());
-
-        let tweak_bytes = tagged_hash(BIP0352_TAG_SHARED_SECRET, &data);
-        let tweak_scalar =
-            Scalar::from_be_bytes(tweak_bytes).map_err(|e| anyhow!("Invalid tweak scalar: {e}"))?;
-
-        let tweaked = recipient_spend_pubkey
-            .add_exp_tweak(&secp, &tweak_scalar)
-            .map_err(|e| anyhow!("Failed to tweak public key: {e}"))?;
-
-        Ok(tweaked)
-    }
-
-    /// Create a silent payment output (`k = 0`).
-    pub fn create_output(
-        &self,
-        recipient_scan_pubkey: &PublicKey,
-        recipient_spend_pubkey: &PublicKey,
-    ) -> Result<SilentPaymentOutput, anyhow::Error> {
-        self.create_output_with_index(recipient_scan_pubkey, recipient_spend_pubkey, 0)
-    }
-
-    /// Create a silent payment output for a specific recipient output index `k`.
-    pub fn create_output_with_index(
-        &self,
-        recipient_scan_pubkey: &PublicKey,
-        recipient_spend_pubkey: &PublicKey,
-        k: u32,
-    ) -> Result<SilentPaymentOutput, anyhow::Error> {
-        let secp = Secp256k1::new();
-
-        // Collect private keys and outpoints from inputs
-        let mut privkeys: Vec<SecretKey> = Vec::new();
-        let mut outpoints: Vec<[u8; 36]> = Vec::new();
-
-        for input in &self.inputs {
-            if let Some(priv_hex) = &input.input_privkey {
-                let bytes = hex::decode(priv_hex.trim())
-                    .map_err(|e| anyhow!("Invalid input private key hex: {e}"))?;
-                let sk = SecretKey::from_slice(&bytes)
-                    .map_err(|e| anyhow!("Invalid input secret key: {e}"))?;
-                privkeys.push(sk);
-            }
-            if let Ok(op) = parse_outpoint_to_bytes(&input.outpoint) {
-                outpoints.push(op);
-            }
-        }
-
-        // Determine aggregate sender private key
-        let sender_privkey = if privkeys.is_empty() {
-            SecretKey::new(&mut OsRng)
-        } else {
-            let mut acc: Option<SecretKey> = None;
-            for sk in &privkeys {
-                acc = match acc {
-                    None => Some(*sk),
-                    Some(curr) => {
-                        let sc = Scalar::from_be_bytes(sk.secret_bytes())
-                            .map_err(|e| anyhow!("Invalid scalar: {e}"))?;
-                        curr.add_tweak(&sc).ok()
-                    }
-                };
-            }
-            acc.ok_or_else(|| anyhow!("Input private keys sum to zero (point at infinity)"))?
-        };
-
-        let sender_pubkey = PublicKey::from_secret_key(&secp, &sender_privkey);
-        let sender_scalar = Scalar::from_be_bytes(sender_privkey.secret_bytes())
-            .map_err(|e| anyhow!("Invalid sender scalar: {e}"))?;
-
-        // If outpoint exists, compute input_hash and fold into shared secret
-        let shared_secret = if let Some(smallest_op) = find_smallest_outpoint(&outpoints) {
-            let input_hash = compute_input_hash(&smallest_op, &sender_pubkey);
-            let hash_scalar = Scalar::from_be_bytes(input_hash)
-                .map_err(|e| anyhow!("Invalid input hash scalar: {e}"))?;
-            recipient_scan_pubkey
-                .mul_tweak(&secp, &sender_scalar)
-                .map_err(|e| anyhow!("Failed to compute ECDH intermediate point: {e}"))?
-                .mul_tweak(&secp, &hash_scalar)
-                .map_err(|e| anyhow!("Failed to apply input hash tweak: {e}"))?
-        } else {
-            recipient_scan_pubkey
-                .mul_tweak(&secp, &sender_scalar)
-                .map_err(|e| anyhow!("Failed to compute shared secret: {e}"))?
-        };
-
-        // Compute tweak t_k = TaggedHash("BIP0352/SharedSecret", S || k)
-        let mut data = Vec::with_capacity(37);
-        data.extend_from_slice(&shared_secret.serialize());
-        data.extend_from_slice(&k.to_be_bytes());
-
-        let tweak_bytes = tagged_hash(BIP0352_TAG_SHARED_SECRET, &data);
-        let tweak_scalar =
-            Scalar::from_be_bytes(tweak_bytes).map_err(|e| anyhow!("Invalid tweak scalar: {e}"))?;
-
-        let tweaked_pubkey = recipient_spend_pubkey
-            .add_exp_tweak(&secp, &tweak_scalar)
-            .map_err(|e| anyhow!("Failed to tweak public key: {e}"))?;
-
-        // Standard P2TR scriptPubkey: OP_1 (0x51) OP_PUSHBYTES_32 (0x20) <32-byte x-only pubkey>
-        let (x_only, _) = tweaked_pubkey.x_only_public_key();
-        let script_pubkey = format!("5120{}", hex::encode(x_only.serialize()));
-
-        Ok(SilentPaymentOutput {
-            script_pubkey,
-            amount_sats: self.amount_sats,
-            tweaked_pubkey: hex::encode(tweaked_pubkey.serialize()),
-            shared_secret: Some(hex::encode(shared_secret.serialize())),
-        })
-    }
-
-    /// Detect silent payments addressed to the recipient across transaction outputs.
-    pub fn detect_outputs(
-        scan_privkey: &SecretKey,
-        spend_pubkey: &PublicKey,
-        input_pubkeys: &[PublicKey],
-        tx_outputs: &[(String, u64)], // (script_pubkey, amount_sats)
-    ) -> Result<Vec<SilentPaymentOutput>, anyhow::Error> {
-        detect_silent_payment_outputs(scan_privkey, spend_pubkey, input_pubkeys, tx_outputs)
-    }
-
-    /// Detect silent payments when input hash is explicitly bound (with `outpoint_L`).
-    pub fn detect_outputs_with_input_hash(
-        scan_privkey: &SecretKey,
-        spend_pubkey: &PublicKey,
-        aggregate_input_pubkey: &PublicKey,
-        input_hash: &[u8; 32],
-        tx_outputs: &[(String, u64)],
-    ) -> Result<Vec<SilentPaymentOutput>, anyhow::Error> {
-        let secp = Secp256k1::new();
-        let scan_scalar = Scalar::from_be_bytes(scan_privkey.secret_bytes())
-            .map_err(|e| anyhow!("Invalid scan scalar: {e}"))?;
-        let hash_scalar = Scalar::from_be_bytes(*input_hash)
-            .map_err(|e| anyhow!("Invalid input hash scalar: {e}"))?;
-
-        let shared_secret = aggregate_input_pubkey
-            .mul_tweak(&secp, &scan_scalar)
-            .map_err(|e| anyhow!("Failed to compute ECDH intermediate point: {e}"))?
-            .mul_tweak(&secp, &hash_scalar)
-            .map_err(|e| anyhow!("Failed to apply input hash tweak: {e}"))?;
-
-        scan_outputs_for_shared_secret(&secp, spend_pubkey, &shared_secret, tx_outputs)
-    }
-}
-
-/// Helper function to scan candidate transaction outputs for a given shared secret point `S`.
-fn scan_outputs_for_shared_secret(
-    secp: &Secp256k1<bitcoin::secp256k1::All>,
-    spend_pubkey: &PublicKey,
-    shared_secret: &PublicKey,
-    tx_outputs: &[(String, u64)],
-) -> Result<Vec<SilentPaymentOutput>> {
-    let mut detected = Vec::new();
-    let mut spent_indices = HashSet::new();
-
-    for k in 0..BIP0352_MAX_K {
-        let mut data = Vec::with_capacity(37);
-        data.extend_from_slice(&shared_secret.serialize());
-        data.extend_from_slice(&k.to_be_bytes());
-
-        let tweak_bytes = tagged_hash(BIP0352_TAG_SHARED_SECRET, &data);
-        let tweak_scalar =
-            Scalar::from_be_bytes(tweak_bytes).map_err(|e| anyhow!("Invalid tweak scalar: {e}"))?;
-
-        let tweaked_pubkey = spend_pubkey
-            .add_exp_tweak(secp, &tweak_scalar)
-            .map_err(|e| anyhow!("Failed to tweak candidate pubkey: {e}"))?;
-
-        let (x_only, _) = tweaked_pubkey.x_only_public_key();
-        let expected_script = format!("5120{}", hex::encode(x_only.serialize()));
-
-        let mut matched = false;
-        for (idx, (script_pubkey, amount_sats)) in tx_outputs.iter().enumerate() {
-            if spent_indices.contains(&idx) {
-                continue;
-            }
-            if script_pubkey.eq_ignore_ascii_case(&expected_script) {
-                spent_indices.insert(idx);
-                detected.push(SilentPaymentOutput {
-                    script_pubkey: script_pubkey.clone(),
-                    amount_sats: *amount_sats,
-                    tweaked_pubkey: hex::encode(tweaked_pubkey.serialize()),
-                    shared_secret: Some(hex::encode(shared_secret.serialize())),
-                });
-                matched = true;
-                break;
-            }
-        }
-
-        if !matched {
-            break;
-        }
-    }
-
-    Ok(detected)
-}
-
-/// Free function to detect silent payment outputs given sender input pubkeys and tx outputs.
-pub fn detect_silent_payment_outputs(
-    scan_privkey: &SecretKey,
-    spend_pubkey: &PublicKey,
-    input_pubkeys: &[PublicKey],
-    tx_outputs: &[(String, u64)],
-) -> Result<Vec<SilentPaymentOutput>> {
-    if input_pubkeys.is_empty() || tx_outputs.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let secp = Secp256k1::new();
-    let aggregate_a = if input_pubkeys.len() == 1 {
-        input_pubkeys[0]
-    } else {
-        let refs: Vec<&PublicKey> = input_pubkeys.iter().collect();
-        PublicKey::combine_keys(&refs)
-            .map_err(|e| anyhow!("Failed to combine input pubkeys: {e}"))?
-    };
-
-    let scan_scalar = Scalar::from_be_bytes(scan_privkey.secret_bytes())
-        .map_err(|e| anyhow!("Invalid scan scalar: {e}"))?;
-
-    let shared_secret = aggregate_a
-        .mul_tweak(&secp, &scan_scalar)
-        .map_err(|e| anyhow!("Failed to compute ECDH shared secret: {e}"))?;
-
-    scan_outputs_for_shared_secret(&secp, spend_pubkey, &shared_secret, tx_outputs)
-}
-
-/// Derive the spending private key for a detected silent payment output:
-/// `p_k = b_spend + t_k` (with Taproot even-parity adjustment if required).
-pub fn derive_spending_privkey(
-    spend_privkey: &SecretKey,
-    shared_secret: &PublicKey,
-    k: u32,
-) -> Result<SecretKey> {
-    let secp = Secp256k1::new();
-    let mut data = Vec::with_capacity(37);
-    data.extend_from_slice(&shared_secret.serialize());
-    data.extend_from_slice(&k.to_be_bytes());
-
-    let tweak_bytes = tagged_hash(BIP0352_TAG_SHARED_SECRET, &data);
-    let tweak_scalar =
-        Scalar::from_be_bytes(tweak_bytes).map_err(|e| anyhow!("Invalid tweak scalar: {e}"))?;
-
-    let tweaked_sk = spend_privkey
-        .add_tweak(&tweak_scalar)
-        .map_err(|e| anyhow!("Failed to tweak spend private key: {e}"))?;
-
-    // Check parity of the resulting public key: BIP-340 Schnorr / Taproot requires even parity
-    let derived_pk = PublicKey::from_secret_key(&secp, &tweaked_sk);
-    let (_, parity) = derived_pk.x_only_public_key();
-
-    let final_sk = if parity == Parity::Odd {
-        tweaked_sk.negate()
-    } else {
-        tweaked_sk
-    };
-
-    Ok(final_sk)
-}
-
-/// Derive spending private key directly from scan private key and sender public key.
-pub fn derive_spending_privkey_from_scan(
-    spend_privkey: &SecretKey,
-    scan_privkey: &SecretKey,
-    sender_pubkey: &PublicKey,
-    k: u32,
-) -> Result<SecretKey> {
-    let secp = Secp256k1::new();
-    let scan_scalar = Scalar::from_be_bytes(scan_privkey.secret_bytes())
-        .map_err(|e| anyhow!("Invalid scan scalar: {e}"))?;
-    let shared_secret = sender_pubkey
-        .mul_tweak(&secp, &scan_scalar)
-        .map_err(|e| anyhow!("Failed to compute shared secret: {e}"))?;
-
-    derive_spending_privkey(spend_privkey, &shared_secret, k)
-}
-
-/// Generate a new silent payment key pair `(scan_priv, scan_pub, spend_priv, spend_pub)`.
-pub fn generate_silent_payment_keys() -> Result<(String, String, String, String), anyhow::Error> {
-    let secp = Secp256k1::new();
-
-    let scan_privkey = SecretKey::new(&mut OsRng);
-    let scan_pubkey = PublicKey::from_secret_key(&secp, &scan_privkey);
-
-    let spend_privkey = SecretKey::new(&mut OsRng);
-    let spend_pubkey = PublicKey::from_secret_key(&secp, &spend_privkey);
-
-    Ok((
-        hex::encode(scan_privkey.secret_bytes()),
-        hex::encode(scan_pubkey.serialize()),
-        hex::encode(spend_privkey.secret_bytes()),
-        hex::encode(spend_pubkey.serialize()),
-    ))
-}
-
 /// Parse a silent payment scan public key from an address or legacy hex string.
 pub fn parse_silent_payment_scan_key(scan_key: &str) -> Result<PublicKey, anyhow::Error> {
     let trimmed = scan_key.trim();
@@ -1288,12 +687,7 @@ pub fn create_silent_payment_address_for_network(
     spend_pubkey: &PublicKey,
     network: Network,
 ) -> Result<String, anyhow::Error> {
-    let hrp = match network {
-        Network::Bitcoin => "sp",
-        Network::Testnet | Network::Signet => "tsp",
-        Network::Regtest => "sprt",
-        _ => "tsp",
-    };
+    let hrp = silent_payment_hrp(network);
 
     let mut payload = Vec::with_capacity(66);
     payload.extend_from_slice(&scan_pubkey.serialize());
@@ -1363,129 +757,4 @@ pub fn parse_silent_payment_address(
         .map_err(|e| anyhow!("Invalid spend public key in address: {e}"))?;
 
     Ok((scan_pubkey, spend_pubkey, network))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_generate_silent_payment_keys() {
-        let (scan_priv, scan_pub, spend_priv, spend_pub) = generate_silent_payment_keys().unwrap();
-        assert_eq!(scan_priv.len(), 64);
-        assert_eq!(scan_pub.len(), 66);
-        assert_eq!(spend_priv.len(), 64);
-        assert_eq!(spend_pub.len(), 66);
-    }
-
-    #[test]
-    fn test_parse_silent_payment_scan_key_legacy() {
-        let (_, scan_pub, _, _) = generate_silent_payment_keys().unwrap();
-        let sp1q = format!("sp1q{}", scan_pub.to_lowercase());
-        let result = parse_silent_payment_scan_key(&sp1q);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_bip352_address_encode_decode_roundtrip() {
-        let secp = Secp256k1::new();
-        let scan_sk = SecretKey::new(&mut OsRng);
-        let scan_pk = PublicKey::from_secret_key(&secp, &scan_sk);
-        let spend_sk = SecretKey::new(&mut OsRng);
-        let spend_pk = PublicKey::from_secret_key(&secp, &spend_sk);
-
-        // Mainnet
-        let mainnet_addr = create_silent_payment_address(&scan_pk, &spend_pk).unwrap();
-        assert!(mainnet_addr.starts_with("sp1q"));
-        let (parsed_scan, parsed_spend, net) = parse_silent_payment_address(&mainnet_addr).unwrap();
-        assert_eq!(parsed_scan, scan_pk);
-        assert_eq!(parsed_spend, spend_pk);
-        assert_eq!(net, Network::Bitcoin);
-
-        // Testnet
-        let testnet_addr =
-            create_silent_payment_address_for_network(&scan_pk, &spend_pk, Network::Testnet)
-                .unwrap();
-        assert!(testnet_addr.starts_with("tsp1q"));
-        let (parsed_scan_t, parsed_spend_t, net_t) =
-            parse_silent_payment_address(&testnet_addr).unwrap();
-        assert_eq!(parsed_scan_t, scan_pk);
-        assert_eq!(parsed_spend_t, spend_pk);
-        assert_eq!(net_t, Network::Testnet);
-    }
-
-    #[test]
-    fn test_silent_payment_output_creation_and_detection() {
-        let secp = Secp256k1::new();
-
-        // Recipient keys
-        let scan_sk = SecretKey::new(&mut OsRng);
-        let scan_pk = PublicKey::from_secret_key(&secp, &scan_sk);
-        let spend_sk = SecretKey::new(&mut OsRng);
-        let spend_pk = PublicKey::from_secret_key(&secp, &spend_sk);
-
-        // Sender input
-        let sender_sk = SecretKey::new(&mut OsRng);
-        let sender_pk = PublicKey::from_secret_key(&secp, &sender_sk);
-
-        let input = SilentPaymentInput {
-            outpoint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0"
-                .to_string(),
-            input_pubkey: hex::encode(sender_pk.serialize()),
-            input_privkey: Some(hex::encode(sender_sk.secret_bytes())),
-        };
-
-        let payment = SilentPayment::new(
-            hex::encode(scan_pk.serialize()),
-            hex::encode(spend_pk.serialize()),
-            50_000,
-            vec![input],
-            None,
-            Network::Bitcoin,
-        );
-
-        let output_0 = payment
-            .create_output_with_index(&scan_pk, &spend_pk, 0)
-            .unwrap();
-        assert!(output_0.script_pubkey.starts_with("5120"));
-        assert_eq!(output_0.script_pubkey.len(), 68);
-
-        // Recipient detects output
-        let tx_outputs = vec![
-            (
-                "5120deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
-                10_000,
-            ),
-            (output_0.script_pubkey.clone(), 50_000),
-        ];
-
-        let outpoint_bytes = parse_outpoint_to_bytes(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0",
-        )
-        .unwrap();
-        let input_hash = compute_input_hash(&outpoint_bytes, &sender_pk);
-
-        let detected = SilentPayment::detect_outputs_with_input_hash(
-            &scan_sk,
-            &spend_pk,
-            &sender_pk,
-            &input_hash,
-            &tx_outputs,
-        )
-        .unwrap();
-
-        assert_eq!(detected.len(), 1);
-        assert_eq!(detected[0].script_pubkey, output_0.script_pubkey);
-        assert_eq!(detected[0].amount_sats, 50_000);
-
-        // Derive spending private key and verify it matches the tweaked output key
-        let shared_secret =
-            PublicKey::from_slice(&hex::decode(output_0.shared_secret.unwrap()).unwrap()).unwrap();
-        let derived_spending_sk = derive_spending_privkey(&spend_sk, &shared_secret, 0).unwrap();
-        let derived_pk = PublicKey::from_secret_key(&secp, &derived_spending_sk);
-        let (derived_x_only, _) = derived_pk.x_only_public_key();
-
-        let expected_x_only_hex = &output_0.script_pubkey[4..];
-        assert_eq!(hex::encode(derived_x_only.serialize()), expected_x_only_hex);
-    }
 }

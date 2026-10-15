@@ -43,14 +43,12 @@ pub use scoring::{
     score_routes, FeeSnapshot, PaymentRail, RouteCandidate, RouteDecision, RoutePreferences,
 };
 pub use silent_payments::{
-    compute_input_hash, compute_label_tweak, create_bip352_outputs, create_silent_payment_address,
-    create_silent_payment_address_for_network, derive_labeled_spend_pubkey,
-    derive_spending_privkey, derive_spending_privkey_from_scan, detect_silent_payment_outputs,
-    extract_bip352_input_pubkey, extract_bip352_sender_privkey, generate_silent_payment_keys,
+    bip352_input_context, compute_input_hash, create_bip352_outputs, create_silent_payment_address,
+    create_silent_payment_address_for_network, extract_bip352_input_pubkey, find_smallest_outpoint,
     parse_outpoint_to_bytes, parse_silent_payment_address, parse_silent_payment_scan_key,
-    scan_bip352_transaction, tagged_hash, Bip352DetectedOutput, Bip352PrevoutInput,
-    Bip352ReceiveResult, Bip352SendResult, SilentPayment, SilentPaymentAddress, SilentPaymentInput,
-    SilentPaymentOutput, SilentPaymentScanKey, BIP0352_MAX_K, BIP0352_NUMS_H, BIP0352_TAG_INPUTS,
+    scan_bip352_transaction, tagged_hash, Bip352DetectedOutput, Bip352InputContext,
+    Bip352PrevoutInput, Bip352ReceiveResult, Bip352ScanKeys, Bip352SendResult,
+    SilentPaymentAddress, SilentPaymentScanKey, BIP0352_MAX_K, BIP0352_NUMS_H, BIP0352_TAG_INPUTS,
     BIP0352_TAG_LABEL, BIP0352_TAG_SHARED_SECRET,
 };
 pub use split_payments::{
