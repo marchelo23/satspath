@@ -115,6 +115,7 @@ struct SignedDnssecFixture {
 }
 
 impl SignedDnssecFixture {
+    /// Generate an ephemeral DNS signing key for the offline fixture.
     fn gen_ecdsa_keypair() -> KeyPair<Private> {
         let pkcs8 = KeyPair::<Private>::generate_pkcs8(Algorithm::ECDSAP256SHA256)
             .expect("generate pkcs8 ecdsa keypair");
@@ -123,6 +124,7 @@ impl SignedDnssecFixture {
             .expect("parse pkcs8 ecdsa keypair")
     }
 
+    /// Build a complete signed root-to-leaf chain for the supplied TXT payload.
     fn build(uri_payload: &str) -> Self {
         let now: u32 = 1_700_000_000;
         let inception = now - 3600;
@@ -305,6 +307,7 @@ struct InProcessAuthoritativeDnssecServer {
 }
 
 impl InProcessAuthoritativeDnssecServer {
+    /// Serve fixture records and deliberate invalid variants through a DNS handle.
     fn from_fixture(fixture: &SignedDnssecFixture) -> Self {
         let mut entries = Vec::new();
 
@@ -393,6 +396,7 @@ impl DnsHandle for InProcessAuthoritativeDnssecServer {
         Pin<Box<dyn Stream<Item = std::result::Result<DnsResponse, ProtoError>> + Send>>;
     type Error = ProtoError;
 
+    /// Answer a query directly from the fixture record set.
     fn send<R: Into<DnsRequest>>(&self, request: R) -> Self::Response {
         let req = request.into();
         let query = req.queries().first().cloned().expect("query present");
@@ -421,6 +425,7 @@ impl DnsHandle for InProcessAuthoritativeDnssecServer {
 
 // ─── Tests ──────────────────────────────────────────────────────────────────────
 
+/// Verify bundled trust anchors include the expected ICANN keys.
 #[test]
 fn test_root_trust_anchors_bundle_active_and_historical_ksks() {
     let anchor = root_trust_anchors();
@@ -465,6 +470,7 @@ fn test_root_trust_anchors_bundle_active_and_historical_ksks() {
     assert!(found_19036, "KSK 19036 must be present in trust anchors");
 }
 
+/// Validate signed chains and reject tampered data and unsigned delegations.
 #[test]
 fn test_embedded_dnssec_zone_chain_valid_tampered_and_unsigned() {
     let uri = "bitcoin:bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
@@ -532,6 +538,7 @@ fn test_embedded_dnssec_zone_chain_valid_tampered_and_unsigned() {
     assert!(matches!(err_unsigned, SatsPathError::DnssecUnavailable));
 }
 
+/// Exercise Hickory validation against signed, bogus and unsigned fixture zones.
 #[tokio::test]
 async fn test_in_process_hickory_dnssec_valid_bogus_and_unsigned() {
     let uri = "bitcoin:bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
@@ -585,6 +592,7 @@ async fn test_in_process_hickory_dnssec_valid_bogus_and_unsigned() {
     );
 }
 
+/// Accept authenticated profile pointers and reject instructions without a profile.
 #[tokio::test]
 async fn test_bip353_resolver_sp_profile_ownership_and_unauthenticated_fallback() {
     let mut server = mockito::Server::new_async().await;
@@ -640,7 +648,9 @@ async fn test_bip353_resolver_sp_profile_ownership_and_unauthenticated_fallback(
             ttl_seconds: Some(600),
         },
     );
-    let resolver = Bip353Resolver::with_dns_resolver(Arc::new(dns));
+    let continuity = tempfile::tempdir().unwrap();
+    let resolver =
+        Bip353Resolver::with_dns_resolver(Arc::new(dns)).with_continuity_dir(continuity.path());
     let resolved_profile = resolver
         .resolve_alias("₿rodrigo@satspath.dev")
         .await
@@ -658,7 +668,8 @@ async fn test_bip353_resolver_sp_profile_ownership_and_unauthenticated_fallback(
             ttl_seconds: Some(600),
         },
     );
-    let resolver_no_profile = Bip353Resolver::with_dns_resolver(Arc::new(dns_no_profile));
+    let resolver_no_profile = Bip353Resolver::with_dns_resolver(Arc::new(dns_no_profile))
+        .with_continuity_dir(continuity.path());
     let unauth_err = resolver_no_profile
         .resolve_alias("₿rodrigo@satspath.dev")
         .await
@@ -672,6 +683,7 @@ async fn test_bip353_resolver_sp_profile_ownership_and_unauthenticated_fallback(
 
 // ─── Optional Live Network DNSSEC Smoke Tests (Ignored in Offline CI) ───────────
 
+/// Optionally verify a live signed domain against the bundled root anchors.
 #[tokio::test]
 #[ignore = "Live external network DNS test; run explicitly with -- --ignored"]
 async fn test_live_dnssec_signed_domain() {
@@ -684,6 +696,7 @@ async fn test_live_dnssec_signed_domain() {
     assert!(records.iter().all(|r| r.dnssec_validated));
 }
 
+/// Optionally confirm a live bogus DNSSEC domain fails closed.
 #[tokio::test]
 #[ignore = "Live external network DNS test; run explicitly with -- --ignored"]
 async fn test_live_dnssec_bogus_domain_fails_closed() {

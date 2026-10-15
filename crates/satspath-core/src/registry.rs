@@ -127,14 +127,29 @@ impl Registry {
         let alias = canonical_identifier(&signed.profile.alias);
         let key = identifier_hash(&alias);
 
+        Self::validate_profile_transition(
+            &alias,
+            &signed,
+            self.data
+                .profiles
+                .get(&key)
+                .or_else(|| self.data.profiles.get(&alias)),
+        )?;
+
+        self.data.profiles.insert(key, signed);
+        self.save()
+    }
+
+    /// Enforce the registry's key, recovery, timestamp and sequence update policy.
+    /// Legacy profiles may omit sequences until the first numbered update.
+    pub(crate) fn validate_profile_transition(
+        alias: &str,
+        signed: &SignedPaymentProfile,
+        existing: Option<&SignedPaymentProfile>,
+    ) -> Result<()> {
         // SEC-03: Downgrade Attack Mitigation
         // Ensure we do not overwrite a newer profile with an older one.
-        if let Some(existing) = self
-            .data
-            .profiles
-            .get(&key)
-            .or_else(|| self.data.profiles.get(&alias))
-        {
+        if let Some(existing) = existing {
             if existing.profile.revoked {
                 return Err(SatsPathError::RegistryError(format!(
                     "Update rejected: alias '{}' has been revoked",
@@ -157,7 +172,7 @@ impl Registry {
                     )?;
                     if recovery.previous_pubkey != existing.profile.identity_pubkey
                         || recovery.new_pubkey != signed.profile.identity_pubkey
-                        || recovery.identifier_hash != identifier_hash(&alias)
+                        || recovery.identifier_hash != identifier_hash(alias)
                         || recovery.sequence != signed.profile.sequence.unwrap_or(0)
                         || recovery.sequence
                             != existing.profile.sequence.unwrap_or(0).saturating_add(1)
@@ -178,7 +193,7 @@ impl Registry {
                     }
                     if rotation.previous_pubkey != existing.profile.identity_pubkey
                         || rotation.new_pubkey != signed.profile.identity_pubkey
-                        || rotation.identifier_hash != identifier_hash(&alias)
+                        || rotation.identifier_hash != identifier_hash(alias)
                         || rotation.sequence != signed.profile.sequence.unwrap_or(0)
                         || rotation.sequence
                             != existing.profile.sequence.unwrap_or(0).saturating_add(1)
@@ -245,8 +260,7 @@ impl Registry {
             }
         }
 
-        self.data.profiles.insert(key, signed);
-        self.save()
+        Ok(())
     }
 
     pub fn resolve_alias(&self, alias: &str) -> Result<&SignedPaymentProfile> {

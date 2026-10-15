@@ -212,3 +212,23 @@ Payment URI: bitcoin:?lno=...
 Mode: Mainnet Preview
 No funds moved.
 ```
+
+### Profile continuity
+
+`Bip353Resolver` persists authenticated `sp-profile` identities in
+`.satspath/bip353-continuity.sqlite3`. Applications with a custom data directory
+must set `with_continuity_dir`; the daemon uses its configured home. Keep this
+file across restarts to retain TOFU pins, sequence counters and revocations.
+Storage errors stop resolution. SQLite serializes concurrent profile updates.
+
+A numbered profile must advance the stored sequence on each acceptance; equal
+or lower counters and removal of an existing counter are rejected. As in the
+local registry, legacy profiles without counters remain compatible until a
+counter is adopted. Key changes require the registry's authenticated rotation or
+recovery proof. An authenticated revocation persists as a terminal tombstone,
+including when subsequent DNS or HTTP requests would fail.
+
+HTTP profile fetches validate public payment metadata and reject private material
+before it can be returned or persisted. Custom DNS server configurations reject
+private and reserved IP addresses; `HickoryDnssecTxtResolver::with_config` returns
+`Result`. Arbitrary DNS handles are available only in tests or with `test-utils`.

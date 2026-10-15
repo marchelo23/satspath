@@ -22,7 +22,7 @@ pub(crate) fn resolver_chain(home: &std::path::Path) -> ChainResolver {
         chain = chain.push(registry);
     }
     chain
-        .push(Bip353Resolver::new())
+        .push(Bip353Resolver::new().with_continuity_dir(home))
         .push(HttpResolver::new())
         .push(NostrResolver::new())
 }

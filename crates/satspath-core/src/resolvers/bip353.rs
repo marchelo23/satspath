@@ -385,6 +385,7 @@ impl DnsHandle for SharedDnsHandle {
     type Response = DnsResponseStream;
     type Error = ProtoError;
 
+    /// Forward a query through the wrapped DNS transport.
     fn send<R: Into<DnsRequest>>(&self, request: R) -> Self::Response {
         (self.send_fn)(request.into())
     }
@@ -400,6 +401,7 @@ pub struct HickoryDnssecTxtResolver {
 }
 
 impl Default for HickoryDnssecTxtResolver {
+    /// Construct the default resolver with strict DNSSEC validation.
     fn default() -> Self {
         Self::new()
     }
@@ -409,10 +411,20 @@ impl HickoryDnssecTxtResolver {
     /// Construct a resolver with the default multi-provider pool and bundled root trust anchors.
     pub fn new() -> Self {
         Self::with_config(default_resolver_config(), root_trust_anchors())
+            .expect("bundled DNS server addresses must be public")
     }
 
     /// Construct a resolver with custom server configuration and trust anchors.
-    pub fn with_config(config: ResolverConfig, anchor: TrustAnchor) -> Self {
+    /// Reject private or reserved DNS destinations before constructing any transport.
+    pub fn with_config(config: ResolverConfig, anchor: TrustAnchor) -> Result<Self> {
+        for server in config.name_servers() {
+            if crate::ssrf::is_private_or_reserved_ip(server.socket_addr.ip()) {
+                return Err(SatsPathError::ValidationError(format!(
+                    "Blocked DNS server IP: {}",
+                    server.socket_addr.ip()
+                )));
+            }
+        }
         let mut opts = ResolverOpts::default();
         opts.validate = true;
         opts.attempts = 3;
@@ -424,13 +436,23 @@ impl HickoryDnssecTxtResolver {
             conn_provider,
         );
         let client = RetryDnsHandle::new(pool, opts.attempts);
-        Self::with_dns_handle(client, anchor)
+        Ok(Self::from_dns_handle(client, anchor))
     }
 
     /// Construct a validating resolver wrapping an arbitrary [`DnsHandle`] and [`TrustAnchor`].
     ///
     /// Useful for deterministic in-process authoritative DNSSEC testing without external network calls.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn with_dns_handle<H, E>(handle: H, anchor: TrustAnchor) -> Self
+    where
+        H: DnsHandle<Error = E> + Send + Sync + Unpin + 'static,
+        E: std::error::Error + Send + 'static,
+    {
+        Self::from_dns_handle(handle, anchor)
+    }
+
+    /// Wrap a prevalidated network pool or an explicitly injected test transport.
+    fn from_dns_handle<H, E>(handle: H, anchor: TrustAnchor) -> Self
     where
         H: DnsHandle<Error = E> + Send + Sync + Unpin + 'static,
         E: std::error::Error + Send + 'static,
@@ -512,9 +534,11 @@ impl DnsTxtResolver for HickoryDnssecTxtResolver {
 pub struct Bip353Resolver {
     dnssec_required: bool,
     dns: Arc<dyn DnsTxtResolver + Send + Sync>,
+    continuity_dir: std::path::PathBuf,
 }
 
 impl Default for Bip353Resolver {
+    /// Construct the default resolver with strict DNSSEC validation.
     fn default() -> Self {
         Self::new()
     }
@@ -531,7 +555,15 @@ impl Bip353Resolver {
         Self {
             dnssec_required: true,
             dns,
+            continuity_dir: ".satspath".into(),
         }
+    }
+
+    /// Store TOFU pins, sequences and revocations in this application's data directory.
+    /// Defaults to `.satspath`; storage failures are terminal resolution errors.
+    pub fn with_continuity_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.continuity_dir = dir.into();
+        self
     }
 
     /// Whether DNSSEC validation is required by this resolver (`true`).
@@ -551,6 +583,7 @@ impl Bip353Resolver {
 
 #[async_trait]
 impl DnsTxtResolver for Bip353Resolver {
+    /// Delegate TXT lookup to the configured validating backend.
     async fn query_txt(&self, fqdn: &str) -> Result<Vec<DnsTxtRecord>> {
         self.dns.query_txt(fqdn).await
     }
@@ -574,7 +607,7 @@ async fn resolve_alias_with(
         #[cfg(feature = "std")]
         {
             let http_resolver = crate::resolvers::http::HttpResolver::new();
-            let signed = http_resolver.resolve_from_url(&profile_url).await?;
+            let signed = http_resolver.fetch_verified_profile(&profile_url).await?;
             if crate::bip353::verify_bip353_ownership(&resolution, &signed)? {
                 return Ok(signed);
             }
@@ -592,8 +625,20 @@ async fn resolve_alias_with(
 
 #[async_trait]
 impl ProfileResolver for Bip353Resolver {
+    /// Authenticate the DNS pointer and persist continuity before exposing a profile.
     async fn resolve_alias(&self, alias: &str) -> Result<SignedPaymentProfile> {
-        resolve_alias_with(self.dns.as_ref(), alias).await
+        if !alias.starts_with('₿') {
+            return Err(SatsPathError::AliasNotFound(alias.to_string()));
+        }
+        let name = parse_bip353_name(alias)
+            .map_err(|_| SatsPathError::AliasNotFound(alias.to_string()))?;
+        super::continuity::check_revocation(
+            &self.continuity_dir,
+            &format!("{}@{}", name.user, name.domain),
+        )?;
+        let signed = resolve_alias_with(self.dns.as_ref(), alias).await?;
+        super::continuity::accept_profile(&self.continuity_dir, &signed)?;
+        Ok(signed)
     }
 }
 
@@ -602,6 +647,44 @@ mod tests {
     use super::*;
     use crate::bip353::MockDnsTxtResolver;
 
+    /// Production DNS configuration must never contact internal or reserved endpoints.
+    #[test]
+    fn rejects_nonpublic_dns_servers() {
+        for ip in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "192.0.2.1",
+            "224.0.0.1",
+            "240.0.0.1",
+            "::1",
+            "fe80::1",
+            "fc00::1",
+            "2001:db8::1",
+        ] {
+            let mut config = default_resolver_config();
+            config.add_name_server(NameServerConfig::new(
+                SocketAddr::new(ip.parse().unwrap(), 53),
+                Protocol::Udp,
+            ));
+            assert!(
+                matches!(
+                    HickoryDnssecTxtResolver::with_config(config, root_trust_anchors()),
+                    Err(SatsPathError::ValidationError(_))
+                ),
+                "{ip}"
+            );
+        }
+        assert!(HickoryDnssecTxtResolver::with_config(
+            default_resolver_config(),
+            root_trust_anchors()
+        )
+        .is_ok());
+    }
+
+    /// Build authenticated TXT responses without external DNS traffic.
     fn resolver(records: &[&[&str]]) -> MockDnsTxtResolver {
         let mut resolver = MockDnsTxtResolver::new();
         for strings in records {

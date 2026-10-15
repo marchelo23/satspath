@@ -24,6 +24,7 @@ pub struct HttpResolver {
 }
 
 impl HttpResolver {
+    /// Construct an HTTP resolver with bounded requests and redirects disabled.
     pub fn new() -> Self {
         Self {
             client: Client::builder()
@@ -76,6 +77,19 @@ impl HttpResolver {
     /// Extracted so tests can pass a mock server URL directly without
     /// needing a real DNS entry for the test domain.
     pub async fn resolve_from_url(&self, url: &str) -> Result<SignedPaymentProfile> {
+        let signed = self.fetch_verified_profile(url).await?;
+        if signed.profile.revoked {
+            return Err(SatsPathError::RegistryError(format!(
+                "Alias {} has been revoked",
+                signed.profile.alias
+            )));
+        }
+        Ok(signed)
+    }
+
+    /// Fetch authenticated public metadata, retaining revocations for continuity storage.
+    /// Callers must reject revoked profiles before returning them to routing.
+    pub(crate) async fn fetch_verified_profile(&self, url: &str) -> Result<SignedPaymentProfile> {
         let is_test_build = cfg!(any(test, feature = "test-utils"));
         let parsed =
             url::Url::parse(url).map_err(|e| SatsPathError::InvalidPaymentUri(e.to_string()))?;
@@ -138,13 +152,12 @@ impl HttpResolver {
         // SEC-01: enforce expiry — fail closed.
         check_profile_expiry(&signed.profile)?;
 
-        // Enforce revocation — fail closed. Revoked profiles must never be returned to callers.
-        if signed.profile.revoked {
-            return Err(SatsPathError::RegistryError(format!(
-                "Alias {} has been revoked",
-                signed.profile.alias
-            )));
-        }
+        crate::validation::validate_public_profile(&signed.profile)?;
+        let canonical = crate::crypto::canonical_profile_bytes(&signed.profile)?;
+        crate::validation::assert_no_private_material(
+            std::str::from_utf8(&canonical)
+                .map_err(|e| SatsPathError::SerializationError(e.to_string()))?,
+        )?;
 
         Ok(signed)
     }

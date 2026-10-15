@@ -227,6 +227,7 @@ pub async fn build_pinned_http_client(
     let ip_str = host.trim_start_matches('[').trim_end_matches(']');
     let mut builder = reqwest::Client::builder()
         .timeout(timeout)
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none());
 
     if let Ok(ip) = ip_str.parse::<IpAddr>() {
@@ -236,8 +237,7 @@ pub async fn build_pinned_http_client(
             )));
         }
     } else {
-        let host_clean = host.trim_end_matches('.');
-        let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host_clean, port))
+        let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port))
             .await
             .map_err(|e| {
                 SatsPathError::NetworkError(format!("DNS resolution failed for {host}: {e}"))
@@ -256,12 +256,22 @@ pub async fn build_pinned_http_client(
                 )));
             }
         }
-        builder = builder.resolve_to_addrs(host_clean, &addrs);
+        builder = pin_http_host(builder, &parsed, &addrs);
     }
 
     builder
         .build()
         .map_err(|e| SatsPathError::NetworkError(e.to_string()))
+}
+
+/// Key the override by the exact URL host reqwest will resolve, including a final dot.
+#[cfg(feature = "std")]
+fn pin_http_host(
+    builder: reqwest::ClientBuilder,
+    url: &url::Url,
+    addrs: &[std::net::SocketAddr],
+) -> reqwest::ClientBuilder {
+    builder.resolve_to_addrs(url.host_str().expect("validated URL has a host"), addrs)
 }
 
 /// Read an HTTP response body up to `max_bytes`, failing closed if the stream exceeds the bound.
@@ -299,6 +309,35 @@ pub async fn read_bounded_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both ordinary and absolute DNS names use the pinned socket, never fallback DNS.
+    #[tokio::test]
+    async fn http_pins_exact_request_hostname() {
+        let mut server = mockito::Server::new_async().await;
+        for host in ["pin-test.invalid", "pin-test.invalid."] {
+            let endpoint = url::Url::parse(&server.url()).unwrap();
+            let port = endpoint.port().unwrap();
+            let target = url::Url::parse(&format!("http://{host}:{port}/profile")).unwrap();
+            let mock = server
+                .mock("GET", "/profile")
+                .match_header("host", format!("{host}:{port}").as_str())
+                .with_status(200)
+                .create_async()
+                .await;
+            let socket = std::net::SocketAddr::new("127.0.0.1".parse().unwrap(), port);
+            let client = pin_http_host(reqwest::Client::builder().no_proxy(), &target, &[socket])
+                .build()
+                .unwrap();
+            assert!(client
+                .get(target)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success());
+            mock.assert_async().await;
+        }
+    }
 
     /// NAT64 must inherit the public/private status of the embedded IPv4 host.
     #[test]
