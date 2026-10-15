@@ -25,7 +25,7 @@
 | **Mainnet Lightning Discovery (LNURL/LN Address)** | **Supported** | SatsPath (Router) |
 | **BOLT12 Handling & Blinded Paths** | **Prototype / Experimental (Partial)** (Prototype primitives; standards-conformant string parsing & CLN/LDK interop unverified) | SatsPath (Router) |
 | **Mainnet On-Chain Address Discovery (BIP-21)** | **Supported** | SatsPath (Router) |
-| **Silent Payments (BIP-352) Primitives** | **Supported** (Validated against all 28 official BIP-352 send/receive test vector groups) | SatsPath (Router) |
+| **Silent Payments (BIP-352) Primitives** | **Supported (Experimental)** only for `create_bip352_outputs` and `scan_bip352_transaction` (all 28 official send/receive vector groups); mainnet interoperability and production readiness unverified. Legacy `SilentPayment` output derivation/scanning and `detect_silent_payment_outputs` APIs are non-conformant. | Host wallet: sender derivation with wallet-held input keys; scanner uses only a scan private key and spend public key and returns output keys/tweaks. Full spending-key reconstruction and signing stay in the wallet, outside discovery/routing flows. |
 | **Mainnet Ark Receive Pointer Discovery** | **Supported (Preview)** | SatsPath (Router) |
 | **Wallet Handoff Generation (URIs, QR codes)** | **Supported** | SatsPath (Router / CLI) |
 | **Mainnet Payment Execution by SatsPath** | **Unsupported / Out of Scope** | **Host Wallet Only** |

@@ -13,8 +13,12 @@
 
 use std::collections::HashSet;
 
-use bitcoin::secp256k1::SecretKey;
+use bitcoin::secp256k1::{
+    Keypair, Message, Parity, PublicKey, Scalar, Secp256k1, SecretKey, XOnlyPublicKey,
+};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use satspath_router::silent_payments::{
     create_bip352_outputs, parse_silent_payment_address, scan_bip352_transaction,
@@ -126,7 +130,7 @@ fn to_prevout_input(v: &VectorVin) -> Bip352PrevoutInput {
         script_sig: v.script_sig.clone(),
         txinwitness: v.txinwitness.clone(),
         prevout_script_pubkey: v.prevout.script_pubkey.hex.clone(),
-        private_key: v.private_key.clone(),
+        private_key: v.private_key.clone().map(Zeroizing::new),
     }
 }
 
@@ -183,40 +187,37 @@ fn test_official_bip352_sending_vectors() {
             let result = create_bip352_outputs(&inputs, &recipients)
                 .unwrap_or_else(|e| panic!("group {g_idx} ({}) failed: {e}", group.comment));
 
-            // Check input_pub_keys when expected is non-empty
-            if !case.expected.input_pub_keys.is_empty() {
-                assert_eq!(
-                    result.input_pub_keys, case.expected.input_pub_keys,
-                    "group {g_idx} ({}) s_idx {s_idx}: input_pub_keys mismatch",
-                    group.comment
-                );
-            }
+            assert_eq!(
+                result.input_pub_keys, case.expected.input_pub_keys,
+                "group {g_idx} ({}) s_idx {s_idx}: input_pub_keys mismatch",
+                group.comment
+            );
 
             // Check input_private_key_sum when expected is present
             if let Some(ref expected_sum) = case.expected.input_private_key_sum {
                 assert_eq!(
-                    result.input_private_key_sum.as_deref(),
+                    result.input_private_key_sum.as_ref().map(|s| s.as_str()),
                     Some(expected_sum.as_str()),
                     "group {g_idx} ({}) s_idx {s_idx}: input_private_key_sum mismatch",
                     group.comment
                 );
             }
 
-            // Check shared_secrets when expected has non-null entries
-            let expected_secrets: HashSet<&String> = case
+            // Compare multisets, retaining duplicate secrets and checking empty results too.
+            let mut expected_secrets: Vec<&String> = case
                 .expected
                 .shared_secrets
                 .iter()
                 .filter_map(|s| s.as_ref())
                 .collect();
-            if !expected_secrets.is_empty() && !result.shared_secrets.is_empty() {
-                let actual_secrets: HashSet<&String> = result.shared_secrets.iter().collect();
-                assert_eq!(
-                    actual_secrets, expected_secrets,
-                    "group {g_idx} ({}) s_idx {s_idx}: shared_secrets mismatch",
-                    group.comment
-                );
-            }
+            let mut actual_secrets: Vec<&String> = result.shared_secrets.iter().collect();
+            expected_secrets.sort();
+            actual_secrets.sort();
+            assert_eq!(
+                actual_secrets, expected_secrets,
+                "group {g_idx} ({}) s_idx {s_idx}: shared_secrets mismatch",
+                group.comment
+            );
 
             // Check outputs against expected output permutations
             if case.expected.outputs.is_empty()
@@ -251,6 +252,10 @@ fn test_official_bip352_receiving_vectors() {
         serde_json::from_str(VECTORS_JSON).expect("valid BIP-352 test vectors JSON");
     assert_eq!(groups.len(), 28, "expected all 28 BIP-352 test groups");
 
+    let secp = Secp256k1::new();
+    let msg = Message::from_digest(Sha256::digest(b"message").into());
+    let aux_rand: [u8; 32] = Sha256::digest(b"random auxiliary data").into();
+
     for (g_idx, group) in groups.iter().enumerate() {
         for (r_idx, case) in group.receiving.iter().enumerate() {
             let scan_sk = SecretKey::from_slice(
@@ -266,7 +271,7 @@ fn test_official_bip352_receiving_vectors() {
 
             let result = scan_bip352_transaction(
                 &scan_sk,
-                &spend_sk,
+                &PublicKey::from_secret_key(&secp, &spend_sk),
                 &case.given.labels,
                 &inputs,
                 &case.given.outputs,
@@ -331,11 +336,32 @@ fn test_official_bip352_receiving_vectors() {
                         "group {g_idx} ({}) r_idx {r_idx}: priv_key_tweak mismatch for {}",
                         group.comment, exp_out.pub_key
                     );
+                    // Only the wallet/test harness reconstructs full spending keys and signs.
+                    let tweak = Scalar::from_be_bytes(
+                        hex::decode(&found.priv_key_tweak)
+                            .unwrap()
+                            .try_into()
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    let mut full_sk = spend_sk.add_tweak(&tweak).unwrap();
+                    let derived_pk = PublicKey::from_secret_key(&secp, &full_sk);
+                    let output_pk =
+                        XOnlyPublicKey::from_slice(&hex::decode(&found.pub_key).unwrap()).unwrap();
+                    assert_eq!(derived_pk.x_only_public_key().0, output_pk);
+                    if derived_pk.x_only_public_key().1 == Parity::Odd {
+                        full_sk = full_sk.negate();
+                    }
+                    let keypair = Keypair::from_secret_key(&secp, &full_sk);
+                    let sig = secp.sign_schnorr_with_aux_rand(&msg, &keypair, &aux_rand);
                     assert_eq!(
-                        found.signature, exp_out.signature,
+                        hex::encode(sig.as_ref()),
+                        exp_out.signature,
                         "group {g_idx} ({}) r_idx {r_idx}: signature mismatch for {}",
-                        group.comment, exp_out.pub_key
+                        group.comment,
+                        exp_out.pub_key
                     );
+                    secp.verify_schnorr(&sig, &msg, &output_pk).unwrap();
                 }
             }
         }
@@ -384,7 +410,7 @@ fn test_bip352_edge_cases_invalid_uncompressed_and_duplicate_keys() {
         script_sig: String::new(),
         txinwitness: "0140c459b671370d12cfb5acee76da7e3ba7cc29b0b4653e3af8388591082660137d087fdc8e89a612cd5d15be0febe61fc7cdcf3161a26e599a4514aa5c3e86f47b".to_string(),
         prevout_script_pubkey: "51205a1e61f898173040e20616d43e9f496fba90338a39faa1ed98fcbaeee4dd9be5".to_string(),
-        private_key: Some("eadc78165ff1f8ea94ad7cfdc54990738a4c53f6e0507b42154201b8e5dff3b1".to_string()),
+        private_key: Some(Zeroizing::new("eadc78165ff1f8ea94ad7cfdc54990738a4c53f6e0507b42154201b8e5dff3b1".to_string())),
     };
     let mut dup_in_2 = dup_in_1.clone();
     dup_in_2.vout = 1;
@@ -394,4 +420,186 @@ fn test_bip352_edge_cases_invalid_uncompressed_and_duplicate_keys() {
     assert_eq!(res.input_pub_keys.len(), 2);
     assert_eq!(res.input_pub_keys[0], res.input_pub_keys[1]);
     assert_eq!(res.outputs.len(), 1);
+    assert_eq!(
+        res.input_private_key_sum.as_ref().map(|s| s.as_str()),
+        Some("d5b8f02cbfe3f1d5295af9fb8a9320e859e9cb07115856486ab1a4e4fb89a621")
+    );
+    assert_eq!(
+        res.outputs,
+        ["548ae55c8eec1e736e8d3e520f011f1f42a56d166116ad210b3937599f87f566"]
+    );
+}
+
+#[test]
+fn test_bip352_secret_serialization_and_debug_redaction() {
+    let groups: Vec<TestGroup> = serde_json::from_str(VECTORS_JSON).unwrap();
+    let case = &groups[0].sending[0];
+    let input = to_prevout_input(&case.given.vin[0]);
+    let private_key = input.private_key.as_ref().unwrap().as_str();
+    let mut serialized = serde_json::to_value(&input).unwrap();
+    assert!(serialized.get("private_key").is_none());
+    assert!(!serialized.to_string().contains(private_key));
+    for debug in [format!("{input:?}"), format!("{input:#?}")] {
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(private_key));
+    }
+
+    // Deserialization must still accept sender keys, while serialization always omits them.
+    serialized["private_key"] = private_key.into();
+    let restored: Bip352PrevoutInput = serde_json::from_value(serialized).unwrap();
+    assert_eq!(restored, input);
+    let without_key = Bip352PrevoutInput {
+        private_key: None,
+        ..input.clone()
+    };
+    assert!(serde_json::to_value(&without_key)
+        .unwrap()
+        .get("private_key")
+        .is_none());
+
+    let inputs: Vec<_> = case.given.vin.iter().map(to_prevout_input).collect();
+    let recipients: Vec<_> = case
+        .given
+        .recipients
+        .iter()
+        .map(parse_recipient_entry)
+        .collect();
+    let result = create_bip352_outputs(&inputs, &recipients).unwrap();
+    let sum = result.input_private_key_sum.as_ref().unwrap().as_str();
+    for debug in [format!("{result:?}"), format!("{result:#?}")] {
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(sum));
+    }
+}
+
+#[test]
+fn test_bip352_sender_rejects_mismatched_keys_and_missing_spend_data() {
+    use satspath_router::silent_payments::extract_bip352_sender_privkey;
+
+    let groups: Vec<TestGroup> = serde_json::from_str(VECTORS_JSON).unwrap();
+    // P2PKH, P2TR, P2WPKH, and P2SH-P2WPKH respectively.
+    for group in [0, 6, 25, 22] {
+        let input = to_prevout_input(&groups[group].sending[0].given.vin[0]);
+        assert!(extract_bip352_sender_privkey(&input).unwrap().is_some());
+        let mut wrong = input.clone();
+        wrong.private_key = Some(Zeroizing::new(format!("{:064x}", 1)));
+        assert!(extract_bip352_sender_privkey(&wrong)
+            .unwrap_err()
+            .to_string()
+            .contains("does not match"));
+
+        let mut missing_key = input.clone();
+        missing_key.private_key = None;
+        assert!(extract_bip352_sender_privkey(&missing_key).is_err());
+
+        let mut incomplete = input.clone();
+        incomplete.script_sig.clear();
+        incomplete.txinwitness.clear();
+        assert!(extract_bip352_sender_privkey(&incomplete)
+            .unwrap_err()
+            .to_string()
+            .contains("Missing"));
+        incomplete.private_key = None;
+        assert!(extract_bip352_sender_privkey(&incomplete)
+            .unwrap()
+            .is_none());
+
+        if group != 6 {
+            // Signature-only placeholders cannot silently omit the real public key.
+            incomplete = input.clone();
+            if group == 0 {
+                incomplete.script_sig = "0100".into();
+            } else {
+                incomplete.txinwitness = "010100".into();
+            }
+            assert!(extract_bip352_sender_privkey(&incomplete).is_err());
+        }
+
+        if group != 0 {
+            // An encoded empty witness is also missing spend-time data.
+            incomplete = input.clone();
+            incomplete.txinwitness = "00".into();
+            assert!(extract_bip352_sender_privkey(&incomplete).is_err());
+        }
+    }
+}
+
+#[test]
+fn test_bip352_sender_compares_full_keys_except_for_taproot() {
+    use satspath_router::silent_payments::extract_bip352_sender_privkey;
+
+    let groups: Vec<TestGroup> = serde_json::from_str(VECTORS_JSON).unwrap();
+    for group in [0, 6] {
+        let mut input = to_prevout_input(&groups[group].sending[0].given.vin[0]);
+        let key = SecretKey::from_slice(
+            &hex::decode(input.private_key.as_ref().unwrap().as_str()).unwrap(),
+        )
+        .unwrap();
+        input.private_key = Some(Zeroizing::new(hex::encode(key.negate().secret_bytes())));
+        let result = extract_bip352_sender_privkey(&input);
+        if group == 6 {
+            // Both private-key parities must resolve to the same even-Y Taproot key.
+            let (key, pk) = result.unwrap().unwrap();
+            assert_eq!(pk.x_only_public_key().1, Parity::Even);
+            assert_eq!(PublicKey::from_secret_key(&Secp256k1::new(), &key), pk);
+        } else {
+            assert!(result.is_err());
+        }
+    }
+}
+
+#[test]
+fn test_bip352_recipient_count_limits_and_grouped_counts() {
+    use satspath_router::silent_payments::{
+        create_silent_payment_address, derive_labeled_spend_pubkey, BIP0352_MAX_K,
+    };
+
+    let groups: Vec<TestGroup> = serde_json::from_str(VECTORS_JSON).unwrap();
+    let case = &groups[0].sending[0];
+    let inputs: Vec<_> = case.given.vin.iter().map(to_prevout_input).collect();
+    let (address, _) = parse_recipient_entry(&case.given.recipients[0]);
+    let max = BIP0352_MAX_K as usize;
+    for counts in [
+        vec![usize::MAX],
+        vec![max + 1],
+        vec![max, 1],
+        vec![1, usize::MAX],
+    ] {
+        let recipients: Vec<_> = counts.into_iter().map(|n| (address.clone(), n)).collect();
+        let result = create_bip352_outputs(&inputs, &recipients).unwrap();
+        assert!(result.outputs.is_empty());
+        assert!(result.shared_secrets.is_empty());
+        assert!(result.input_private_key_sum.is_some());
+        assert_eq!(result.input_pub_keys, case.expected.input_pub_keys);
+    }
+    let at_limit = create_bip352_outputs(&inputs, &[(address.clone(), max)]).unwrap();
+    assert_eq!(at_limit.outputs.len(), max);
+    let split = create_bip352_outputs(&inputs, &[(address.clone(), 1), (address.clone(), max - 1)])
+        .unwrap();
+    assert_eq!(split.outputs, at_limit.outputs);
+    assert_eq!(
+        split.shared_secrets,
+        vec![at_limit.shared_secrets[0].clone(); 2]
+    );
+
+    // Counts for distinct spend keys sharing a scan key must advance one common index.
+    let (scan, spend, _) = parse_silent_payment_address(&address).unwrap();
+    let label_key = SecretKey::from_slice(&[1; 32]).unwrap();
+    let labeled_spend = derive_labeled_spend_pubkey(&spend, &label_key, 1).unwrap();
+    let labeled = create_silent_payment_address(&scan, &labeled_spend).unwrap();
+    let counted =
+        create_bip352_outputs(&inputs, &[(address.clone(), 2), (labeled.clone(), 2)]).unwrap();
+    let expanded = create_bip352_outputs(
+        &inputs,
+        &[
+            (address.clone(), 1),
+            (address, 1),
+            (labeled.clone(), 1),
+            (labeled, 1),
+        ],
+    )
+    .unwrap();
+    assert_eq!(counted.outputs, expanded.outputs);
+    assert_eq!(counted.outputs.len(), 4);
+    assert_eq!(counted.shared_secrets.len(), 2);
 }
