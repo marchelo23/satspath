@@ -8,7 +8,7 @@ BOLT12 (Lightning Offers) provides reusable, static payment codes that support:
 - Recipient and payer privacy via **blinded paths**.
 - Native integration with BIP-353 (`user@domain` TXT record resolution to `lno1...`).
 
-BOLT12 — EXPERIMENTAL / PARTIAL. Prototype TLV, offer-handling, and blinded-path primitives exist, but standards-conformant checksumless BOLT12 string decoding, invoice-request construction, Merkle signing, and interoperability with implementations such as Core Lightning and LDK remain incomplete.
+BOLT12 — IMPLEMENTED. Standards-conformant checksumless BOLT12 string decoding (`NoChecksum` with `+` continuation), all-TLV Merkle tree root hashing (`LnLeaf`, `LnNonce` + `all-tlvs`, `LnBranch`), BIP-340 Schnorr signature verification, BOLT #4 wire-format blinded paths (`pubkey` and `sciddir`), and `invoice_request` Onion Message dispatch (`OnionMessageTransport` / CLN / LDK interoperability) are implemented in `crates/satspath-router/src/bolt12.rs`.
 
 ---
 

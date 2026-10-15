@@ -4,10 +4,13 @@ use satspath_core::{
     SignedPaymentProfile,
 };
 use satspath_router::bolt12::{
-    create_invoice_from_request, create_signed_invoice_request, decode_tlv_stream,
-    encode_tlv_stream, parse_bolt12_invoice, parse_bolt12_invoice_request, parse_bolt12_offer,
-    validate_bolt12_invoice_against_offer, write_tu64, BlindedHop, BlindedPath, Bolt12Offer,
-    TlvRecord, TLV_OFFER_AMOUNT, TLV_OFFER_NODE_ID, TLV_OFFER_PATHS,
+    build_invoice_request_onion_envelope, compute_bolt12_merkle_root, create_invoice_from_request,
+    create_signed_invoice_request, decode_tlv_stream, encode_bolt12_bech32_checksumless,
+    encode_tlv_stream, fetch_bolt12_invoice_via_transport, parse_bolt12_invoice,
+    parse_bolt12_invoice_request, parse_bolt12_offer, resolve_offer_onion_route,
+    sign_bolt12_tlv_stream, validate_bolt12_invoice_against_offer, write_tu64, BlindedHop,
+    BlindedPath, Bolt12Offer, IntroductionNode, ReferenceNodeOnionTransport, TlvRecord,
+    TLV_OFFER_AMOUNT, TLV_OFFER_DESCRIPTION, TLV_OFFER_NODE_ID, TLV_OFFER_PATHS, TLV_SIGNATURE,
 };
 use satspath_router::lightning::is_lightning_available_for_amount;
 use satspath_router::scoring::{score_routes, FeeSnapshot, PaymentRail, RoutePreferences};
@@ -66,11 +69,11 @@ fn dummy_signed_profile(alias: &str, methods: Vec<PaymentMethod>) -> SignedPayme
 #[test]
 fn test_cln_ldk_bolt12_offer_parsing_and_blinded_paths() {
     let intro_node = "02".to_string() + &"aa".repeat(32);
-    let hop_node = "03".to_string() + &"bb".repeat(32);
+    let hop_node = "03".to_string() + &"33".repeat(32);
 
     let blinded_path = BlindedPath {
         introduction_node_id: intro_node.clone(),
-        blinding_point: Some("02".to_string() + &"cc".repeat(32)),
+        blinding_point: Some("02".to_string() + &"22".repeat(32)),
         blinded_hops: vec![BlindedHop {
             blinded_node_id: hop_node,
             encrypted_payload: "aabbccddeeff".to_string(),
@@ -407,11 +410,11 @@ async fn test_bolt12_amount_availability_overflow() {
 #[test]
 fn test_bolt12_scoring_blinded_path_privacy_bonus() {
     let intro_node = "02".to_string() + &"aa".repeat(32);
-    let hop_node = "03".to_string() + &"bb".repeat(32);
+    let hop_node = "03".to_string() + &"33".repeat(32);
 
     let blinded_path = BlindedPath {
         introduction_node_id: intro_node,
-        blinding_point: Some("02".to_string() + &"cc".repeat(32)),
+        blinding_point: Some("02".to_string() + &"22".repeat(32)),
         blinded_hops: vec![BlindedHop {
             blinded_node_id: hop_node,
             encrypted_payload: "112233".to_string(),
@@ -460,4 +463,147 @@ fn test_bolt12_scoring_blinded_path_privacy_bonus() {
     assert_eq!(decision.selected.rail, PaymentRail::Lightning);
     // Privacy score receives bonus (score = 9 for blinded paths vs 7 for standard)
     assert!(decision.selected.privacy_score >= 8);
+}
+
+#[test]
+fn test_ldk_reference_concatenated_blinded_paths_and_sciddir() {
+    // Official LDK test vector with two concatenated blinded paths (one pubkey intro, one sciddir intro)
+    let encoded = "lno1pgx9getnwss8vetrw3hhyucsl5qj5qeyv5l2cs6y3qqzesrth7mlzrlp3xg7xhulusczm04x6g6nms9trspqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqqsqqqqqqqqqqqqqqqqqqqqqqqqqqpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqsqpqg3zyg3zyg3zygpqqqqzqqqqgqqxqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqqgqqqqqqqqqqqqqqqqqqqqqqqqqqqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgqqsg3zyg3zyg3zygtzzqhwcuj966ma9n9nqwqtl032xeyv6755yeflt235pmww58egx6rxry";
+    satspath_core::validation::validate_bolt12_offer(encoded).unwrap();
+
+    let offer = parse_bolt12_offer(encoded).unwrap();
+    let paths = offer.blinded_paths.as_ref().unwrap();
+    assert_eq!(paths.len(), 2);
+    assert_eq!(
+        paths[0].introduction_node_id,
+        "0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c"
+    );
+    assert_eq!(
+        paths[0].parsed_introduction_node().unwrap(),
+        IntroductionNode::NodeId(
+            "0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c".to_string()
+        )
+    );
+    assert_eq!(paths[1].introduction_node_id, "010000010000020003");
+    assert_eq!(
+        paths[1].parsed_introduction_node().unwrap(),
+        IntroductionNode::DirectedShortChannelId {
+            direction: 1,
+            scid: 0x0000_0100_0002_0003,
+        }
+    );
+
+    let route = resolve_offer_onion_route(&offer).unwrap();
+    assert_eq!(
+        route.introduction,
+        IntroductionNode::NodeId(
+            "0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c".to_string()
+        )
+    );
+    assert_eq!(route.blinded_hops.len(), 2);
+
+    // Roundtrip wire bytes
+    for path in paths {
+        let bytes = path.encode_bytes().unwrap();
+        assert_eq!(&BlindedPath::decode_bytes(&bytes).unwrap(), path);
+    }
+}
+
+#[test]
+fn test_cln_ldk_end_to_end_onion_message_invoice_request_flow() {
+    let secp = secp256k1::Secp256k1::new();
+    let recipient_sk = generate_key();
+    let recipient_pk = secp256k1::PublicKey::from_secret_key(&secp, &recipient_sk);
+    let payer_sk = generate_key();
+
+    // Recipient constructs a blinded path and a signed checksumless BOLT12 offer
+    let recipient_blinded_path = BlindedPath {
+        introduction_node_id: "02".to_string() + &"aa".repeat(32),
+        blinding_point: Some("02".to_string() + &"22".repeat(32)),
+        blinded_hops: vec![BlindedHop {
+            blinded_node_id: "03".to_string() + &"33".repeat(32),
+            encrypted_payload: "deadbeef01020304".to_string(),
+        }],
+    };
+
+    let mut offer_tlvs = vec![
+        TlvRecord {
+            tag: TLV_OFFER_AMOUNT,
+            value: write_tu64(15_000_000),
+        },
+        TlvRecord {
+            tag: TLV_OFFER_DESCRIPTION,
+            value: b"CLN/LDK Interop Offer".to_vec(),
+        },
+        TlvRecord {
+            tag: TLV_OFFER_PATHS,
+            value: recipient_blinded_path.encode_bytes().unwrap(),
+        },
+        TlvRecord {
+            tag: TLV_OFFER_NODE_ID,
+            value: recipient_pk.serialize().to_vec(),
+        },
+    ];
+    let offer_sig = sign_bolt12_tlv_stream("offer", &offer_tlvs, &recipient_sk).unwrap();
+    offer_tlvs.push(TlvRecord {
+        tag: TLV_SIGNATURE,
+        value: offer_sig.to_vec(),
+    });
+
+    let offer_raw = encode_tlv_stream(&offer_tlvs);
+    let offer_str = encode_bolt12_bech32_checksumless("lno", &offer_raw).unwrap();
+    let offer = parse_bolt12_offer(&offer_str).unwrap();
+    assert!(offer.verify_signature().unwrap());
+    assert_eq!(
+        offer.merkle_root().unwrap(),
+        compute_bolt12_merkle_root(&offer_tlvs).unwrap()
+    );
+
+    // Payer constructs a reply blinded path and dispatches invoice_request via OnionMessageTransport
+    let payer_reply_path = BlindedPath {
+        introduction_node_id: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            .to_string(),
+        blinding_point: Some("03".to_string() + &"22".repeat(32)),
+        blinded_hops: vec![BlindedHop {
+            blinded_node_id: "02".to_string() + &"33".repeat(32),
+            encrypted_payload: "cafebabe".to_string(),
+        }],
+    };
+
+    let (req, envelope) = build_invoice_request_onion_envelope(
+        &offer,
+        15_000_000,
+        &payer_sk,
+        payer_reply_path.clone(),
+        Some("Order #42"),
+        Some(1),
+    )
+    .unwrap();
+    assert!(req.verify_signature(&offer.offer_id().unwrap()).unwrap());
+    assert!(envelope.invoice_request_bech32.starts_with("lnr1"));
+
+    let transport = ReferenceNodeOnionTransport::new(recipient_sk, [0x99; 32]);
+    let invoice = fetch_bolt12_invoice_via_transport(
+        &transport,
+        &offer,
+        15_000_000,
+        &payer_sk,
+        payer_reply_path,
+        Some("Order #42"),
+        Some(1),
+    )
+    .unwrap();
+
+    assert_eq!(invoice.amount_msats, 15_000_000);
+    assert_eq!(invoice.payment_hash.as_deref(), Some(&"99".repeat(32)[..]));
+    assert!(invoice.verify_signature().unwrap());
+    validate_bolt12_invoice_against_offer(&invoice, &offer, 15_000_000).unwrap();
+}
+
+#[test]
+fn test_offer_unknown_tlv_parity_rule() {
+    for (tag, accepted) in [(23, true), (24, false)] {
+        let offer = encode_offer(&[issuer_id_record(), TlvRecord { tag, value: vec![] }]);
+        assert_eq!(parse_bolt12_offer(&offer).is_ok(), accepted);
+    }
 }

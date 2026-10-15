@@ -63,9 +63,15 @@ pub fn validate_lightning_address(address: &str) -> Result<()> {
     }
 }
 
-/// Validate a BOLT12 offer string.
-/// BOLT12 offers are bech32 encoded with prefix "lno" (mainnet) or "lnot" (testnet).
-/// They contain an amount, node_id, paths, and other metadata.
+/// Validate a BOLT12 offer string (`lno1...`, `lnot1...`, `lnob1...`, `lnos1...`).
+///
+/// Accepts standards-conformant checksumless BOLT12 offers (including `+` whitespace
+/// concatenation across lines) as well as Bech32/Bech32m checksummed offers.
+///
+/// # Errors
+/// Returns [`SatsPathError::InvalidPaymentPointer`] or [`SatsPathError::PrivateMaterialRejected`]
+/// if the offer is empty, uses mixed case, has an invalid HRP or encoding, is too short,
+/// or contains private key material.
 pub fn validate_bolt12_offer(offer: &str) -> Result<()> {
     let trimmed = offer.trim();
     if trimmed.is_empty() {
@@ -73,26 +79,78 @@ pub fn validate_bolt12_offer(offer: &str) -> Result<()> {
             "BOLT12 offer cannot be empty".into(),
         ));
     }
-    let lower = trimmed.to_ascii_lowercase();
-    // BOLT12 offers use bech32 with prefixes lno (mainnet) or lnot (testnet)
-    if !lower.starts_with("lno") && !lower.starts_with("lnot") {
+    assert_no_private_material(trimmed)?;
+
+    let has_lower = trimmed.chars().any(|c| c.is_ascii_lowercase());
+    let has_upper = trimmed.chars().any(|c| c.is_ascii_uppercase());
+    if has_lower && has_upper {
         return Err(SatsPathError::InvalidPaymentPointer(
-            "BOLT12 offer must start with 'lno' (mainnet) or 'lnot' (testnet)".into(),
+            "BOLT12 offer cannot mix uppercase and lowercase characters".into(),
         ));
     }
-    // Decode and validate the bech32 payload
-    let (_, data, _) = bech32::decode(&lower).map_err(|e| {
-        SatsPathError::InvalidPaymentPointer(format!("BOLT12 offer bech32 decode failed: {e}"))
-    })?;
-    // A real BOLT12 offer always has substantial TLV data -- reject suspiciously
-    // short payloads that are likely truncated, synthetic, or just a prefix.
-    if data.len() < 40 {
+
+    // Handle BOLT12 '+' concatenation with optional whitespace
+    let mut joined = String::with_capacity(trimmed.len());
+    let mut chars = trimmed.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '+' {
+            while let Some(&next) = chars.peek() {
+                if next.is_ascii_whitespace() {
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if chars.peek().is_none() {
+                return Err(SatsPathError::InvalidPaymentPointer(
+                    "BOLT12 offer cannot end with '+'".into(),
+                ));
+            }
+        } else {
+            joined.push(c.to_ascii_lowercase());
+        }
+    }
+
+    if !joined.starts_with("lno1")
+        && !joined.starts_with("lnot1")
+        && !joined.starts_with("lnob1")
+        && !joined.starts_with("lnos1")
+    {
+        return Err(SatsPathError::InvalidPaymentPointer(
+            "BOLT12 offer must start with 'lno1', 'lnot1', 'lnob1', or 'lnos1'".into(),
+        ));
+    }
+
+    let raw_bytes = if let Ok((hrp, data, _)) = bech32::decode(&joined) {
+        if !matches!(hrp.as_str(), "lno" | "lnot" | "lnob" | "lnos") {
+            return Err(SatsPathError::InvalidPaymentPointer(format!(
+                "invalid BOLT12 offer HRP: {hrp}"
+            )));
+        }
+        Vec::<u8>::from_base32(&data).map_err(|e| {
+            SatsPathError::InvalidPaymentPointer(format!("BOLT12 offer base32 decode failed: {e}"))
+        })?
+    } else {
+        use bitcoin::bech32::primitives::decode::CheckedHrpstring;
+        use bitcoin::bech32::primitives::NoChecksum;
+
+        let checked = CheckedHrpstring::new::<NoChecksum>(&joined).map_err(|e| {
+            SatsPathError::InvalidPaymentPointer(format!("BOLT12 offer decode failed: {e}"))
+        })?;
+        let hrp = checked.hrp().as_str().to_string();
+        if !matches!(hrp.as_str(), "lno" | "lnot" | "lnob" | "lnos") {
+            return Err(SatsPathError::InvalidPaymentPointer(format!(
+                "invalid BOLT12 offer HRP: {hrp}"
+            )));
+        }
+        checked.byte_iter().collect()
+    };
+
+    if raw_bytes.len() < 20 {
         return Err(SatsPathError::InvalidPaymentPointer(
             "BOLT12 offer data too short -- likely truncated or invalid".into(),
         ));
     }
-    // Ensure no private material
-    assert_no_private_material(trimmed)?;
     Ok(())
 }
 
