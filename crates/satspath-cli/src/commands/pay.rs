@@ -495,6 +495,7 @@ fn network_name(network: BitcoinNetwork) -> &'static str {
         BitcoinNetwork::Mainnet => "mainnet",
         BitcoinNetwork::Testnet => "testnet",
         BitcoinNetwork::Regtest => "regtest",
+        BitcoinNetwork::Signet => "signet",
     }
 }
 

@@ -19,20 +19,11 @@ use crate::{Result, SatsPathError, SignedPaymentProfile};
 ///
 /// Both checks must pass. Fail-closed: unsigned or expired profiles are
 /// rejected with a hard error, never passed through.
-pub struct HttpResolver {
-    client: Client,
-}
+pub struct HttpResolver;
 
 impl HttpResolver {
     pub fn new() -> Self {
-        Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(10))
-                // Disallow redirects to prevent open redirect → SSRF chains
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap_or_default(),
-        }
+        Self
     }
 
     /// Build with a custom base URL (for testing with a mock server).
@@ -95,7 +86,17 @@ impl HttpResolver {
             validate_url(url, false)?;
         }
 
-        let mut resp = self.client.get(url).send().await.map_err(|e| {
+        let client = if is_test_build && is_local {
+            Client::builder()
+                .timeout(Duration::from_secs(10))
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| SatsPathError::NetworkError(e.to_string()))?
+        } else {
+            crate::ssrf::pinned_http_client(url, false).await?
+        };
+        let mut resp = client.get(url).send().await.map_err(|e| {
             SatsPathError::NetworkError(format!("Failed to connect to {}: {}", url, e))
         })?;
 

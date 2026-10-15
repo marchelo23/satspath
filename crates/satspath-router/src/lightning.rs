@@ -54,6 +54,14 @@ pub async fn is_lightning_available_for_amount(method: &PaymentMethod, amount_sa
             })
             .unwrap_or(false),
         PaymentMethod::Bolt12(offer_data) => {
+            if satspath_core::validation::validate_bolt12_offer_for_network(
+                &offer_data.offer,
+                offer_data.network,
+            )
+            .is_err()
+            {
+                return false;
+            }
             if let Some(min_sats) = offer_data.minimum_amount_sats {
                 if amount_sats < min_sats {
                     return false;
@@ -108,6 +116,14 @@ pub fn is_lightning_available_for_amount_sync(method: &PaymentMethod, amount_sat
             })
             .unwrap_or(false),
         PaymentMethod::Bolt12(offer_data) => {
+            if satspath_core::validation::validate_bolt12_offer_for_network(
+                &offer_data.offer,
+                offer_data.network,
+            )
+            .is_err()
+            {
+                return false;
+            }
             if let Some(min_sats) = offer_data.minimum_amount_sats {
                 if amount_sats < min_sats {
                     return false;

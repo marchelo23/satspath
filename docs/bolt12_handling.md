@@ -75,7 +75,7 @@ In SatsPath's routing engine, offers containing valid blinded paths receive an i
 - Contains `offer_id` (currently computed via SHA-256 over concatenated TLVs; full all-TLV Merkle tree root alignment is scheduled for v0.2), `invreq_amount`, `payer_node_id`, optional `payer_note`, and a BIP-340 Schnorr signature.
 
 ### 4. Bolt12Invoice
-- **HRP:** `lni` / `lnit`.
+- **HRP:** `lni` / `lnit` / `lnib` / `lnis` (mainnet/testnet/regtest/signet).
 - Issued by the offer recipient's Lightning node.
 - Validated before handoff:
   - Exact match of requested vs invoice millisatoshis.
@@ -89,8 +89,8 @@ In SatsPath's routing engine, offers containing valid blinded paths receive an i
 SatsPath delegates Lightning peer-to-peer onion message transmission to an external gateway or node RPC:
 - **Environment Variable:** `SATSPATH_BOLT12_PROXY`
   - URL pointing to a BOLT12-capable proxy endpoint (e.g. `https://bolt12-proxy.satspath.dev`).
-- **Test Mode:** `SATSPATH_MOCK_BOLT12=1`
-  - Enables local simulated invoice generation for automated testing and offline development.
+- **Host signing:** implement `Bolt12Signer` in the host wallet or node. SatsPath supplies public TLVs and verifies the returned signature; private keys and credentials stay in the host.
+- Test signing implementations live in `tests/support`; production mock key generation is unavailable.
 
 ---
 

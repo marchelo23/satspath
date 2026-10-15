@@ -22,7 +22,7 @@ pub use bolt12::{
     encode_bolt12_bech32_checksumless, fetch_bolt12_invoice_via_transport,
     normalize_bolt12_bech32_str, parse_bolt12_offer, resolve_offer_onion_route,
     sign_bolt12_tlv_stream, verify_bolt12_tlv_signature, Bolt12Invoice, Bolt12InvoiceRequest,
-    Bolt12Offer, IntroductionNode, OnionMessageEnvelope, OnionMessageTransport,
+    Bolt12Offer, Bolt12Signer, IntroductionNode, OnionMessageEnvelope, OnionMessageTransport,
     ReferenceNodeOnionTransport, ResolvedOnionRoute,
 };
 pub use fees::{

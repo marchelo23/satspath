@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::ssrf::pinned_websocket;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::time::timeout;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::tungstenite::Message;
 
 use crate::crypto::{check_profile_expiry, verify_signed_profile};
 use crate::peer_registry::canonicalize_identifier;
@@ -33,7 +34,6 @@ const NOSTR_TIMEOUT: Duration = Duration::from_secs(8);
 /// Nostr event signatures identify the Nostr author. They do not replace the
 /// SatsPath profile signature, which is still the protocol authority.
 pub struct NostrResolver {
-    client: reqwest::Client,
     fallback_relays: Vec<String>,
 }
 
@@ -59,10 +59,6 @@ impl Default for NostrResolver {
 impl NostrResolver {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(6))
-                .build()
-                .unwrap_or_default(),
             fallback_relays: env_relays().unwrap_or_else(|| {
                 DEFAULT_RELAYS
                     .iter()
@@ -74,10 +70,6 @@ impl NostrResolver {
 
     pub fn with_relays(relays: Vec<String>) -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(6))
-                .build()
-                .unwrap_or_default(),
             fallback_relays: relays,
         }
     }
@@ -88,8 +80,8 @@ impl NostrResolver {
             .split_once('@')
             .ok_or_else(|| SatsPathError::AliasNotFound(alias.to_string()))?;
         let url = format!("https://{domain}/.well-known/nostr.json?name={name}");
-        let document: Nip05Document = self
-            .client
+        let client = crate::ssrf::pinned_http_client(&url, false).await?;
+        let document: Nip05Document = client
             .get(&url)
             .send()
             .await
@@ -161,7 +153,7 @@ impl NostrResolver {
         ]);
 
         let relay_result = timeout(NOSTR_TIMEOUT, async {
-            let (mut ws, _) = connect_async(relay)
+            let (mut ws, _) = pinned_websocket(relay)
                 .await
                 .map_err(|e| SatsPathError::NetworkError(format!("Nostr relay connect: {e}")))?;
             ws.send(Message::Text(req.to_string().into()))
@@ -407,7 +399,7 @@ pub async fn publish_profile(
 
     for relay in relays_to_use {
         let Ok(Ok((mut ws, _))) =
-            tokio::time::timeout(std::time::Duration::from_secs(2), connect_async(relay)).await
+            tokio::time::timeout(std::time::Duration::from_secs(2), pinned_websocket(relay)).await
         else {
             continue;
         };

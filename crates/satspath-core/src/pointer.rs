@@ -10,6 +10,7 @@ pub enum BitcoinNetwork {
     Mainnet,
     Testnet,
     Regtest,
+    Signet,
 }
 
 /// Public payment pointer data only.

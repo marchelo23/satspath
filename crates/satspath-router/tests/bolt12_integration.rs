@@ -1,3 +1,5 @@
+#[path = "support/signer.rs"]
+mod signer;
 use bech32::{FromBase32, ToBase32};
 use satspath_core::{
     BitcoinNetwork, Bolt12Offer as CoreBolt12Offer, PaymentMethod, PaymentProfile,
@@ -19,6 +21,7 @@ use satspath_router::{
     PaymentUrgency, RouteRequest, SwapDirective,
 };
 use secp256k1::rand::RngCore;
+use signer::TestSigner;
 
 fn encode_offer(records: &[TlvRecord]) -> String {
     bech32::encode(
@@ -38,10 +41,10 @@ fn issuer_id_record() -> TlvRecord {
     }
 }
 
-fn generate_key() -> secp256k1::SecretKey {
+fn generate_key() -> TestSigner {
     let mut bytes = [0u8; 32];
     secp256k1::rand::thread_rng().fill_bytes(&mut bytes);
-    secp256k1::SecretKey::from_slice(&bytes).unwrap()
+    TestSigner(secp256k1::SecretKey::from_slice(&bytes).unwrap())
 }
 
 fn dummy_signed_profile(alias: &str, methods: Vec<PaymentMethod>) -> SignedPaymentProfile {
@@ -105,7 +108,7 @@ fn test_cln_ldk_bolt12_offer_parsing_and_blinded_paths() {
     assert!(!offer.is_expired(1_700_000_000));
     assert!(offer.is_expired(2_100_000_000));
     assert!(offer.is_amount_valid(21_000_000));
-    assert!(offer.is_amount_valid(50_000_000));
+    assert!(!offer.is_amount_valid(50_000_000));
     assert!(!offer.is_amount_valid(5_000_000));
     assert!(!offer.is_amount_valid(150_000_000));
 }
@@ -116,7 +119,12 @@ fn test_bolt12_offer_to_invoice_request_to_invoice_roundtrip() {
     let node_key = generate_key();
 
     let offer = Bolt12Offer {
-        offer: "lno1pq...".to_string(),
+        offer: encode_offer(&[TlvRecord {
+            tag: TLV_OFFER_NODE_ID,
+            value: secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), &node_key)
+                .serialize()
+                .to_vec(),
+        }]),
         description: Some("Donation to Open Source".to_string()),
         amount_msats: Some(10_000_000), // 10,000 sats
         currency: Some("btc".to_string()),
@@ -128,7 +136,10 @@ fn test_bolt12_offer_to_invoice_request_to_invoice_roundtrip() {
         paths: None,
         blinded_paths: None,
         issuer: Some("SatsPath Contributor".to_string()),
-        node_id: None,
+        node_id: Some(hex::encode(
+            secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), &node_key)
+                .serialize(),
+        )),
         signature: None,
     };
 
@@ -300,7 +311,7 @@ async fn test_bolt12_amount_availability_and_route_selection() {
         (amountless.as_str(), 500, true),
         (fixed_amount.as_str(), 4_999, false),
         (fixed_amount.as_str(), 5_000, true),
-        (fixed_amount.as_str(), 5_001, true),
+        (fixed_amount.as_str(), 5_001, false),
     ] {
         for (method, expected) in [
             (
@@ -366,13 +377,18 @@ async fn test_bolt12_amount_availability_overflow() {
     let max_sats = u64::MAX / 1_000;
 
     for (offer, amount_sats, expected) in [
-        (&amountless, 0, true),
-        (&amountless, max_sats, true),
+        (&amountless, 0, false),
+        (
+            &amountless,
+            satspath_core::validation::MAX_PREVIEW_AMOUNT_SATS,
+            true,
+        ),
+        (&amountless, max_sats, false),
         (&amountless, max_sats + 1, false),
         (&amountless, u64::MAX, false),
         (&fixed_amount, 4_999, false),
         (&fixed_amount, 5_000, true),
-        (&fixed_amount, max_sats, true),
+        (&fixed_amount, max_sats, false),
         (&fixed_amount, max_sats + 1, false),
         (&fixed_amount, u64::MAX, false),
     ] {
@@ -582,7 +598,7 @@ fn test_cln_ldk_end_to_end_onion_message_invoice_request_flow() {
     assert!(req.verify_signature(&offer.offer_id().unwrap()).unwrap());
     assert!(envelope.invoice_request_bech32.starts_with("lnr1"));
 
-    let transport = ReferenceNodeOnionTransport::new(recipient_sk, [0x99; 32]);
+    let transport = ReferenceNodeOnionTransport::new(&recipient_sk, [0x99; 32]);
     let invoice = fetch_bolt12_invoice_via_transport(
         &transport,
         &offer,
@@ -606,4 +622,148 @@ fn test_offer_unknown_tlv_parity_rule() {
         let offer = encode_offer(&[issuer_id_record(), TlvRecord { tag, value: vec![] }]);
         assert_eq!(parse_bolt12_offer(&offer).is_ok(), accepted);
     }
+}
+
+#[test]
+fn malformed_offers_cannot_enter_profiles() {
+    use satspath_core::validation::validate_bolt12_offer;
+    for records in [
+        vec![TlvRecord {
+            tag: TLV_OFFER_DESCRIPTION,
+            value: vec![b'a'; 30],
+        }],
+        vec![
+            issuer_id_record(),
+            TlvRecord {
+                tag: TLV_OFFER_AMOUNT,
+                value: vec![1; 9],
+            },
+        ],
+        vec![
+            issuer_id_record(),
+            TlvRecord {
+                tag: TLV_OFFER_AMOUNT,
+                value: vec![],
+            },
+        ],
+        vec![
+            issuer_id_record(),
+            TlvRecord {
+                tag: TLV_OFFER_AMOUNT,
+                value: vec![0, 1],
+            },
+        ],
+        vec![
+            issuer_id_record(),
+            TlvRecord {
+                tag: TLV_OFFER_AMOUNT,
+                value: write_tu64(u64::MAX),
+            },
+        ],
+        vec![
+            issuer_id_record(),
+            TlvRecord {
+                tag: TLV_OFFER_DESCRIPTION,
+                value: vec![0xff],
+            },
+        ],
+        vec![
+            issuer_id_record(),
+            TlvRecord {
+                tag: TLV_SIGNATURE,
+                value: vec![0; 64],
+            },
+        ],
+        vec![TlvRecord {
+            tag: TLV_OFFER_NODE_ID,
+            value: vec![2; 32],
+        }],
+        vec![issuer_id_record(), issuer_id_record()],
+    ] {
+        for encoded in [
+            encode_offer(&records),
+            encode_bolt12_bech32_checksumless("lno", &encode_tlv_stream(&records)).unwrap(),
+        ] {
+            assert!(parse_bolt12_offer(&encoded).is_err());
+            assert!(validate_bolt12_offer(&encoded).is_err());
+        }
+    }
+}
+
+#[test]
+fn all_networks_roundtrip_and_reject_mismatched_handoffs() {
+    use satspath_core::bolt12::{Bolt12Signer, TLV_INVOICE_FALLBACK_ADDRESS};
+    use satspath_core::validation::validate_bolt12_offer_for_network;
+    let signer = generate_key();
+    for (network, o, r, i) in [
+        (BitcoinNetwork::Mainnet, "lno", "lnr", "lni"),
+        (BitcoinNetwork::Testnet, "lnot", "lnrt", "lnit"),
+        (BitcoinNetwork::Regtest, "lnob", "lnrb", "lnib"),
+        (BitcoinNetwork::Signet, "lnos", "lnrs", "lnis"),
+    ] {
+        let encoded = encode_bolt12_bech32_checksumless(
+            o,
+            &encode_tlv_stream(&[TlvRecord {
+                tag: TLV_OFFER_NODE_ID,
+                value: signer.public_key().serialize().to_vec(),
+            }]),
+        )
+        .unwrap();
+        validate_bolt12_offer_for_network(&encoded, network).unwrap();
+        let other = if network == BitcoinNetwork::Mainnet {
+            BitcoinNetwork::Testnet
+        } else {
+            BitcoinNetwork::Mainnet
+        };
+        assert!(validate_bolt12_offer_for_network(&encoded, other).is_err());
+        let offer = parse_bolt12_offer(&encoded).unwrap();
+        assert!(create_signed_invoice_request(&offer, 0, &signer, None, None).is_err());
+        assert!(create_signed_invoice_request(&offer, u64::MAX, &signer, None, None).is_err());
+        let req = create_signed_invoice_request(&offer, 1000, &signer, None, None).unwrap();
+        assert!(req.encode().unwrap().starts_with(&format!("{r}1")));
+        let decoded_req = parse_bolt12_invoice_request(&req.encode().unwrap()).unwrap();
+        assert_eq!(decoded_req.network, network);
+        assert_eq!(decoded_req.encode().unwrap(), req.encode().unwrap());
+        let inv = create_invoice_from_request(&offer, &req, &signer, [1; 32], None).unwrap();
+        assert!(inv.invoice.starts_with(&format!("{i}1")));
+        validate_bolt12_invoice_against_offer(&inv, &offer, 1000).unwrap();
+        let (_, raw) = satspath_core::bolt12::decode_bolt12_bech32(&inv.invoice).unwrap();
+        let wrong = if i == "lni" { "lnit" } else { "lni" };
+        let wrong_inv =
+            parse_bolt12_invoice(&encode_bolt12_bech32_checksumless(wrong, &raw).unwrap()).unwrap();
+        assert!(validate_bolt12_invoice_against_offer(&wrong_inv, &offer, 1000).is_err());
+        for fallback in ["not-an-address", "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"] {
+            let mut records = inv.to_unsigned_tlv_records().unwrap();
+            records.push(TlvRecord {
+                tag: TLV_INVOICE_FALLBACK_ADDRESS,
+                value: fallback.as_bytes().to_vec(),
+            });
+            let signature = sign_bolt12_tlv_stream("invoice", &records, &signer).unwrap();
+            records.push(TlvRecord {
+                tag: TLV_SIGNATURE,
+                value: signature.to_vec(),
+            });
+            let encoded =
+                encode_bolt12_bech32_checksumless(i, &encode_tlv_stream(&records)).unwrap();
+            assert_eq!(
+                parse_bolt12_invoice(&encoded).is_ok(),
+                fallback != "not-an-address" && network == BitcoinNetwork::Mainnet
+            );
+        }
+    }
+}
+
+#[test]
+fn host_signer_responses_are_verified() {
+    use satspath_core::bolt12::Bolt12Signer;
+    struct InvalidSigner;
+    impl Bolt12Signer for InvalidSigner {
+        fn public_key(&self) -> secp256k1::PublicKey {
+            secp256k1::PublicKey::from_slice(&issuer_id_record().value).unwrap()
+        }
+        fn sign_bolt12(&self, _: &str, _: &[TlvRecord]) -> anyhow::Result<[u8; 64]> {
+            Ok([0; 64])
+        }
+    }
+    assert!(sign_bolt12_tlv_stream("offer", &[issuer_id_record()], &InvalidSigner).is_err());
 }
