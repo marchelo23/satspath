@@ -110,6 +110,16 @@ pub fn validate_bitcoin_address(address: &str, network: BitcoinNetwork) -> Resul
     Ok(())
 }
 
+/// Validate a BIP-352 Silent Payment Bech32m address for the expected Bitcoin network.
+///
+/// Enforces:
+/// - Non-empty string with no private key material or mixed casing.
+/// - Correct Bech32m HRP (`sp` for mainnet, `tsp` for testnet, `tsp` or `sprt` for regtest).
+/// - 5-bit witness version `0` (`q`) followed by 66 bytes (two 33-byte compressed `secp256k1` keys).
+///
+/// # Errors
+/// Returns [`SatsPathError::InvalidPaymentPointer`] or [`SatsPathError::PrivateMaterialRejected`]
+/// if the address is malformed, uses the wrong network prefix, or embeds private material.
 pub fn validate_silent_payment_address(address: &str, network: BitcoinNetwork) -> Result<()> {
     let trimmed = address.trim();
     if trimmed.is_empty() {
@@ -121,26 +131,26 @@ pub fn validate_silent_payment_address(address: &str, network: BitcoinNetwork) -
     assert_no_private_material(trimmed)?;
 
     let lower = trimmed.to_ascii_lowercase();
-
-    // BIP-352: mainnet uses 'sp', testnet/regtest use 'tsp'
-    let expected_hrp = match network {
-        BitcoinNetwork::Mainnet => "sp",
-        BitcoinNetwork::Testnet | BitcoinNetwork::Regtest => "tsp",
-    };
-
-    if !lower.starts_with(expected_hrp) {
-        return Err(SatsPathError::InvalidPaymentPointer(format!(
-            "silent payment address must start with '{expected_hrp}' for {network:?}"
-        )));
+    if trimmed != lower && trimmed != trimmed.to_ascii_uppercase() {
+        return Err(SatsPathError::InvalidPaymentPointer(
+            "silent payment address cannot mix uppercase and lowercase characters".into(),
+        ));
     }
 
     let (hrp, data, variant) = bech32::decode(&lower).map_err(|e| {
         SatsPathError::InvalidPaymentPointer(format!("silent payment bech32 decode failed: {e}"))
     })?;
 
-    if hrp != expected_hrp {
+    // BIP-352: mainnet uses 'sp', testnet uses 'tsp', regtest uses 'sprt' (or 'tsp')
+    let valid_hrp = match network {
+        BitcoinNetwork::Mainnet => hrp == "sp",
+        BitcoinNetwork::Testnet => hrp == "tsp",
+        BitcoinNetwork::Regtest => hrp == "sprt" || hrp == "tsp",
+    };
+
+    if !valid_hrp {
         return Err(SatsPathError::InvalidPaymentPointer(format!(
-            "silent payment address HRP '{hrp}' does not match expected '{expected_hrp}'"
+            "silent payment address HRP '{hrp}' is invalid for {network:?}"
         )));
     }
 
@@ -150,30 +160,35 @@ pub fn validate_silent_payment_address(address: &str, network: BitcoinNetwork) -
         ));
     }
 
-    let bytes = Vec::<u8>::from_base32(&data).map_err(|e| {
+    let Some(version_u5) = data.first() else {
+        return Err(SatsPathError::InvalidPaymentPointer(
+            "silent payment address is missing version".into(),
+        ));
+    };
+    if version_u5.to_u8() != 0 {
+        return Err(SatsPathError::InvalidPaymentPointer(format!(
+            "unsupported silent payment address version: {}",
+            version_u5.to_u8()
+        )));
+    }
+
+    let bytes = Vec::<u8>::from_base32(&data[1..]).map_err(|e| {
         SatsPathError::InvalidPaymentPointer(format!(
             "silent payment base32 conversion failed: {e}"
         ))
     })?;
 
-    // BIP-352 payload: 1 byte version (0x00) + 33 bytes scan pubkey + 33 bytes spend pubkey = 67 bytes
-    if bytes.len() != 67 {
+    // BIP-352 payload after 5-bit version 0: 33 bytes scan pubkey + 33 bytes spend pubkey = 66 bytes
+    if bytes.len() != 66 {
         return Err(SatsPathError::InvalidPaymentPointer(format!(
-            "silent payment address payload must be 67 bytes, got {}",
+            "silent payment address payload must be 66 bytes, got {}",
             bytes.len()
         )));
     }
 
-    if bytes[0] != 0 {
-        return Err(SatsPathError::InvalidPaymentPointer(format!(
-            "unsupported silent payment address version: {}",
-            bytes[0]
-        )));
-    }
-
     // Validate both compressed public keys (must start with 0x02 or 0x03)
-    let scan_header = bytes[1];
-    let spend_header = bytes[34];
+    let scan_header = bytes[0];
+    let spend_header = bytes[33];
     if (scan_header != 0x02 && scan_header != 0x03)
         || (spend_header != 0x02 && spend_header != 0x03)
     {
@@ -182,10 +197,10 @@ pub fn validate_silent_payment_address(address: &str, network: BitcoinNetwork) -
         ));
     }
 
-    secp256k1::PublicKey::from_slice(&bytes[1..34]).map_err(|e| {
+    secp256k1::PublicKey::from_slice(&bytes[..33]).map_err(|e| {
         SatsPathError::InvalidPaymentPointer(format!("invalid scan public key: {e}"))
     })?;
-    secp256k1::PublicKey::from_slice(&bytes[34..67]).map_err(|e| {
+    secp256k1::PublicKey::from_slice(&bytes[33..66]).map_err(|e| {
         SatsPathError::InvalidPaymentPointer(format!("invalid spend public key: {e}"))
     })?;
 
@@ -512,7 +527,7 @@ mod tests {
 
     #[test]
     fn silent_payment_address_validation() {
-        use bech32::ToBase32;
+        use bech32::{u5, ToBase32};
 
         let secp = secp256k1::Secp256k1::new();
         let sk1 = secp256k1::SecretKey::new(&mut rand::thread_rng());
@@ -520,19 +535,28 @@ mod tests {
         let sk2 = secp256k1::SecretKey::new(&mut rand::thread_rng());
         let pk2 = secp256k1::PublicKey::from_secret_key(&secp, &sk2);
 
-        let mut payload = Vec::with_capacity(67);
-        payload.push(0x00);
+        let mut payload = Vec::with_capacity(66);
         payload.extend_from_slice(&pk1.serialize());
         payload.extend_from_slice(&pk2.serialize());
 
-        let mainnet_sp =
-            bech32::encode("sp", payload.to_base32(), bech32::Variant::Bech32m).unwrap();
-        let testnet_sp =
-            bech32::encode("tsp", payload.to_base32(), bech32::Variant::Bech32m).unwrap();
+        let mut data = vec![u5::try_from_u8(0).unwrap()];
+        data.extend(payload.to_base32());
+
+        let mainnet_sp = bech32::encode("sp", data.clone(), bech32::Variant::Bech32m).unwrap();
+        let testnet_sp = bech32::encode("tsp", data.clone(), bech32::Variant::Bech32m).unwrap();
+        let regtest_sp = bech32::encode("sprt", data.clone(), bech32::Variant::Bech32m).unwrap();
 
         // Valid addresses
         assert!(validate_silent_payment_address(&mainnet_sp, BitcoinNetwork::Mainnet).is_ok());
         assert!(validate_silent_payment_address(&testnet_sp, BitcoinNetwork::Testnet).is_ok());
+        assert!(validate_silent_payment_address(&regtest_sp, BitcoinNetwork::Regtest).is_ok());
+
+        // Official BIP-352 mainnet test vector address
+        assert!(validate_silent_payment_address(
+            "sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv",
+            BitcoinNetwork::Mainnet
+        )
+        .is_ok());
 
         // Network mismatch
         assert!(validate_silent_payment_address(&mainnet_sp, BitcoinNetwork::Testnet).is_err());
@@ -547,23 +571,15 @@ mod tests {
         );
 
         // Truncated payload
-        let truncated = bech32::encode(
-            "sp",
-            payload[..30].to_vec().to_base32(),
-            bech32::Variant::Bech32m,
-        )
-        .unwrap();
+        let mut truncated_data = vec![u5::try_from_u8(0).unwrap()];
+        truncated_data.extend(payload[..30].to_vec().to_base32());
+        let truncated = bech32::encode("sp", truncated_data, bech32::Variant::Bech32m).unwrap();
         assert!(validate_silent_payment_address(&truncated, BitcoinNetwork::Mainnet).is_err());
 
         // Invalid version byte
-        let mut bad_version_payload = payload.clone();
-        bad_version_payload[0] = 0x01;
-        let bad_version = bech32::encode(
-            "sp",
-            bad_version_payload.to_base32(),
-            bech32::Variant::Bech32m,
-        )
-        .unwrap();
+        let mut bad_version_data = vec![u5::try_from_u8(1).unwrap()];
+        bad_version_data.extend(payload.to_base32());
+        let bad_version = bech32::encode("sp", bad_version_data, bech32::Variant::Bech32m).unwrap();
         assert!(validate_silent_payment_address(&bad_version, BitcoinNetwork::Mainnet).is_err());
     }
 }
