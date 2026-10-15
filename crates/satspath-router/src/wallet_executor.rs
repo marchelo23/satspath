@@ -12,23 +12,29 @@ use std::str::FromStr;
 use anyhow::Result;
 use async_trait::async_trait;
 use bitcoin::absolute::LockTime;
-use bitcoin::consensus::encode::serialize;
 use bitcoin::psbt::Psbt;
-use bitcoin::{Address, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut};
+use bitcoin::{Address, Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut};
+use lightning_invoice::{Bolt11Invoice, Currency};
 use satspath_core::bip321::parse_bip321;
+use satspath_core::crypto::{check_profile_expiry, fingerprint_pubkey, verify_signed_profile};
 use satspath_core::execution::{
     ExecutionGatePolicy, OnchainReceipt, PaymentReceipt, WalletExecutor,
 };
 use satspath_core::pointer::BitcoinNetwork;
+use satspath_core::privacy::{canonical_identifier, identifier_hash};
+use satspath_core::transparency::{
+    next_identifier_sequence, verify_checkpoint_inclusion, NameAction,
+    TransactionalTransparencyStore,
+};
 use satspath_core::validation::{
     assert_no_private_material, validate_amount_sats, validate_bitcoin_address,
 };
+use satspath_core::PaymentMethod;
 use satspath_core::{Result as CoreResult, SatsPathError};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::lightning::validate_bolt11_invoice;
-use crate::quote_response::QuoteResponse;
+use crate::quote_response::{build_qr_payload, QuoteResponse};
 
 /// Unified receipt returned after a host wallet executes a validated SatsPath handoff payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -38,7 +44,7 @@ pub enum HandoffExecutionReceipt {
     Onchain(OnchainReceipt),
     /// Lightning BOLT11 payment executed by the host wallet (e.g. LDK).
     Lightning(PaymentReceipt),
-    /// Testnet/Regtest Boltz swap claim or refund transaction executed by the host wallet.
+    /// Reserved for verified swap settlement; current swap execution APIs always fail closed.
     SwapSettlement {
         /// Swap identifier.
         swap_id: String,
@@ -304,34 +310,11 @@ impl<L: LdkHostNode> LdkLightningBridge<L> {
         invoice_str: &str,
         expected_amount_sats: u64,
     ) -> CoreResult<PaymentReceipt> {
-        assert_no_private_material(invoice_str)?;
-        validate_amount_sats(expected_amount_sats)?;
-
-        let expected_msats = expected_amount_sats.saturating_mul(1_000);
-        // Verify BOLT11 signature, expiry, and exact amount in millisatoshis
         let validated =
-            validate_bolt11_invoice(invoice_str.trim(), expected_msats).map_err(|e| {
-                SatsPathError::ValidationError(format!("BOLT11 validation failed: {e}"))
-            })?;
-
-        // Enforce network prefix match against configured wallet network
-        let lower = invoice_str.trim().to_ascii_lowercase();
-        let network_matches = match self.network {
-            BitcoinNetwork::Mainnet => {
-                lower.starts_with("lnbc1")
-                    || (lower.starts_with("lnbc") && !lower.starts_with("lnbcrt"))
-            }
-            BitcoinNetwork::Testnet => lower.starts_with("lntb") || lower.starts_with("lntbs"),
-            BitcoinNetwork::Regtest => lower.starts_with("lnbcrt") || lower.starts_with("lntb"),
-        };
-        if !network_matches {
-            return Err(SatsPathError::ValidationError(format!(
-                "BOLT11 invoice network prefix does not match wallet network {:?}",
-                self.network
-            )));
-        }
-
-        let amount_msats = validated.amount_msats;
+            validate_handoff_bolt11(invoice_str.trim(), expected_amount_sats, self.network)?;
+        let amount_msats = validated
+            .amount_milli_satoshis()
+            .expect("validated exact amount");
         let max_fee_msats = (amount_msats.saturating_mul(self.max_fee_bps) / 10_000).max(1_000);
 
         self.host_node
@@ -376,23 +359,32 @@ impl<W: BdkHostWallet, L: LdkHostNode> HostWalletSdkBridge<W, L> {
 
 #[async_trait]
 impl<W: BdkHostWallet, L: LdkHostNode> WalletExecutor for HostWalletSdkBridge<W, L> {
+    /// Return the configured host wallet network.
     fn network(&self) -> BitcoinNetwork {
         self.network
     }
 
+    /// Reject fractional satoshis and validate the exact invoice before host dispatch.
     async fn pay_bolt11(
         &self,
         invoice: &str,
         amount_msats: Option<u64>,
     ) -> CoreResult<PaymentReceipt> {
-        let amount_sats = amount_msats.ok_or_else(|| {
+        let amount_msats = amount_msats.ok_or_else(|| {
             SatsPathError::ValidationError(
                 "amount_msats is required for verified BOLT11 execution".into(),
             )
-        })? / 1_000;
+        })?;
+        if amount_msats % 1_000 != 0 {
+            return Err(SatsPathError::ValidationError(
+                "amount_msats must be an exact number of satoshis".into(),
+            ));
+        }
+        let amount_sats = amount_msats / 1_000;
         self.ldk.validate_and_pay_bolt11(invoice, amount_sats).await
     }
 
+    /// Build an on-chain PSBT and delegate its execution to the host wallet.
     async fn send_onchain(
         &self,
         destination_address: &str,
@@ -414,6 +406,7 @@ impl<W: BdkHostWallet, L: LdkHostNode> WalletExecutor for HostWalletSdkBridge<W,
         })
     }
 
+    /// Delegate PSBT signing and broadcasting and validate the returned transaction ID.
     async fn sign_and_broadcast_psbt(&self, psbt_base64: &str) -> CoreResult<String> {
         if psbt_base64.trim().is_empty() {
             return Err(SatsPathError::ValidationError(
@@ -447,8 +440,10 @@ fn base64_encode_psbt(psbt: &Psbt) -> String {
 // 4. Boltz Testnet Swap Claim/Refund Host-Wallet Execution Bridge
 // ============================================================================
 
-/// Callback interface for a host wallet to sign a Boltz swap claim/refund sighash digest
-/// and broadcast the resulting witness transaction on Testnet/Regtest without exposing keys.
+/// Reserved host-wallet swap callbacks. The current bridge never invokes them.
+///
+/// Enabling execution requires a separate verified lockup, witness and chain-evidence
+/// interface; the signature bytes and transaction ID returned here cannot prove settlement.
 #[async_trait]
 pub trait BoltzHostSignerBroadcaster: Send + Sync {
     /// Sign a 32-byte sighash digest with the host wallet's ephemeral swap key (`claim` or `refund`)
@@ -460,245 +455,66 @@ pub trait BoltzHostSignerBroadcaster: Send + Sync {
     async fn broadcast_swap_tx(&self, raw_tx_hex: &str) -> Result<String>;
 }
 
-/// Non-custodial Boltz swap claim/refund execution bridge for Testnet and Regtest.
+/// Reserved Boltz swap bridge. Claims and refunds are disabled on every network.
 ///
-/// Enforces:
-/// - Mainnet swap execution is strictly blocked (fails closed).
-/// - HTLC witness script commitment to `SHA256(preimage)` (for reverse claims) is verified before signing.
-/// - All private key signing and transaction broadcast are delegated to [`BoltzHostSignerBroadcaster`].
+/// The current API cannot authenticate the lockup UTXO, supported witness script,
+/// spending sighash, signature, or independent chain settlement evidence. It must
+/// never invoke the signer/broadcaster or issue a settlement receipt, including
+/// for Taproot and cross-chain swaps, until that verification flow exists.
 pub struct BoltzTestnetSwapBridge<S: BoltzHostSignerBroadcaster> {
-    network: BitcoinNetwork,
-    signer: S,
+    _network: BitcoinNetwork,
+    _signer: S,
 }
 
 impl<S: BoltzHostSignerBroadcaster> BoltzTestnetSwapBridge<S> {
-    /// Construct a new Boltz swap execution bridge for `network`.
+    /// Retain the host integration configuration without enabling swap execution.
     pub fn new(network: BitcoinNetwork, signer: S) -> Self {
-        Self { network, signer }
-    }
-
-    /// Ensure swap execution is permitted on the configured network (Testnet/Regtest only).
-    fn ensure_testnet_or_regtest(&self) -> CoreResult<Network> {
-        match self.network {
-            BitcoinNetwork::Mainnet => Err(SatsPathError::ValidationError(
-                "Boltz swap execution is disabled on Mainnet (fail-closed testnet/regtest gate)"
-                    .into(),
-            )),
-            BitcoinNetwork::Testnet => Ok(Network::Testnet),
-            BitcoinNetwork::Regtest => Ok(Network::Regtest),
+        Self {
+            _network: network,
+            _signer: signer,
         }
     }
 
-    /// Execute a Reverse Swap HTLC claim transaction using host-wallet signing on Testnet/Regtest.
+    /// Reject every reverse claim before signing or broadcasting.
+    ///
+    /// Caller-supplied outpoints, amounts, preimages and scripts are insufficient
+    /// to authenticate a spend or demonstrate settlement.
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_reverse_claim(
         &self,
-        swap_id: &str,
-        lockup_txid: &str,
-        lockup_vout: u32,
-        lockup_amount_sats: u64,
-        preimage_hex: &str,
-        redeem_script_hex: &str,
-        destination_address: &str,
-        miner_fee_sats: u64,
+        _swap_id: &str,
+        _lockup_txid: &str,
+        _lockup_vout: u32,
+        _lockup_amount_sats: u64,
+        _preimage_hex: &str,
+        _redeem_script_hex: &str,
+        _destination_address: &str,
+        _miner_fee_sats: u64,
     ) -> CoreResult<HandoffExecutionReceipt> {
-        let _net = self.ensure_testnet_or_regtest()?;
-        validate_bitcoin_address(destination_address, self.network)?;
-
-        if lockup_amount_sats <= miner_fee_sats {
-            return Err(SatsPathError::ValidationError(format!(
-                "lockup amount {lockup_amount_sats} sats cannot cover miner fee {miner_fee_sats} sats"
-            )));
-        }
-
-        let preimage_bytes = hex::decode(preimage_hex.trim())
-            .map_err(|e| SatsPathError::ValidationError(format!("invalid preimage hex: {e}")))?;
-        if preimage_bytes.len() != 32 {
-            return Err(SatsPathError::ValidationError(
-                "swap preimage must be exactly 32 bytes".into(),
-            ));
-        }
-
-        let redeem_script_bytes = hex::decode(redeem_script_hex.trim()).map_err(|e| {
-            SatsPathError::ValidationError(format!("invalid redeem_script hex: {e}"))
-        })?;
-        if redeem_script_bytes.is_empty() {
-            return Err(SatsPathError::ValidationError(
-                "swap claim requires a non-empty witness redeem script".into(),
-            ));
-        }
-
-        // Verify the witness redeem script commits to SHA256(preimage) or HASH160(preimage)
-        let preimage_sha256: [u8; 32] = Sha256::digest(&preimage_bytes).into();
-        let commits_to_hash = redeem_script_bytes
-            .windows(32)
-            .any(|w| w == preimage_sha256);
-        if !commits_to_hash {
-            return Err(SatsPathError::ValidationError(
-                "HTLC witness script does not commit to SHA256(preimage); refusing to claim".into(),
-            ));
-        }
-
-        let outpoint = OutPoint::from_str(&format!("{lockup_txid}:{lockup_vout}"))
-            .map_err(|e| SatsPathError::ValidationError(format!("invalid lockup outpoint: {e}")))?;
-        let dest_addr = Address::from_str(destination_address.trim())
-            .map_err(|e| SatsPathError::InvalidPaymentPointer(e.to_string()))?
-            .assume_checked();
-        let net_output_sats = lockup_amount_sats - miner_fee_sats;
-
-        let mut tx = Transaction {
-            version: bitcoin::transaction::Version::TWO,
-            lock_time: LockTime::ZERO,
-            input: vec![TxIn {
-                previous_output: outpoint,
-                script_sig: ScriptBuf::new(),
-                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: bitcoin::Witness::new(),
-            }],
-            output: vec![TxOut {
-                value: Amount::from_sat(net_output_sats),
-                script_pubkey: dest_addr.script_pubkey(),
-            }],
-        };
-
-        let sighash: [u8; 32] = *tx.compute_txid().as_ref();
-        let sig_bytes = self
-            .signer
-            .sign_swap_digest(swap_id, sighash)
-            .await
-            .map_err(|e| {
-                SatsPathError::ValidationError(format!("host swap signing failed: {e}"))
-            })?;
-        if sig_bytes.is_empty() {
-            return Err(SatsPathError::ValidationError(
-                "host wallet returned empty swap signature".into(),
-            ));
-        }
-
-        let mut witness = bitcoin::Witness::new();
-        witness.push(sig_bytes);
-        witness.push(preimage_bytes);
-        witness.push(redeem_script_bytes);
-        tx.input[0].witness = witness;
-
-        let raw_hex = hex::encode(serialize(&tx));
-        let broadcast_txid = self.signer.broadcast_swap_tx(&raw_hex).await.map_err(|e| {
-            SatsPathError::NetworkError(format!("swap claim broadcast failed: {e}"))
-        })?;
-        if broadcast_txid.len() != 64 || hex::decode(&broadcast_txid).is_err() {
-            return Err(SatsPathError::ValidationError(format!(
-                "invalid broadcast txid returned by host broadcaster: {broadcast_txid}"
-            )));
-        }
-
-        Ok(HandoffExecutionReceipt::SwapSettlement {
-            swap_id: swap_id.to_string(),
-            settlement_kind: "reverse_claim".to_string(),
-            txid: broadcast_txid,
-            output_amount_sats: net_output_sats,
-            fee_sats: miner_fee_sats,
-        })
+        Err(SatsPathError::ValidationError(
+            "Boltz swap execution is disabled: verified lockup, witness and chain evidence are required".into(),
+        ))
     }
 
-    /// Execute a Submarine Swap CLTV refund transaction using host-wallet signing on Testnet/Regtest.
+    /// Reject every submarine refund before signing or broadcasting.
+    ///
+    /// Caller-supplied block heights do not prove the timelock or spend rules.
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_submarine_refund(
         &self,
-        swap_id: &str,
-        lockup_txid: &str,
-        lockup_vout: u32,
-        lockup_amount_sats: u64,
-        timeout_block_height: u32,
-        current_block_height: u32,
-        redeem_script_hex: &str,
-        destination_address: &str,
-        miner_fee_sats: u64,
+        _swap_id: &str,
+        _lockup_txid: &str,
+        _lockup_vout: u32,
+        _lockup_amount_sats: u64,
+        _timeout_block_height: u32,
+        _current_block_height: u32,
+        _redeem_script_hex: &str,
+        _destination_address: &str,
+        _miner_fee_sats: u64,
     ) -> CoreResult<HandoffExecutionReceipt> {
-        let _net = self.ensure_testnet_or_regtest()?;
-        validate_bitcoin_address(destination_address, self.network)?;
-
-        if current_block_height < timeout_block_height {
-            return Err(SatsPathError::ValidationError(format!(
-                "cannot refund submarine swap before CLTV timeout block {timeout_block_height} (current: {current_block_height})"
-            )));
-        }
-        if lockup_amount_sats <= miner_fee_sats {
-            return Err(SatsPathError::ValidationError(format!(
-                "lockup amount {lockup_amount_sats} sats cannot cover miner fee {miner_fee_sats} sats"
-            )));
-        }
-
-        let redeem_script_bytes = hex::decode(redeem_script_hex.trim()).map_err(|e| {
-            SatsPathError::ValidationError(format!("invalid redeem_script hex: {e}"))
-        })?;
-        if redeem_script_bytes.is_empty() {
-            return Err(SatsPathError::ValidationError(
-                "swap refund requires a non-empty witness redeem script".into(),
-            ));
-        }
-
-        let outpoint = OutPoint::from_str(&format!("{lockup_txid}:{lockup_vout}"))
-            .map_err(|e| SatsPathError::ValidationError(format!("invalid lockup outpoint: {e}")))?;
-        let dest_addr = Address::from_str(destination_address.trim())
-            .map_err(|e| SatsPathError::InvalidPaymentPointer(e.to_string()))?
-            .assume_checked();
-        let lock_time = LockTime::from_height(timeout_block_height).map_err(|e| {
-            SatsPathError::ValidationError(format!("invalid timeout block height: {e}"))
-        })?;
-        let net_output_sats = lockup_amount_sats - miner_fee_sats;
-
-        let mut tx = Transaction {
-            version: bitcoin::transaction::Version::TWO,
-            lock_time,
-            input: vec![TxIn {
-                previous_output: outpoint,
-                script_sig: ScriptBuf::new(),
-                sequence: Sequence::from_height(1),
-                witness: bitcoin::Witness::new(),
-            }],
-            output: vec![TxOut {
-                value: Amount::from_sat(net_output_sats),
-                script_pubkey: dest_addr.script_pubkey(),
-            }],
-        };
-
-        let sighash: [u8; 32] = *tx.compute_txid().as_ref();
-        let sig_bytes = self
-            .signer
-            .sign_swap_digest(swap_id, sighash)
-            .await
-            .map_err(|e| {
-                SatsPathError::ValidationError(format!("host refund signing failed: {e}"))
-            })?;
-        if sig_bytes.is_empty() {
-            return Err(SatsPathError::ValidationError(
-                "host wallet returned empty refund signature".into(),
-            ));
-        }
-
-        let mut witness = bitcoin::Witness::new();
-        witness.push(sig_bytes);
-        witness.push([]);
-        witness.push(redeem_script_bytes);
-        tx.input[0].witness = witness;
-
-        let raw_hex = hex::encode(serialize(&tx));
-        let broadcast_txid = self.signer.broadcast_swap_tx(&raw_hex).await.map_err(|e| {
-            SatsPathError::NetworkError(format!("swap refund broadcast failed: {e}"))
-        })?;
-        if broadcast_txid.len() != 64 || hex::decode(&broadcast_txid).is_err() {
-            return Err(SatsPathError::ValidationError(format!(
-                "invalid broadcast txid returned by host broadcaster: {broadcast_txid}"
-            )));
-        }
-
-        Ok(HandoffExecutionReceipt::SwapSettlement {
-            swap_id: swap_id.to_string(),
-            settlement_kind: "submarine_refund".to_string(),
-            txid: broadcast_txid,
-            output_amount_sats: net_output_sats,
-            fee_sats: miner_fee_sats,
-        })
+        Err(SatsPathError::ValidationError(
+            "Boltz swap execution is disabled: verified lockup, witness and chain evidence are required".into(),
+        ))
     }
 }
 
@@ -706,23 +522,35 @@ impl<S: BoltzHostSignerBroadcaster> BoltzTestnetSwapBridge<S> {
 // 5. End-to-End QuoteResponse -> WalletExecutor Dispatcher
 // ============================================================================
 
-/// Validate a [`QuoteResponse`] handoff payload and execute it via the provided [`WalletExecutor`].
+/// Verify current local identity state and a payment payload before host dispatch.
 ///
-/// Enforces:
-/// 1. [`ExecutionGatePolicy::check_execution_safety`] for `(executor.network(), expected_amount_sats, user_confirmed)`.
-/// 2. `quote_response` must be `QuoteResponse::Ok` with `recipient.profile_signature_verified == true`.
-/// 3. `qr_payload` is screened for private key material and validated as either a `bitcoin:` BIP-21 URI
-///    or a BOLT11 invoice matching `expected_amount_sats`.
+/// `profile_store` must be the caller's authoritative, continuously updated local
+/// transparency store. The profile and history are loaded afresh for each call;
+/// missing state, revocations, unauthorized key changes and stale payment methods
+/// fail closed. The serialized quote verification flags are never sufficient.
+///
+/// BOLT11 invoices must match the configured network and exact amount. A fetched
+/// invoice also requires a payee key bound to the current signed Lightning method;
+/// an LNURL/address alone cannot authenticate an arbitrary invoice. Unsupported
+/// BOLT12, Ark, Silent Payment and swap handoffs remain disabled.
 pub async fn execute_quote_handoff(
     executor: &dyn WalletExecutor,
+    profile_store: &TransactionalTransparencyStore,
     quote_response: &QuoteResponse,
     expected_amount_sats: u64,
     policy: &ExecutionGatePolicy,
     user_confirmed: bool,
 ) -> CoreResult<HandoffExecutionReceipt> {
+    validate_amount_sats(expected_amount_sats)?;
     policy.check_execution_safety(executor.network(), expected_amount_sats, user_confirmed)?;
 
-    let QuoteResponse::Ok { recipient, qr, .. } = quote_response else {
+    let QuoteResponse::Ok {
+        recipient,
+        selected_method,
+        qr,
+        ..
+    } = quote_response
+    else {
         return Err(SatsPathError::ValidationError(
             "cannot execute non-Ok QuoteResponse".into(),
         ));
@@ -732,11 +560,20 @@ pub async fn execute_quote_handoff(
         return Err(SatsPathError::InvalidSignature);
     }
 
+    verify_current_handoff_profile(profile_store, recipient, selected_method)?;
+
     assert_no_private_material(qr)?;
     let trimmed = qr.trim();
     let lower = trimmed.to_ascii_lowercase();
 
     if lower.starts_with("bitcoin:") {
+        if !matches!(selected_method, PaymentMethod::Onchain { network, silent_payment_pubkey: None, .. } if *network == executor.network())
+            || build_qr_payload(selected_method, expected_amount_sats)? != trimmed
+        {
+            return Err(SatsPathError::ValidationError(
+                "handoff does not match the current signed on-chain method".into(),
+            ));
+        }
         let parsed = parse_bip321(trimmed)?;
         let addr = parsed.address.ok_or_else(|| {
             SatsPathError::InvalidPaymentUri("BIP-21 handoff URI is missing address".into())
@@ -762,8 +599,24 @@ pub async fn execute_quote_handoff(
     }
 
     if lower.starts_with("lnbc") || lower.starts_with("lntb") {
+        let invoice = validate_handoff_bolt11(trimmed, expected_amount_sats, executor.network())?;
+        let PaymentMethod::Lightning {
+            receiver_pubkey, ..
+        } = selected_method
+        else {
+            return Err(SatsPathError::ValidationError(
+                "BOLT11 handoff requires a signed Lightning method".into(),
+            ));
+        };
+        let signed_payload = build_qr_payload(selected_method, expected_amount_sats)?;
+        let payee = invoice.recover_payee_pub_key().to_string();
+        if signed_payload != trimmed && receiver_pubkey.as_deref() != Some(payee.as_str()) {
+            return Err(SatsPathError::ValidationError(
+                "BOLT11 payee is not bound to the current signed profile".into(),
+            ));
+        }
         let receipt = executor
-            .pay_bolt11(trimmed, Some(expected_amount_sats.saturating_mul(1_000)))
+            .pay_bolt11(trimmed, invoice.amount_milli_satoshis())
             .await?;
         return Ok(HandoffExecutionReceipt::Lightning(receipt));
     }
@@ -771,4 +624,83 @@ pub async fn execute_quote_handoff(
     Err(SatsPathError::ValidationError(format!(
         "unsupported handoff payload scheme for direct WalletExecutor settlement: {trimmed}"
     )))
+}
+
+/// Decode and verify a BOLT11 invoice against an exact satoshi amount and network.
+fn validate_handoff_bolt11(
+    invoice_str: &str,
+    expected_amount_sats: u64,
+    network: BitcoinNetwork,
+) -> CoreResult<Bolt11Invoice> {
+    assert_no_private_material(invoice_str)?;
+    validate_amount_sats(expected_amount_sats)?;
+    let expected_msats = expected_amount_sats.checked_mul(1_000).ok_or_else(|| {
+        SatsPathError::ValidationError("BOLT11 millisatoshi amount overflow".into())
+    })?;
+    validate_bolt11_invoice(invoice_str, expected_msats)
+        .map_err(|e| SatsPathError::ValidationError(format!("BOLT11 validation failed: {e}")))?;
+    // Bolt11Invoice's constructor verifies the signature and all semantic fields.
+    let invoice = Bolt11Invoice::from_str(invoice_str)
+        .map_err(|e| SatsPathError::ValidationError(format!("BOLT11 validation failed: {e}")))?;
+    let currency = match network {
+        BitcoinNetwork::Mainnet => Currency::Bitcoin,
+        BitcoinNetwork::Testnet => Currency::BitcoinTestnet,
+        BitcoinNetwork::Regtest => Currency::Regtest,
+    };
+    if invoice.currency() != currency {
+        return Err(SatsPathError::ValidationError(format!(
+            "BOLT11 invoice network does not match wallet network {network:?}"
+        )));
+    }
+    Ok(invoice)
+}
+
+/// Reload and verify the alias history and bind the selected method to its current profile.
+fn verify_current_handoff_profile(
+    store: &TransactionalTransparencyStore,
+    recipient: &crate::quote_response::QuoteRecipient,
+    selected_method: &PaymentMethod,
+) -> CoreResult<()> {
+    let signed = store
+        .profile(&recipient.alias)?
+        .ok_or_else(|| SatsPathError::AliasNotFound(recipient.alias.clone()))?;
+    let profile = &signed.profile;
+    if canonical_identifier(&profile.alias) != canonical_identifier(&recipient.alias)
+        || !verify_signed_profile(&signed)?
+    {
+        return Err(SatsPathError::InvalidSignature);
+    }
+    check_profile_expiry(profile)?;
+    let log = store.load_log()?;
+    let history: Vec<_> = log
+        .history(&identifier_hash(&recipient.alias))
+        .into_iter()
+        .cloned()
+        .collect();
+    // Validates all signatures, authorized rotations and strictly increasing sequences,
+    // and binds the latest event's full profile hash, identity key and sequence.
+    next_identifier_sequence(Some(&signed), &history)?;
+    let latest = history.last().ok_or_else(|| {
+        SatsPathError::ValidationError("handoff requires transparency history".into())
+    })?;
+    if profile.revoked || latest.action == NameAction::Revoke {
+        return Err(SatsPathError::RegistryError(
+            "handoff recipient has been revoked".into(),
+        ));
+    }
+    let checkpoint = log.checkpoints().last().ok_or_else(|| {
+        SatsPathError::ValidationError("handoff requires a transparency checkpoint".into())
+    })?;
+    let event_hash = latest.event_hash()?;
+    let inclusion = log.inclusion(&event_hash, None)?;
+    verify_checkpoint_inclusion(&event_hash, &inclusion, checkpoint)?;
+    if recipient.fingerprint.as_deref()
+        != Some(fingerprint_pubkey(&profile.identity_pubkey)?.as_str())
+        || !profile.methods.contains(selected_method)
+    {
+        return Err(SatsPathError::ValidationError(
+            "quote no longer matches the current recipient profile".into(),
+        ));
+    }
+    Ok(())
 }

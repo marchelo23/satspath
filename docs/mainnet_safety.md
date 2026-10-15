@@ -28,7 +28,7 @@
 | **Silent Payments (BIP-352) Primitives** | **Prototype / Experimental** (Address/output construction implemented; standards conformance & mainnet interop unverified until official vectors pass) | SatsPath (Router) |
 | **Mainnet Ark Receive Pointer Discovery** | **Supported (Preview)** | SatsPath (Router) |
 | **Wallet Handoff Generation (URIs, QR codes)** | **Supported** | SatsPath (Router / CLI) |
-| **Non-Custodial Host-Wallet SDK Bridges (`WalletExecutor`)** | **Supported** (`BdkOnchainBridge`, `LdkLightningBridge`, `BoltzTestnetSwapBridge` in `crates/satspath-router/src/wallet_executor.rs`) | Host Wallet Signs & Broadcasts |
+| **Non-Custodial Host-Wallet SDK Bridges (`WalletExecutor`)** | **Supported** for BDK/LDK; quote execution requires the current authoritative local transparency store. Boltz claims/refunds are **disabled on all networks** pending lockup, witness, and chain-evidence verification (`crates/satspath-router/src/wallet_executor.rs`) | Host Wallet Signs & Broadcasts |
 | **Mainnet Payment Execution by SatsPath** | **Unsupported / Out of Scope** | **Host Wallet Only** |
 | **Transaction Signing (PSBT / Schnorr / ECDSA)** | **Unsupported / Out of Scope** | **Host Wallet Only** |
 | **Mempool Transaction Broadcast** | **Unsupported / Out of Scope** | **Host Wallet Only** |

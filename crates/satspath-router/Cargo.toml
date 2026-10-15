@@ -37,6 +37,7 @@ getrandom = { version = "0.2", features = ["js"], optional = true }
 web-sys = { version = "0.3", features = ["Request", "Response", "Headers", "Window", "RequestInit", "RequestMode"], optional = true }
 
 [dev-dependencies]
+tempfile = "3"
 mockito = "1"
 secp256k1 = { workspace = true }
 bitcoin = { workspace = true }
