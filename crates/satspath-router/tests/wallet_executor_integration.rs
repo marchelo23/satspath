@@ -17,7 +17,7 @@ use satspath_core::execution::{
 };
 use satspath_core::pointer::BitcoinNetwork;
 use satspath_core::profile::{PaymentMethod, PaymentProfile};
-use satspath_core::resolver::ProfileResolver;
+use satspath_core::resolver::{ProfileResolver, ResolverSource};
 use satspath_core::transparency::{
     profile_hash, NameAction, NameEvent, TransactionalTransparencyStore,
 };
@@ -26,10 +26,10 @@ use satspath_router::quote_response::{
     build_qr_payload, quote_with_resolver, QuoteRecipient, QuoteResponse,
 };
 use satspath_router::wallet_executor::{
-    execute_quote_handoff as execute_verified_handoff, BdkHostWallet, BdkOnchainBridge,
-    BdkUtxoDescriptor, BoltzHostSignerBroadcaster, BoltzSwapEvidence, BoltzTestnetSwapBridge,
-    HandoffExecutionReceipt, HandoffTransparencyEvidence, HandoffTrust, HostWalletSdkBridge,
-    LdkHostNode, LdkLightningBridge,
+    execute_quote_handoff as execute_approved_handoff, prepare_payment_intent, BdkHostWallet,
+    BdkOnchainBridge, BdkUtxoDescriptor, BoltzHostSignerBroadcaster, BoltzSwapEvidence,
+    BoltzTestnetSwapBridge, HandoffExecutionReceipt, HandoffTransparencyEvidence, HandoffTrust,
+    HostWalletSdkBridge, LdkHostNode, LdkLightningBridge,
 };
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -98,7 +98,9 @@ impl LdkHostNode for SimulatedLdkNode {
         max_fee_msats: u64,
     ) -> Result<PaymentReceipt> {
         assert!(max_fee_msats >= 1_000);
-        let payment_hash = hex::encode(Sha256::digest(bolt11_invoice.as_bytes()));
+        let payment_hash = lightning_invoice::Bolt11Invoice::from_str(bolt11_invoice)?
+            .payment_hash()
+            .to_string();
         let preimage = hex::encode(Sha256::digest(payment_hash.as_bytes()));
         Ok(PaymentReceipt {
             payment_hash,
@@ -522,12 +524,15 @@ impl WalletExecutor for CountingExecutor {
     /// Accept any invoice to detect dispatcher validation bypasses.
     async fn pay_bolt11(
         &self,
-        _invoice: &str,
+        invoice: &str,
         amount_msats: Option<u64>,
     ) -> satspath_core::Result<PaymentReceipt> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(PaymentReceipt {
-            payment_hash: "11".repeat(32),
+            payment_hash: lightning_invoice::Bolt11Invoice::from_str(invoice)
+                .map_err(|e| satspath_core::SatsPathError::ValidationError(e.to_string()))?
+                .payment_hash()
+                .to_string(),
             preimage: None,
             amount_msats: amount_msats.unwrap_or(0),
             fee_msats: 0,
@@ -555,6 +560,26 @@ impl WalletExecutor for CountingExecutor {
     /// Reject unexpected PSBT calls from dispatcher tests.
     async fn sign_and_broadcast_psbt(&self, _psbt: &str) -> satspath_core::Result<String> {
         panic!("unexpected PSBT dispatch")
+    }
+
+    async fn send_onchain_with_max_fee(
+        &self,
+        destination: &str,
+        amount_sats: u64,
+        max_fee_sats: u64,
+    ) -> satspath_core::Result<OnchainReceipt> {
+        assert!(max_fee_sats > 0);
+        self.send_onchain(destination, amount_sats, None).await
+    }
+
+    async fn pay_bolt11_with_max_fee(
+        &self,
+        invoice: &str,
+        amount_msats: u64,
+        max_fee_msats: u64,
+    ) -> satspath_core::Result<PaymentReceipt> {
+        assert!(max_fee_msats > 0);
+        self.pay_bolt11(invoice, Some(amount_msats)).await
     }
 }
 
@@ -1020,10 +1045,35 @@ async fn execute_quote_handoff(
     };
     let dir = tempfile::tempdir().unwrap();
     let (trust, evidence) = transparency_fixture(store, &recipient.alias, dir.path())?;
-    execute_verified_handoff(
+    execute_with_evidence(
         executor, store, &trust, &evidence, quote, amount, policy, confirmed,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_with_evidence(
+    executor: &dyn WalletExecutor,
+    store: &TransactionalTransparencyStore,
+    trust: &HandoffTrust,
+    evidence: &HandoffTransparencyEvidence,
+    quote: &QuoteResponse,
+    amount: u64,
+    policy: &ExecutionGatePolicy,
+    confirmed: bool,
+) -> satspath_core::Result<HandoffExecutionReceipt> {
+    let intent = prepare_payment_intent(
+        store,
+        trust,
+        evidence,
+        quote,
+        executor.network(),
+        amount,
+        10_000,
+        vec![ResolverSource::LocalRegistry],
+    )?;
+    let approved = intent.approve(confirmed)?;
+    execute_approved_handoff(executor, store, trust, evidence, quote, approved, policy).await
 }
 
 /// Every transparency dimension must fail before dispatch; a complete 2-of-2 proof succeeds.
@@ -1123,7 +1173,7 @@ async fn handoff_requires_state_quorum_gossip_and_persisted_checkpoint() {
             _ => unreachable!(),
         };
         assert!(
-            execute_verified_handoff(
+            execute_with_evidence(
                 &executor,
                 &store,
                 &trust,
@@ -1147,7 +1197,7 @@ async fn handoff_requires_state_quorum_gossip_and_persisted_checkpoint() {
     trust.witness_pubkeys[0] = key.x_only_public_key().0.to_string();
     evidence.witness_cosignatures[0].witness_pubkey = trust.witness_pubkeys[0].clone();
     let previous_observation = evidence.gossip_observations[0].clone();
-    execute_verified_handoff(
+    execute_with_evidence(
         &executor,
         &store,
         &trust,
@@ -1183,7 +1233,7 @@ async fn handoff_requires_state_quorum_gossip_and_persisted_checkpoint() {
         .unwrap()
         .pin_verified(&fork)
         .unwrap();
-    assert!(execute_verified_handoff(
+    assert!(execute_with_evidence(
         &executor,
         &store,
         &trust,
@@ -1202,7 +1252,7 @@ async fn handoff_requires_state_quorum_gossip_and_persisted_checkpoint() {
         .unwrap()
         .pin_verified(&previous_observation.checkpoint)
         .unwrap();
-    execute_verified_handoff(
+    execute_with_evidence(
         &executor,
         &store,
         &trust,
@@ -1559,4 +1609,124 @@ async fn boltz_refund_rejects_hash_that_selects_claim_branch() {
         .await;
     assert!(result.unwrap_err().to_string().contains("claim branch"));
     assert_eq!(signs.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn approval_binds_amount_destination_fee_and_current_state() {
+    let invoice = make_testnet_bolt11(1);
+    let identity = generate_identity_keypair();
+    let signed = signed_lightning_profile(&identity, &invoice);
+    let home = tempfile::tempdir().unwrap();
+    let store = TransactionalTransparencyStore::open(home.path()).unwrap();
+    commit_profile(&store, &signed, &identity, NameAction::Register);
+    let pins = tempfile::tempdir().unwrap();
+    let (trust, evidence) =
+        transparency_fixture(&store, &signed.profile.alias, pins.path()).unwrap();
+    let quote = quote_for(&signed, 1);
+    let executor = CountingExecutor {
+        network: BitcoinNetwork::Testnet,
+        calls: AtomicUsize::new(0),
+    };
+    let prepare = |quote: &QuoteResponse| {
+        prepare_payment_intent(
+            &store,
+            &trust,
+            &evidence,
+            quote,
+            BitcoinNetwork::Testnet,
+            1,
+            500,
+            vec![ResolverSource::LocalRegistry],
+        )
+    };
+    let intent = prepare(&quote).unwrap();
+    assert_eq!(intent.amount_sats, 1);
+    assert_eq!(intent.destination, invoice);
+    assert!(intent.verification_status.transparency_verified);
+    assert!(intent.clone().approve(false).is_err());
+    let bytes = intent.canonical_bytes().unwrap();
+    let mut tampered = intent.clone();
+    tampered.amount_sats += 1;
+    assert_ne!(tampered.canonical_bytes().unwrap(), bytes);
+    assert!(prepare_payment_intent(
+        &store,
+        &trust,
+        &evidence,
+        &quote,
+        BitcoinNetwork::Mainnet,
+        1,
+        500,
+        vec![ResolverSource::LocalRegistry]
+    )
+    .is_err());
+    assert!(prepare_payment_intent(
+        &store,
+        &trust,
+        &evidence,
+        &quote,
+        BitcoinNetwork::Testnet,
+        1,
+        500,
+        vec![]
+    )
+    .is_err());
+    let mut changed = quote.clone();
+    if let QuoteResponse::Ok { fee_sats, .. } = &mut changed {
+        *fee_sats = Some(501);
+    }
+    assert!(prepare(&changed).is_err());
+    let approved = intent.approve(true).unwrap();
+    assert!(execute_approved_handoff(
+        &executor,
+        &store,
+        &trust,
+        &evidence,
+        &changed,
+        approved,
+        &ExecutionGatePolicy::testnet_default(),
+    )
+    .await
+    .is_err());
+    assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
+
+    let approved = prepare(&quote).unwrap().approve(true).unwrap();
+    let receipt = execute_approved_handoff(
+        &executor,
+        &store,
+        &trust,
+        &evidence,
+        &quote,
+        approved,
+        &ExecutionGatePolicy::testnet_default(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(receipt, HandoffExecutionReceipt::Lightning(_)));
+    assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn bdk_fee_cap_rejects_before_host_signs() {
+    let bridge = HostWalletSdkBridge::new(
+        BitcoinNetwork::Testnet,
+        BdkOnchainBridge::new(
+            BitcoinNetwork::Testnet,
+            5,
+            100,
+            SimulatedBdkWallet::new_testnet(),
+        ),
+        LdkLightningBridge::new(BitcoinNetwork::Testnet, 100, SimulatedLdkNode),
+    );
+    let destination = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx";
+    assert!(bridge
+        .send_onchain_with_max_fee(destination, 100_000, 1)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("approved maximum"));
+    let receipt = bridge
+        .send_onchain_with_max_fee(destination, 100_000, 705)
+        .await
+        .unwrap();
+    assert_eq!(receipt.fee_sats, 705);
 }
