@@ -20,3 +20,27 @@ for on-chain HTTPS. It intentionally fails without a real profile, authenticated
 transparency evidence, a host-wallet executable and an independent receiver
 checker. It does **not** silently substitute in-memory mocks. No mainnet
 transaction is initiated by CI.
+
+From the repository root, with an externally provisioned testnet/regtest wallet
+and independently configured receiver, run:
+
+```sh
+SATSPATH_INTEROP_CONFIG=/absolute/path/to/interop.json \
+  cargo test -p satspath-router --test real_wallet_interop \
+  https_onchain_wallet_receiver_confirms_payment -- --ignored --nocapture
+```
+
+The private JSON config must contain `alias`, `amount_sats`, `max_fee_sats`,
+`network` (`"Regtest"` or `"Testnet"`), `store_dir`, `pins_dir`, `wallet_driver`,
+`receiving_wallet_checker`, `witness_quorum`, `witness_pubkeys`,
+`observer_pubkeys`, and `transparency` (authenticated handoff evidence from
+the independent witness/observer deployment). Do not commit credentials or
+the JSON config. Both executables accept one JSON request on stdin and return
+one JSON response on stdout. The host driver receives `action: send_onchain`,
+`network`, `destination`, `amount_sats`, `max_fee_sats`; it must return an
+`OnchainReceipt` with `txid`, `destination`, `amount_sats`, `fee_sats`,
+`timestamp`. The independent checker receives `action: confirm_receive` plus
+`network`, `txid`, `destination`, `amount_sats` and returns those fields with a
+positive `confirmations` count. Each driver has a 30-second deadline and an
+8 KiB output limit. The test cannot attest independence from executable output
+alone: keep the receiver's transaction/UTXO evidence for manual verification.
