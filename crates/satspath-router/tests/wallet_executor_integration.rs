@@ -168,7 +168,7 @@ fn make_testnet_bolt11(amount_sats: u64) -> String {
 #[tokio::test]
 async fn test_end_to_end_alias_resolution_to_bdk_onchain_execution() {
     let kp = generate_identity_keypair();
-    let recipient_addr = "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn";
+    let recipient_addr = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx";
     let profile = PaymentProfile {
         alias: "merchant@satspath.dev".to_string(),
         identity_pubkey: hex::encode(kp.public_key.serialize()),
@@ -479,6 +479,12 @@ fn signed_lightning_profile(identity: &IdentityKeypair, invoice: &str) -> Signed
 /// Build the public handoff representation for an authenticated fixture profile.
 fn quote_for(signed: &SignedPaymentProfile, amount_sats: u64) -> QuoteResponse {
     let method = signed.profile.methods[0].clone();
+    let qr = match &method {
+        PaymentMethod::Lightning {
+            lightning_address, ..
+        } => lightning_address.clone().unwrap_or_default(),
+        _ => build_qr_payload(&method, amount_sats).unwrap(),
+    };
     QuoteResponse::Ok {
         recipient: QuoteRecipient {
             alias: signed.profile.alias.clone(),
@@ -490,7 +496,7 @@ fn quote_for(signed: &SignedPaymentProfile, amount_sats: u64) -> QuoteResponse {
                 satspath_core::crypto::fingerprint_pubkey(&signed.profile.identity_pubkey).unwrap(),
             ),
         },
-        qr: build_qr_payload(&method, amount_sats).unwrap(),
+        qr,
         selected_method: method,
         fee_sats: None,
         eta: None,
@@ -712,10 +718,7 @@ async fn handoff_rejects_quotes_after_revocation_or_profile_update() {
         let home = tempfile::tempdir().unwrap();
         let store = TransactionalTransparencyStore::open(home.path()).unwrap();
         commit_profile(&store, &signed, &identity, NameAction::Register);
-        let resolver = StaticProfileResolver {
-            signed: signed.clone(),
-        };
-        let quote = quote_with_resolver(&resolver, &signed.profile.alias, 1_000).await;
+        let quote = quote_for(&signed, 1_000);
         assert!(matches!(quote, QuoteResponse::Ok { .. }));
         let executor = CountingExecutor {
             network: BitcoinNetwork::Testnet,

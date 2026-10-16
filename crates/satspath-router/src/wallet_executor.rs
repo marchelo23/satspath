@@ -33,7 +33,6 @@ use satspath_core::PaymentMethod;
 use satspath_core::{Result as CoreResult, SatsPathError};
 use serde::{Deserialize, Serialize};
 
-use crate::lightning::validate_bolt11_invoice;
 use crate::quote_response::{build_qr_payload, QuoteResponse};
 
 /// Unified receipt returned after a host wallet executes a validated SatsPath handoff payload.
@@ -1002,16 +1001,18 @@ pub async fn execute_quote_handoff(
     if lower.starts_with("lnbc") || lower.starts_with("lntb") {
         let invoice = validate_handoff_bolt11(trimmed, expected_amount_sats, executor.network())?;
         let PaymentMethod::Lightning {
-            receiver_pubkey, ..
+            lightning_address,
+            receiver_pubkey,
+            ..
         } = selected_method
         else {
             return Err(SatsPathError::ValidationError(
                 "BOLT11 handoff requires a signed Lightning method".into(),
             ));
         };
-        let signed_payload = build_qr_payload(selected_method, expected_amount_sats)?;
         let payee = invoice.recover_payee_pub_key().to_string();
-        if signed_payload != trimmed && receiver_pubkey.as_deref() != Some(payee.as_str()) {
+        let matches_direct = lightning_address.as_deref() == Some(trimmed);
+        if !matches_direct && receiver_pubkey.as_deref() != Some(payee.as_str()) {
             return Err(SatsPathError::ValidationError(
                 "BOLT11 payee is not bound to the current signed profile".into(),
             ));
@@ -1038,8 +1039,11 @@ fn validate_handoff_bolt11(
     let expected_msats = expected_amount_sats.checked_mul(1_000).ok_or_else(|| {
         SatsPathError::ValidationError("BOLT11 millisatoshi amount overflow".into())
     })?;
-    validate_bolt11_invoice(invoice_str, expected_msats)
-        .map_err(|e| SatsPathError::ValidationError(format!("BOLT11 validation failed: {e}")))?;
+    if expected_msats > satspath_core::validation::MAX_PREVIEW_AMOUNT_SATS.saturating_mul(1_000) {
+        return Err(SatsPathError::ValidationError(
+            "invoice amount exceeds maximum allowed".into(),
+        ));
+    }
     // Bolt11Invoice's constructor verifies the signature and all semantic fields.
     let invoice = Bolt11Invoice::from_str(invoice_str)
         .map_err(|e| SatsPathError::ValidationError(format!("BOLT11 validation failed: {e}")))?;
@@ -1052,6 +1056,23 @@ fn validate_handoff_bolt11(
         return Err(SatsPathError::ValidationError(format!(
             "BOLT11 invoice network does not match wallet network {network:?}"
         )));
+    }
+    let invoice_msats = invoice.amount_milli_satoshis().ok_or_else(|| {
+        SatsPathError::ValidationError(
+            "BOLT11 validation failed: invoice has no amount set — ambiguous invoice rejected"
+                .into(),
+        )
+    })?;
+    if invoice_msats != expected_msats {
+        return Err(SatsPathError::ValidationError(format!(
+            "BOLT11 validation failed: invoice amount mismatch: requested {} msats but invoice contains {} msats",
+            expected_msats, invoice_msats
+        )));
+    }
+    if invoice.is_expired() {
+        return Err(SatsPathError::ValidationError(
+            "BOLT11 validation failed: invoice has expired and cannot be paid".into(),
+        ));
     }
     Ok(invoice)
 }

@@ -33,7 +33,8 @@ pub use key_rotation::{
 };
 pub use lightning::{
     fetch_invoice, fetch_lnurl_metadata, is_lightning_available_for_amount_sync,
-    validate_bolt11_invoice, LnurlPayMetadata, ValidatedInvoice,
+    validate_bolt11_invoice, validate_bolt11_invoice_for_network, LnurlPayMetadata,
+    ValidatedInvoice,
 };
 pub use priority::{select_priority_route, PriorityDecision};
 pub use quote_response::{
