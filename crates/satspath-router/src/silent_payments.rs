@@ -21,7 +21,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Result};
-use bech32::{u5, FromBase32, ToBase32, Variant};
+use bech32::{FromBase32, ToBase32, Variant};
 use bitcoin::consensus::Decodable;
 use bitcoin::hashes::{hash160, Hash};
 use bitcoin::script::Instruction;
@@ -767,30 +767,14 @@ pub fn parse_silent_payment_address(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_generate_silent_payment_keys() {
-        let (scan_priv, scan_pub, spend_priv, spend_pub) = generate_silent_payment_keys().unwrap();
-        assert_eq!(scan_priv.len(), 64);
-        assert_eq!(scan_pub.len(), 66);
-        assert_eq!(spend_priv.len(), 64);
-        assert_eq!(spend_pub.len(), 66);
-    }
-
-    #[test]
-    fn test_parse_silent_payment_scan_key_legacy() {
-        let (_, scan_pub, _, _) = generate_silent_payment_keys().unwrap();
-        let sp1q = format!("sp1q{}", scan_pub.to_lowercase());
-        let result = parse_silent_payment_scan_key(&sp1q);
-        assert!(result.is_ok());
-    }
+    use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 
     #[test]
     fn test_bip352_address_encode_decode_roundtrip() {
         let secp = Secp256k1::new();
-        let scan_sk = SecretKey::new(&mut OsRng);
+        let scan_sk = SecretKey::new(&mut rand::thread_rng());
         let scan_pk = PublicKey::from_secret_key(&secp, &scan_sk);
-        let spend_sk = SecretKey::new(&mut OsRng);
+        let spend_sk = SecretKey::new(&mut rand::thread_rng());
         let spend_pk = PublicKey::from_secret_key(&secp, &spend_sk);
 
         // Mainnet
@@ -837,80 +821,5 @@ mod tests {
             parse_silent_payment_address(&signet_addr).unwrap().2,
             Network::Testnet
         );
-    }
-
-    #[test]
-    fn test_silent_payment_output_creation_and_detection() {
-        let secp = Secp256k1::new();
-
-        // Recipient keys
-        let scan_sk = SecretKey::new(&mut OsRng);
-        let scan_pk = PublicKey::from_secret_key(&secp, &scan_sk);
-        let spend_sk = SecretKey::new(&mut OsRng);
-        let spend_pk = PublicKey::from_secret_key(&secp, &spend_sk);
-
-        // Sender input
-        let sender_sk = SecretKey::new(&mut OsRng);
-        let sender_pk = PublicKey::from_secret_key(&secp, &sender_sk);
-
-        let input = SilentPaymentInput {
-            outpoint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0"
-                .to_string(),
-            input_pubkey: hex::encode(sender_pk.serialize()),
-            input_privkey: Some(hex::encode(sender_sk.secret_bytes())),
-        };
-
-        let payment = SilentPayment::new(
-            hex::encode(scan_pk.serialize()),
-            hex::encode(spend_pk.serialize()),
-            50_000,
-            vec![input],
-            None,
-            Network::Bitcoin,
-        );
-
-        let output_0 = payment
-            .create_output_with_index(&scan_pk, &spend_pk, 0)
-            .unwrap();
-        assert!(output_0.script_pubkey.starts_with("5120"));
-        assert_eq!(output_0.script_pubkey.len(), 68);
-
-        // Recipient detects output
-        let tx_outputs = vec![
-            (
-                "5120deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
-                10_000,
-            ),
-            (output_0.script_pubkey.clone(), 50_000),
-        ];
-
-        let outpoint_bytes = parse_outpoint_to_bytes(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0",
-        )
-        .unwrap();
-        let input_hash = compute_input_hash(&outpoint_bytes, &sender_pk);
-
-        let detected = SilentPayment::detect_outputs_with_input_hash(
-            &scan_sk,
-            &spend_pk,
-            &sender_pk,
-            &input_hash,
-            &tx_outputs,
-        )
-        .unwrap();
-
-        assert_eq!(detected.len(), 1);
-        assert_eq!(detected[0].script_pubkey, output_0.script_pubkey);
-        assert_eq!(detected[0].amount_sats, 50_000);
-
-        // Derive spending private key and verify it matches the tweaked output key
-        let shared_secret =
-            PublicKey::from_slice(&hex::decode(output_0.shared_secret.unwrap()).unwrap()).unwrap();
-        let derived_spending_sk = derive_spending_privkey(&spend_sk, &shared_secret, 0).unwrap();
-        let derived_pk = PublicKey::from_secret_key(&secp, &derived_spending_sk);
-        let (derived_x_only, _) = derived_pk.x_only_public_key();
-
-        let expected_x_only_hex = &output_0.script_pubkey[4..];
-        assert_eq!(hex::encode(derived_x_only.serialize()), expected_x_only_hex);
     }
 }

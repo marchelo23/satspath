@@ -431,7 +431,7 @@ mod tests {
     #[test]
     /// Verify that silent payment address validation.
     fn silent_payment_address_validation() {
-        use bech32::{u5, ToBase32};
+        use bech32::ToBase32;
 
         let key = hex::decode(VALID_PUBKEY).unwrap();
         let mut payload = vec![bech32::u5::try_from_u8(0).unwrap()];

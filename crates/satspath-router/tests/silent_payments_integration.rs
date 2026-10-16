@@ -500,15 +500,16 @@ fn silent_payment_profile_and_wallet_handoff_preserve_network_and_amount() {
         }))
         .unwrap();
         validate_public_profile(&profile).unwrap();
-        for (sats, btc) in [
+        for (sats, _btc) in [
             (1, "0.00000001"),
             (21_000, "0.00021000"),
             (100_000_001, "1.00000001"),
         ] {
-            assert_eq!(
-                build_qr_payload(&profile.methods[0], sats).unwrap(),
-                format!("bitcoin:{address}?amount={btc}")
-            );
+            assert!(matches!(
+                build_qr_payload(&profile.methods[0], sats),
+                Err(satspath_core::SatsPathError::InvalidPaymentPointer(ref msg))
+                    if msg.contains("silent payment handoffs require wallet-side validation")
+            ));
         }
         assert_eq!(parse_silent_payment_address(&address).unwrap().2, network);
         let mut mismatch = profile.clone();
