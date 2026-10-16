@@ -41,6 +41,9 @@ one JSON response on stdout. The host driver receives `action: send_onchain`,
 `OnchainReceipt` with `txid`, `destination`, `amount_sats`, `fee_sats`,
 `timestamp`. The independent checker receives `action: confirm_receive` plus
 `network`, `txid`, `destination`, `amount_sats` and returns those fields with a
-positive `confirmations` count. Each driver has a 30-second deadline and an
-8 KiB output limit. The test cannot attest independence from executable output
+positive `confirmations` count. The sending driver has a 30-second deadline;
+the receiving checker has up to 20 minutes for testnet confirmation. Both have
+an 8 KiB output limit. If the receiver times out **after broadcast**, inspect
+the txid and receiving wallet before any retry: rerunning the test could send
+a second payment. The test cannot attest independence from executable output
 alone: keep the receiver's transaction/UTXO evidence for manual verification.

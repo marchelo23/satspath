@@ -24,6 +24,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 const DRIVER_TIMEOUT: Duration = Duration::from_secs(30);
+const RECEIVER_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const MAX_RESPONSE_BYTES: u64 = 8192;
 
 #[derive(Deserialize)]
@@ -270,13 +271,14 @@ async fn https_onchain_wallet_receiver_confirms_payment() {
     let HandoffExecutionReceipt::Onchain(receipt) = receipt else {
         panic!("expected an on-chain receipt")
     };
-    let checked = invoke(
+    let checked = invoke_with_timeout(
         &config.receiving_wallet_checker,
         &json!({
             "action": "confirm_receive", "network": config.network,
             "txid": receipt.txid, "destination": receipt.destination,
             "amount_sats": receipt.amount_sats,
         }),
+        RECEIVER_TIMEOUT,
     )
     .await
     .expect("independent receiving wallet must be reachable");
