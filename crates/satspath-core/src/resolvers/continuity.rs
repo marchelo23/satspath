@@ -10,6 +10,10 @@ use crate::{Result, SatsPathError, SignedPaymentProfile};
 
 /// Atomically check and persist a fetched profile using the registry's update policy.
 /// A verified revocation is committed as a tombstone and then returned as an error.
+///
+/// `dir` holds the continuity database and is created if missing. Propagates
+/// profile-write and transition validation errors; storage failures return
+/// `RegistryError`, and JSON errors propagate as `JsonError`.
 pub(super) fn accept_profile(dir: &Path, signed: &SignedPaymentProfile) -> Result<()> {
     Registry::validate_profile_write(&signed.profile.alias, signed)?;
     let mut connection = open_store(dir)?;
@@ -46,6 +50,10 @@ pub(super) fn accept_profile(dir: &Path, signed: &SignedPaymentProfile) -> Resul
 }
 
 /// Check durable tombstones before any network error could trigger resolver fallback.
+///
+/// `alias` must be the canonical profile alias. Opens or creates the store in
+/// `dir`; an unknown or unrevoked alias succeeds. Revocations and storage failures
+/// return `RegistryError`; malformed stored profiles return `JsonError`.
 pub(super) fn check_revocation(dir: &Path, alias: &str) -> Result<()> {
     let connection = open_store(dir)?;
     let previous: Option<String> = connection
@@ -68,6 +76,9 @@ pub(super) fn check_revocation(dir: &Path, alias: &str) -> Result<()> {
 }
 
 /// Open the persistent store and configure a bounded wait for concurrent writers.
+/// Creates `dir` and the table if needed, with a five-second SQLite busy timeout.
+/// Filesystem and SQLite failures
+/// return `RegistryError`.
 fn open_store(dir: &Path) -> Result<Connection> {
     std::fs::create_dir_all(dir).map_err(|e| SatsPathError::RegistryError(e.to_string()))?;
     let connection =

@@ -13,6 +13,10 @@ use satspath_core::bip353::{
 };
 
 /// Resolve and print a BIP-353 DNS payment instruction with local DNSSEC validation by default.
+///
+/// `allow_insecure` uses DoH without DNSSEC validation for development. `json`
+/// selects JSON output; otherwise prints a human-readable preview. Resolution
+/// failures are printed and return `Ok(())`; JSON serialization errors propagate.
 pub async fn cmd_dns_resolve(name: &str, json: bool, allow_insecure: bool) -> Result<()> {
     let policy = if allow_insecure {
         DnssecPolicy::DevInsecure

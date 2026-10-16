@@ -15,6 +15,8 @@ use crate::config::AppState;
 use crate::handlers::transparency::transparency_log;
 use crate::types::{now, DnsResolveRequest, DnsResolveResponse};
 
+/// Build the registry, BIP-353, HTTP, and Nostr resolver chain in that order.
+/// Skips the registry if it cannot be opened. BIP-353 continuity is stored under `home`.
 pub(crate) fn resolver_chain(home: &std::path::Path) -> ChainResolver {
     use satspath_core::registry::Registry;
     let mut chain = ChainResolver::new();
@@ -206,6 +208,8 @@ pub(crate) fn resolve_v2_envelope(
 
 /// Resolve a BIP-353 DNS payment instruction using `HickoryDnssecTxtResolver` in `Strict` mode
 /// or `DohTxtResolver` when `allow_insecure_dns_for_dev` is explicitly enabled.
+/// Returns the resolution and parsed instruction on success; resolution and URI
+/// parsing failures become `DnsResolveResponse::Error` with the selected policy.
 pub(crate) async fn dns_resolve_response(body: DnsResolveRequest) -> DnsResolveResponse {
     let policy = if body.allow_insecure_dns_for_dev {
         DnssecPolicy::DevInsecure

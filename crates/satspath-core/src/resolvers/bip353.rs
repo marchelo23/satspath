@@ -131,7 +131,11 @@ pub struct DnssecZoneLink {
     pub parent_ds_rrsigs: Vec<RRSIG>,
 }
 
-/// Verify an `RRSIG` over an RRset using candidate authenticated `DNSKEY`s from `signer_zone`.
+/// Accept an RRset if any signature from `expected_signer` verifies with a trusted zone key.
+///
+/// `now` is Unix time in seconds; inception and expiration are inclusive.
+/// Missing records or signatures return `DnssecUnavailable`. If no eligible
+/// signature verifies, returns `NetworkError`, including for expired signatures.
 fn verify_rrset_signatures(
     owner_name: &Name,
     expected_signer: &Name,
@@ -187,6 +191,11 @@ fn verify_rrset_signatures(
 /// Cryptographically validate a complete DNSSEC trust chain from the root `TrustAnchor`
 /// across all zone delegations (`DNSKEY` -> `DS` -> `DNSKEY`) down to the leaf `TXT` RRset.
 ///
+/// `chain` must be ordered from the root to the leaf zone; `txt_owner` identifies
+/// the final RRset. `now` is Unix time in seconds. Returns matching TXT records
+/// with UTF-8 character-strings, TTLs in seconds, and `dnssec_validated = true`.
+/// This does not validate the TXT payload as a payment instruction.
+///
 /// Enforces:
 /// - Root `DNSKEY` membership in `trust_anchor` and self-signature verification.
 /// - Non-empty `DS` delegation records for every child zone, signed by the parent zone's `DNSKEY`.
@@ -195,8 +204,11 @@ fn verify_rrset_signatures(
 ///   for every `DNSKEY`, `DS`, and leaf `TXT` RRset.
 ///
 /// # Errors
-/// Returns [`SatsPathError::DnssecUnavailable`] if records or signatures are missing (unsigned zone),
-/// or [`SatsPathError::NetworkError`] if any cryptographic signature or `DS` hash is invalid.
+/// Returns [`SatsPathError::DnssecUnavailable`] for an empty chain, missing records
+/// or signatures, no usable zone keys, or no matching TXT records. Returns
+/// [`SatsPathError::NetworkError`] when no root key is anchored, no child key matches
+/// an authenticated `DS`, or no eligible signature verifies (including outside its
+/// validity window). Returns [`SatsPathError::Bip353`] for non-UTF-8 TXT data.
 pub fn verify_dnssec_zone_chain(
     trust_anchor: &TrustAnchor,
     chain: &[DnssecZoneLink],
@@ -468,6 +480,12 @@ impl HickoryDnssecTxtResolver {
 #[async_trait]
 impl DnsTxtResolver for HickoryDnssecTxtResolver {
     /// Query and cryptographically verify `TXT` records at `fqdn` using [`DnssecDnsHandle`].
+    ///
+    /// Treats names without a trailing dot as absolute. Returns UTF-8 TXT
+    /// character-strings, TTLs in seconds, and `dnssec_validated = true`.
+    /// Invalid names or non-UTF-8 data return `Bip353`. Missing signatures or
+    /// verifiable results return `DnssecUnavailable`; other lookup or validation
+    /// failures and non-success DNS response codes return `NetworkError`.
     async fn query_txt(&self, fqdn: &str) -> Result<Vec<DnsTxtRecord>> {
         let name_str = if fqdn.ends_with('.') {
             fqdn.to_string()
@@ -551,6 +569,10 @@ impl Bip353Resolver {
     }
 
     /// Construct a BIP-353 resolver backed by a custom [`DnsTxtResolver`].
+    ///
+    /// The backend must truthfully report DNSSEC validation; strict policy rejects
+    /// records marked unvalidated. Profile resolution stores continuity in
+    /// `.satspath` relative to the working directory unless overridden.
     pub fn with_dns_resolver(dns: Arc<dyn DnsTxtResolver + Send + Sync>) -> Self {
         Self {
             dnssec_required: true,
@@ -589,7 +611,13 @@ impl DnsTxtResolver for Bip353Resolver {
     }
 }
 
-/// Resolve a BIP-353 alias using the provided [`DnsTxtResolver`].
+/// Resolve a `₿`-prefixed alias and fetch its DNSSEC-authenticated `sp-profile`.
+///
+/// Returns `AliasNotFound` for unsupported or malformed aliases,
+/// `Bip353Unauthenticated` when no profile URL is present, and
+/// `OwnershipProofInvalid` when the fetched profile fails ownership verification.
+/// DNS, URI parsing, HTTP profile validation, and ownership-check errors propagate.
+/// Continuity and revocation enforcement are left to the caller.
 async fn resolve_alias_with(
     resolver: &(impl DnsTxtResolver + Sync + ?Sized),
     alias: &str,
@@ -626,6 +654,12 @@ async fn resolve_alias_with(
 #[async_trait]
 impl ProfileResolver for Bip353Resolver {
     /// Authenticate the DNS pointer and persist continuity before exposing a profile.
+    ///
+    /// Requires a `₿`-prefixed alias and an authenticated `sp-profile` URL.
+    /// Opens or creates the continuity store, checks stored revocations before DNS
+    /// lookup, and applies the registry update policy to the fetched profile.
+    /// A verified revocation is persisted before returning `RegistryError`.
+    /// Alias, DNS, profile validation, transition, and storage errors propagate.
     async fn resolve_alias(&self, alias: &str) -> Result<SignedPaymentProfile> {
         if !alias.starts_with('₿') {
             return Err(SatsPathError::AliasNotFound(alias.to_string()));

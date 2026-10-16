@@ -76,6 +76,9 @@ impl HttpResolver {
     ///
     /// Extracted so tests can pass a mock server URL directly without
     /// needing a real DNS entry for the test domain.
+    ///
+    /// Propagates fetch and validation errors from `fetch_verified_profile` and
+    /// returns `RegistryError` for a revoked profile. Does not persist continuity.
     pub async fn resolve_from_url(&self, url: &str) -> Result<SignedPaymentProfile> {
         let signed = self.fetch_verified_profile(url).await?;
         if signed.profile.revoked {
@@ -89,6 +92,17 @@ impl HttpResolver {
 
     /// Fetch authenticated public metadata, retaining revocations for continuity storage.
     /// Callers must reject revoked profiles before returning them to routing.
+    ///
+    /// Requires a public HTTPS URL, except for localhost or `127.0.0.1` in tests
+    /// or with `test-utils`. Reads at most 50 KiB, verifies the signature, and
+    /// checks expiry and public-profile fields, rejecting private material.
+    ///
+    /// Malformed URLs return `InvalidPaymentUri`; blocked endpoints return
+    /// `ValidationError`. HTTP 404 returns `AliasNotFound`; other unsuccessful
+    /// statuses, transport failures, and oversized bodies return `NetworkError`.
+    /// Invalid JSON returns `SerializationError`; a signature that does not verify
+    /// returns `InvalidSignature`. Signature parsing, expiry, canonical serialization,
+    /// and public-profile validation errors propagate.
     pub(crate) async fn fetch_verified_profile(&self, url: &str) -> Result<SignedPaymentProfile> {
         let is_test_build = cfg!(any(test, feature = "test-utils"));
         let parsed =

@@ -118,6 +118,13 @@ impl Registry {
         self.update_profile_for(&requested, signed)
     }
 
+    /// Validate and insert or replace a profile, then save the registry to disk.
+    ///
+    /// `requested_alias` must canonically match the profile alias. Applies
+    /// [`Self::validate_profile_write`] and `validate_profile_transition`,
+    /// propagating their errors. A missing entry is accepted as a first profile.
+    /// Serialization and I/O errors propagate; the in-memory entry has already
+    /// been replaced if saving fails.
     pub fn update_profile_for(
         &mut self,
         requested_alias: &str,
@@ -142,6 +149,15 @@ impl Registry {
 
     /// Enforce the registry's key, recovery, timestamp and sequence update policy.
     /// Legacy profiles may omit sequences until the first numbered update.
+    ///
+    /// `alias` is the canonical identifier bound by rotation or recovery proofs.
+    /// The incoming profile must already have passed `validate_profile_write`.
+    /// With no existing profile, rotation and recovery proofs are rejected.
+    ///
+    /// Returns `RegistryError` for revoked entries, older timestamps, or invalid
+    /// sequence progression, `UnauthorizedKeyReplacement` for an unproven key
+    /// change, and rotation or recovery errors for invalid proofs. Errors from
+    /// proof verification propagate. Does not persist the profile.
     pub(crate) fn validate_profile_transition(
         alias: &str,
         signed: &SignedPaymentProfile,

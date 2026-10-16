@@ -257,6 +257,10 @@ pub fn validated_bitcoin_record(records: &[DnsTxtRecord]) -> Result<(&DnsTxtReco
 ///
 /// Validates the DNSSEC trust chain locally against bundled ICANN root trust anchors
 /// using [`HickoryDnssecTxtResolver`]. Any unsigned or tampered zone fails closed.
+/// Accepts `₿user@domain` or `user@domain` and timestamps the result with the current
+/// UTC time. Without the `std` feature, returns [`SatsPathError::DnssecUnavailable`].
+/// Name, TXT lookup, payment-record validation, and DNSSEC errors propagate from
+/// [`resolve_bip353_with`].
 pub async fn resolve_bip353(name: &str) -> Result<Bip353Resolution> {
     #[cfg(feature = "std")]
     {
@@ -376,6 +380,11 @@ impl DohTxtResolver {
 
 #[async_trait]
 impl DnsTxtResolver for DohTxtResolver {
+    /// Fetch TXT answers over DoH, marking every returned record as unvalidated.
+    ///
+    /// Returns an empty list when no usable TXT answers are present. URL or IP
+    /// restrictions return `ValidationError`; DNS, transport, JSON parsing, and
+    /// response bodies over 64 KiB return `NetworkError`.
     async fn query_txt(&self, fqdn: &str) -> Result<Vec<DnsTxtRecord>> {
         let client = crate::ssrf::build_pinned_http_client(
             &self.endpoint,

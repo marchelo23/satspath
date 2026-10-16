@@ -207,6 +207,11 @@ fn is_private_v6(ip: Ipv6Addr) -> bool {
 /// disable HTTP redirects, and pin the `reqwest::Client` to the validated socket addresses
 /// to prevent TOCTOU DNS rebinding attacks.
 ///
+/// `allow_http` permits HTTP in addition to HTTPS; URL host and port restrictions
+/// still apply. `timeout` bounds requests made with the client, not the initial
+/// hostname lookup. Disables proxies. Pinning applies only to this URL's host;
+/// validate other destinations separately before using the client for them.
+///
 /// # Errors
 /// Returns [`SatsPathError::ValidationError`] if the URL or any resolved IP is blocked,
 /// or [`SatsPathError::NetworkError`] if DNS resolution or client construction fails.
