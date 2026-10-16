@@ -309,7 +309,20 @@ pub fn verify_bip353_ownership(
 
     let parsed = parse_bip321(&resolution.bitcoin_uri)?;
 
-    // A SatsPath profile pointer is sufficient linkage.
+    // If an sp-profile-hash commitment is present, it MUST match the SHA-256
+    // of the signed profile representation.
+    if let Some(expected_hash) = &parsed.sp_profile_hash {
+        use sha2::Digest;
+        let signed_hash = crate::crypto::signed_profile_hash(signed)?;
+        let profile_bytes = crate::crypto::canonical_profile_bytes(&signed.profile)?;
+        let profile_hash = hex::encode(sha2::Sha256::digest(&profile_bytes));
+        let expected = expected_hash.trim().to_ascii_lowercase();
+        if expected != signed_hash && expected != profile_hash {
+            return Ok(false);
+        }
+    }
+
+    // A SatsPath profile pointer is sufficient linkage once any hash commitment passes.
     if parsed.sp_profile.is_some() || parsed.sp_profile_hash.is_some() {
         return Ok(true);
     }
