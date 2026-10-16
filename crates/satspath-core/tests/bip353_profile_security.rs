@@ -68,7 +68,7 @@ async fn resolve_signed(
             ttl_seconds: Some(60),
         },
     );
-    let resolver = Bip353Resolver::with_dns_resolver(Arc::new(dns)).with_continuity_dir(dir);
+    let resolver = Bip353Resolver::with_dns_resolver(Arc::new(dns), dir);
     if check_fallback {
         ChainResolver::new()
             .push(resolver)
@@ -218,7 +218,7 @@ async fn revocation_survives_restart_and_blocks_fallback() {
     ));
     let empty_dns = MockDnsTxtResolver::new();
     let resolver =
-        Bip353Resolver::with_dns_resolver(Arc::new(empty_dns)).with_continuity_dir(dir.path());
+        Bip353Resolver::with_dns_resolver(Arc::new(empty_dns), dir.path());
     assert!(matches!(
         ChainResolver::new()
             .push(resolver)

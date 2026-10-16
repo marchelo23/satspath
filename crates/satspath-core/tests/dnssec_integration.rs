@@ -127,17 +127,51 @@ impl SignedDnssecFixture {
 
     /// Build a complete signed root-to-leaf chain for the supplied TXT payload.
     fn build(uri_payload: &str) -> Self {
-        Self::build_txt_records(
+        Self::build_at(uri_payload, 1_700_000_000)
+    }
+
+    /// Build a complete signed root-to-leaf chain for the supplied TXT payload at an explicit timestamp.
+    fn build_at(uri_payload: &str, now: u32) -> Self {
+        Self::build_txt_records_at(
             vec![TXT::new(vec![uri_payload.to_string()])],
             DigestType::SHA256,
+            now,
+        )
+    }
+
+    /// Build an expired signed root-to-leaf chain whose validity window expired before `now`.
+    fn build_expired(uri_payload: &str, now: u32) -> Self {
+        let inception = now.saturating_sub(7200);
+        let expiration = now.saturating_sub(3600);
+        Self::build_with_window(
+            vec![TXT::new(vec![uri_payload.to_string()])],
+            DigestType::SHA256,
+            now,
+            inception,
+            expiration,
         )
     }
 
     /// Sign arbitrary TXT bytes and delegation digests without using network services.
     fn build_txt_records(txts: Vec<TXT>, digest_type: DigestType) -> Self {
-        let now: u32 = 1_700_000_000;
-        let inception = now - 3600;
-        let expiration = now + 86400;
+        Self::build_txt_records_at(txts, digest_type, 1_700_000_000)
+    }
+
+    /// Sign arbitrary TXT bytes and delegation digests at an explicit timestamp.
+    fn build_txt_records_at(txts: Vec<TXT>, digest_type: DigestType, now: u32) -> Self {
+        let inception = now.saturating_sub(3600);
+        let expiration = now.saturating_add(86400);
+        Self::build_with_window(txts, digest_type, now, inception, expiration)
+    }
+
+    /// Sign arbitrary TXT bytes and delegation digests with an explicit validity window.
+    fn build_with_window(
+        txts: Vec<TXT>,
+        digest_type: DigestType,
+        now: u32,
+        inception: u32,
+        expiration: u32,
+    ) -> Self {
 
         // 1. Root zone (.)
         let root_name = Name::from_ascii(".").unwrap();
@@ -563,12 +597,8 @@ fn test_embedded_dnssec_zone_chain_valid_tampered_and_unsigned() {
 #[tokio::test]
 async fn test_in_process_hickory_dnssec_valid_bogus_and_unsigned() {
     let uri = "bitcoin:bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
-    // Build fixture with current wall-clock time so DnssecDnsHandle time check succeeds
-    let now = chrono::Utc::now().timestamp() as u32;
-    let mut fixture = SignedDnssecFixture::build(uri);
-    fixture.now = now;
-    // Re-build with current timestamp if needed: SignedDnssecFixture uses 1_700_000_000 by default,
-    // while Hickory's DnssecDnsHandle compares RRSIG inception/expiration against signature validity.
+    const FIXED_TEST_TIME: u32 = 1_700_000_000;
+    let fixture = SignedDnssecFixture::build_at(uri, FIXED_TEST_TIME);
     let server = InProcessAuthoritativeDnssecServer::from_fixture(&fixture);
     let resolver = HickoryDnssecTxtResolver::with_dns_handle(server, fixture.trust_anchor.clone());
 
@@ -577,7 +607,7 @@ async fn test_in_process_hickory_dnssec_valid_bogus_and_unsigned() {
         &resolver,
         "₿rodrigo@satspath.dev",
         DnssecPolicy::Strict,
-        now as i64,
+        FIXED_TEST_TIME as i64,
     )
     .await
     .expect("valid signed domain in fixture must resolve in Strict mode");
@@ -589,7 +619,7 @@ async fn test_in_process_hickory_dnssec_valid_bogus_and_unsigned() {
         &resolver,
         "₿bogus@satspath.dev",
         DnssecPolicy::Strict,
-        now as i64,
+        FIXED_TEST_TIME as i64,
     )
     .await
     .unwrap_err();
@@ -603,13 +633,21 @@ async fn test_in_process_hickory_dnssec_valid_bogus_and_unsigned() {
         &resolver,
         "₿unsigned@satspath.dev",
         DnssecPolicy::Strict,
-        now as i64,
+        FIXED_TEST_TIME as i64,
     )
     .await
     .unwrap_err();
     assert!(
         matches!(unsigned_err, SatsPathError::DnssecUnavailable),
         "expected DnssecUnavailable for unsigned domain, got: {unsigned_err:?}"
+    );
+
+    // 4. Expired RRSIG domain fails closed under Strict mode
+    let expired_fixture = SignedDnssecFixture::build_expired(uri, FIXED_TEST_TIME);
+    let expired_err = expired_fixture.verify_at(FIXED_TEST_TIME).unwrap_err();
+    assert!(
+        matches!(expired_err, SatsPathError::NetworkError(ref msg) if msg.contains("DNSSEC validation failed") || msg.contains("no valid RRSIG verified")),
+        "expected expired RRSIG to fail validation under Strict policy, got: {expired_err:?}"
     );
 }
 
@@ -671,13 +709,54 @@ async fn test_bip353_resolver_sp_profile_ownership_and_unauthenticated_fallback(
     );
     let continuity = tempfile::tempdir().unwrap();
     let resolver =
-        Bip353Resolver::with_dns_resolver(Arc::new(dns)).with_continuity_dir(continuity.path());
+        Bip353Resolver::with_dns_resolver(Arc::new(dns), continuity.path());
     let resolved_profile = resolver
         .resolve_alias("₿rodrigo@satspath.dev")
         .await
         .expect("sp-profile with valid signature and ownership must resolve");
     assert_eq!(resolved_profile.profile.alias, "rodrigo@satspath.dev");
     mock.assert_async().await;
+
+    // With matching sp-profile-hash, resolution succeeds
+    let profile_hash = satspath_core::signed_profile_hash(&signed).unwrap();
+    let uri_with_matching_hash = format!("bitcoin:{onchain_addr}?sp-profile={sp_profile_url}&sp-profile-hash={profile_hash}");
+    let mut dns_hash_match = MockDnsTxtResolver::new();
+    dns_hash_match.insert(
+        "rodrigo.user._bitcoin-payment.satspath.dev",
+        DnsTxtRecord {
+            strings: vec![uri_with_matching_hash],
+            dnssec_validated: true,
+            ttl_seconds: Some(600),
+        },
+    );
+    let resolver_hash_match = Bip353Resolver::with_dns_resolver(Arc::new(dns_hash_match), continuity.path());
+    let res_hash = resolver_hash_match
+        .resolve_alias("₿rodrigo@satspath.dev")
+        .await
+        .expect("matching sp-profile-hash must succeed");
+    assert_eq!(res_hash.profile.alias, "rodrigo@satspath.dev");
+
+    // With mismatched sp-profile-hash, resolution fails closed with OwnershipProofInvalid
+    let mismatched_hash = "0000000000000000000000000000000000000000000000000000000000000000";
+    let uri_with_mismatched_hash = format!("bitcoin:{onchain_addr}?sp-profile={sp_profile_url}&sp-profile-hash={mismatched_hash}");
+    let mut dns_hash_mismatch = MockDnsTxtResolver::new();
+    dns_hash_mismatch.insert(
+        "rodrigo.user._bitcoin-payment.satspath.dev",
+        DnsTxtRecord {
+            strings: vec![uri_with_mismatched_hash],
+            dnssec_validated: true,
+            ttl_seconds: Some(600),
+        },
+    );
+    let resolver_hash_mismatch = Bip353Resolver::with_dns_resolver(Arc::new(dns_hash_mismatch), continuity.path());
+    let mismatch_err = resolver_hash_mismatch
+        .resolve_alias("₿rodrigo@satspath.dev")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(mismatch_err, SatsPathError::OwnershipProofInvalid(_)),
+        "expected OwnershipProofInvalid for mismatched sp-profile-hash, got: {mismatch_err:?}"
+    );
 
     // Without sp-profile pointer, resolve_alias must return Bip353Unauthenticated (never a synthetic profile)
     let mut dns_no_profile = MockDnsTxtResolver::new();
@@ -689,8 +768,7 @@ async fn test_bip353_resolver_sp_profile_ownership_and_unauthenticated_fallback(
             ttl_seconds: Some(600),
         },
     );
-    let resolver_no_profile = Bip353Resolver::with_dns_resolver(Arc::new(dns_no_profile))
-        .with_continuity_dir(continuity.path());
+    let resolver_no_profile = Bip353Resolver::with_dns_resolver(Arc::new(dns_no_profile), continuity.path());
     let unauth_err = resolver_no_profile
         .resolve_alias("₿rodrigo@satspath.dev")
         .await

@@ -558,31 +558,34 @@ pub struct Bip353Resolver {
 impl Default for Bip353Resolver {
     /// Construct the default resolver with strict DNSSEC validation.
     fn default() -> Self {
-        Self::new()
+        Self::new(crate::default_data_dir())
     }
 }
 
 impl Bip353Resolver {
-    /// Construct a BIP-353 resolver backed by [`HickoryDnssecTxtResolver`].
-    pub fn new() -> Self {
-        Self::with_dns_resolver(Arc::new(HickoryDnssecTxtResolver::new()))
+    /// Construct a BIP-353 resolver backed by [`HickoryDnssecTxtResolver`] storing continuity
+    /// in the provided application data directory.
+    pub fn new(continuity_dir: impl Into<std::path::PathBuf>) -> Self {
+        Self::with_dns_resolver(Arc::new(HickoryDnssecTxtResolver::new()), continuity_dir)
     }
 
     /// Construct a BIP-353 resolver backed by a custom [`DnsTxtResolver`].
     ///
     /// The backend must truthfully report DNSSEC validation; strict policy rejects
     /// records marked unvalidated. Profile resolution stores continuity in
-    /// `.satspath` relative to the working directory unless overridden.
-    pub fn with_dns_resolver(dns: Arc<dyn DnsTxtResolver + Send + Sync>) -> Self {
+    /// `continuity_dir`.
+    pub fn with_dns_resolver(
+        dns: Arc<dyn DnsTxtResolver + Send + Sync>,
+        continuity_dir: impl Into<std::path::PathBuf>,
+    ) -> Self {
         Self {
             dnssec_required: true,
             dns,
-            continuity_dir: ".satspath".into(),
+            continuity_dir: continuity_dir.into(),
         }
     }
 
     /// Store TOFU pins, sequences and revocations in this application's data directory.
-    /// Defaults to `.satspath`; storage failures are terminal resolution errors.
     pub fn with_continuity_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.continuity_dir = dir.into();
         self
@@ -636,6 +639,21 @@ async fn resolve_alias_with(
         {
             let http_resolver = crate::resolvers::http::HttpResolver::new();
             let signed = http_resolver.fetch_verified_profile(&profile_url).await?;
+
+            // If sp-profile-hash is present in the URI, enforce that the fetched profile matches.
+            if let Some(expected_hash) = &parsed.sp_profile_hash {
+                use sha2::Digest;
+                let signed_hash = crate::crypto::signed_profile_hash(&signed)?;
+                let profile_bytes = crate::crypto::canonical_profile_bytes(&signed.profile)?;
+                let profile_hash = hex::encode(sha2::Sha256::digest(&profile_bytes));
+                let expected = expected_hash.trim().to_ascii_lowercase();
+                if expected != signed_hash && expected != profile_hash {
+                    return Err(SatsPathError::OwnershipProofInvalid(
+                        "BIP-353 sp-profile-hash mismatch against fetched profile".into(),
+                    ));
+                }
+            }
+
             if crate::bip353::verify_bip353_ownership(&resolution, &signed)? {
                 return Ok(signed);
             }
@@ -736,7 +754,8 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_aliases_remain_not_found() {
-        let resolver = Bip353Resolver::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let resolver = Bip353Resolver::new(tmp.path());
         for alias in [
             "alice@example.com",
             "₿@example.com",
