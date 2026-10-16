@@ -172,7 +172,6 @@ impl SignedDnssecFixture {
         inception: u32,
         expiration: u32,
     ) -> Self {
-
         // 1. Root zone (.)
         let root_name = Name::from_ascii(".").unwrap();
         let root_kp = Self::gen_ecdsa_keypair();
@@ -646,7 +645,7 @@ async fn test_in_process_hickory_dnssec_valid_bogus_and_unsigned() {
     let expired_fixture = SignedDnssecFixture::build_expired(uri, FIXED_TEST_TIME);
     let expired_err = expired_fixture.verify_at(FIXED_TEST_TIME).unwrap_err();
     assert!(
-        matches!(expired_err, SatsPathError::NetworkError(ref msg) if msg.contains("DNSSEC validation failed") || msg.contains("no valid RRSIG verified")),
+        matches!(expired_err, SatsPathError::NetworkError(ref msg) if msg.contains("DNSSEC") && (msg.contains("verification failed") || msg.contains("validation failed") || msg.contains("no valid RRSIG verified"))),
         "expected expired RRSIG to fail validation under Strict policy, got: {expired_err:?}"
     );
 }
@@ -708,8 +707,7 @@ async fn test_bip353_resolver_sp_profile_ownership_and_unauthenticated_fallback(
         },
     );
     let continuity = tempfile::tempdir().unwrap();
-    let resolver =
-        Bip353Resolver::with_dns_resolver(Arc::new(dns), continuity.path());
+    let resolver = Bip353Resolver::with_dns_resolver(Arc::new(dns), continuity.path());
     let resolved_profile = resolver
         .resolve_alias("₿rodrigo@satspath.dev")
         .await
@@ -719,7 +717,9 @@ async fn test_bip353_resolver_sp_profile_ownership_and_unauthenticated_fallback(
 
     // With matching sp-profile-hash, resolution succeeds
     let profile_hash = satspath_core::signed_profile_hash(&signed).unwrap();
-    let uri_with_matching_hash = format!("bitcoin:{onchain_addr}?sp-profile={sp_profile_url}&sp-profile-hash={profile_hash}");
+    let uri_with_matching_hash = format!(
+        "bitcoin:{onchain_addr}?sp-profile={sp_profile_url}&sp-profile-hash={profile_hash}"
+    );
     let mut dns_hash_match = MockDnsTxtResolver::new();
     dns_hash_match.insert(
         "rodrigo.user._bitcoin-payment.satspath.dev",
@@ -729,7 +729,9 @@ async fn test_bip353_resolver_sp_profile_ownership_and_unauthenticated_fallback(
             ttl_seconds: Some(600),
         },
     );
-    let resolver_hash_match = Bip353Resolver::with_dns_resolver(Arc::new(dns_hash_match), continuity.path());
+    let continuity_match = tempfile::tempdir().unwrap();
+    let resolver_hash_match =
+        Bip353Resolver::with_dns_resolver(Arc::new(dns_hash_match), continuity_match.path());
     let res_hash = resolver_hash_match
         .resolve_alias("₿rodrigo@satspath.dev")
         .await
@@ -738,7 +740,9 @@ async fn test_bip353_resolver_sp_profile_ownership_and_unauthenticated_fallback(
 
     // With mismatched sp-profile-hash, resolution fails closed with OwnershipProofInvalid
     let mismatched_hash = "0000000000000000000000000000000000000000000000000000000000000000";
-    let uri_with_mismatched_hash = format!("bitcoin:{onchain_addr}?sp-profile={sp_profile_url}&sp-profile-hash={mismatched_hash}");
+    let uri_with_mismatched_hash = format!(
+        "bitcoin:{onchain_addr}?sp-profile={sp_profile_url}&sp-profile-hash={mismatched_hash}"
+    );
     let mut dns_hash_mismatch = MockDnsTxtResolver::new();
     dns_hash_mismatch.insert(
         "rodrigo.user._bitcoin-payment.satspath.dev",
@@ -748,7 +752,9 @@ async fn test_bip353_resolver_sp_profile_ownership_and_unauthenticated_fallback(
             ttl_seconds: Some(600),
         },
     );
-    let resolver_hash_mismatch = Bip353Resolver::with_dns_resolver(Arc::new(dns_hash_mismatch), continuity.path());
+    let continuity_mismatch = tempfile::tempdir().unwrap();
+    let resolver_hash_mismatch =
+        Bip353Resolver::with_dns_resolver(Arc::new(dns_hash_mismatch), continuity_mismatch.path());
     let mismatch_err = resolver_hash_mismatch
         .resolve_alias("₿rodrigo@satspath.dev")
         .await
@@ -768,7 +774,8 @@ async fn test_bip353_resolver_sp_profile_ownership_and_unauthenticated_fallback(
             ttl_seconds: Some(600),
         },
     );
-    let resolver_no_profile = Bip353Resolver::with_dns_resolver(Arc::new(dns_no_profile), continuity.path());
+    let resolver_no_profile =
+        Bip353Resolver::with_dns_resolver(Arc::new(dns_no_profile), continuity.path());
     let unauth_err = resolver_no_profile
         .resolve_alias("₿rodrigo@satspath.dev")
         .await

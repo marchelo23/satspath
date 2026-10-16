@@ -454,7 +454,6 @@ impl HickoryDnssecTxtResolver {
     /// Construct a validating resolver wrapping an arbitrary [`DnsHandle`] and [`TrustAnchor`].
     ///
     /// Useful for deterministic in-process authoritative DNSSEC testing without external network calls.
-    #[cfg(any(test, feature = "test-utils"))]
     pub fn with_dns_handle<H, E>(handle: H, anchor: TrustAnchor) -> Self
     where
         H: DnsHandle<Error = E> + Send + Sync + Unpin + 'static,

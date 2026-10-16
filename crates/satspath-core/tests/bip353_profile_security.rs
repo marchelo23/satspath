@@ -217,8 +217,7 @@ async fn revocation_survives_restart_and_blocks_fallback() {
         Err(SatsPathError::RegistryError(_))
     ));
     let empty_dns = MockDnsTxtResolver::new();
-    let resolver =
-        Bip353Resolver::with_dns_resolver(Arc::new(empty_dns), dir.path());
+    let resolver = Bip353Resolver::with_dns_resolver(Arc::new(empty_dns), dir.path());
     assert!(matches!(
         ChainResolver::new()
             .push(resolver)
@@ -388,7 +387,7 @@ async fn profile_redirect_is_rejected_without_fetching_target() {
         .await;
     assert!(matches!(
         satspath_core::resolvers::http::HttpResolver::new()
-            .resolve_from_url(&format!("{}/profile", server.url())).await,
+            .resolve_from_mock_url(&format!("{}/profile", server.url())).await,
         Err(SatsPathError::NetworkError(message)) if message.contains("302")
     ));
     redirect.assert_async().await;

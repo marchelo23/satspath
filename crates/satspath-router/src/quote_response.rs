@@ -375,11 +375,13 @@ fn recipient_of(profile: &PaymentProfile, verified: bool) -> QuoteRecipient {
 /// resolvers. Registry lives in the always-gitignored `.satspath/`.
 fn default_resolver() -> ChainResolver {
     let mut chain = ChainResolver::new();
-    let data_dir = satspath_core::default_data_dir();
-    if let Ok(registry) = Registry::open(&data_dir) {
+    let reg_dir = std::env::var("SATSPATH_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(".satspath"));
+    if let Ok(registry) = Registry::open(&reg_dir) {
         chain = chain.push(registry);
     }
-    chain = chain.push(Bip353Resolver::new(data_dir));
+    chain = chain.push(Bip353Resolver::default());
     chain = chain.push(HttpResolver::new());
     chain.push(NostrResolver::new())
 }

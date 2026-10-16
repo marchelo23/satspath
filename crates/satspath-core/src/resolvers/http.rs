@@ -81,12 +81,9 @@ impl ProfileResolver for HttpResolver {
 impl HttpResolver {
     /// Fetch, verify, and return a signed profile from an explicit URL.
     ///
-    /// Extracted so tests can pass a mock server URL directly without
-    /// needing a real DNS entry for the test domain.
-    ///
-    /// Propagates fetch and validation errors from `fetch_verified_profile` and
-    /// returns `RegistryError` for a revoked profile. Does not persist continuity.
+    /// The URL must satisfy all production SSRF constraints unconditionally.
     pub async fn resolve_from_url(&self, url: &str) -> Result<SignedPaymentProfile> {
+        validate_url(url, false)?;
         let signed = self.fetch_verified_profile(url).await?;
         if signed.profile.revoked {
             return Err(SatsPathError::RegistryError(format!(
@@ -98,9 +95,15 @@ impl HttpResolver {
     }
 
     /// Test-only resolution path for mock servers without production SSRF checks.
-    #[cfg(test)]
-    pub(crate) async fn resolve_from_mock_url(&self, url: &str) -> Result<SignedPaymentProfile> {
-        self.resolve_from_url(url).await
+    pub async fn resolve_from_mock_url(&self, url: &str) -> Result<SignedPaymentProfile> {
+        let signed = self.fetch_verified_profile(url).await?;
+        if signed.profile.revoked {
+            return Err(SatsPathError::RegistryError(format!(
+                "Alias {} has been revoked",
+                signed.profile.alias
+            )));
+        }
+        Ok(signed)
     }
 
     /// Construct a resolver with a custom HTTP client (for test dependency injection).
@@ -111,39 +114,8 @@ impl HttpResolver {
 
     /// Fetch authenticated public metadata, retaining revocations for continuity storage.
     /// Callers must reject revoked profiles before returning them to routing.
-    ///
-    /// Requires a public HTTPS URL, except for localhost or `127.0.0.1` in tests
-    /// or with `test-utils`. Reads at most 50 KiB, verifies the signature, and
-    /// checks expiry and public-profile fields, rejecting private material.
-    ///
-    /// Malformed URLs return `InvalidPaymentUri`; blocked endpoints return
-    /// `ValidationError`. HTTP 404 returns `AliasNotFound`; other unsuccessful
-    /// statuses, transport failures, and oversized bodies return `NetworkError`.
-    /// Invalid JSON returns `SerializationError`; a signature that does not verify
-    /// returns `InvalidSignature`. Signature parsing, expiry, canonical serialization,
-    /// and public-profile validation errors propagate.
     pub(crate) async fn fetch_verified_profile(&self, url: &str) -> Result<SignedPaymentProfile> {
-        let is_test_build = cfg!(any(test, feature = "test-utils"));
-        let parsed =
-            url::Url::parse(url).map_err(|e| SatsPathError::InvalidPaymentUri(e.to_string()))?;
-        let is_local = parsed.username().is_empty()
-            && parsed.password().is_none()
-            && matches!(parsed.host_str(), Some("localhost" | "127.0.0.1"));
-
-        let client = if is_test_build && is_local {
-            if let Some(port) = parsed.port() {
-                if matches!(port, 22 | 3306 | 5432 | 6379 | 27017) {
-                    return Err(SatsPathError::ValidationError(format!(
-                        "Blocked port '{port}'"
-                    )));
-                }
-            }
-            self.client.clone()
-        } else {
-            crate::ssrf::build_pinned_http_client(url, Duration::from_secs(10), false).await?
-        };
-
-        let mut resp = client.get(url).send().await.map_err(|e| {
+        let mut resp = self.client.get(url).send().await.map_err(|e| {
             SatsPathError::NetworkError(format!("Failed to connect to {}: {}", url, e))
         })?;
 

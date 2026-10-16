@@ -45,7 +45,10 @@ use satspath_core::registry::Registry;
 use std::path::PathBuf;
 
 pub(crate) fn satspath_dir() -> PathBuf {
-    satspath_core::default_data_dir()
+    if let Ok(dir) = std::env::var("SATSPATH_DIR") {
+        return PathBuf::from(dir);
+    }
+    PathBuf::from(".satspath")
 }
 
 pub(crate) fn open_registry() -> Result<Registry> {
