@@ -107,6 +107,7 @@ fn sign_rrset(
 struct SignedDnssecFixture {
     trust_anchor: TrustAnchor,
     chain: Vec<DnssecZoneLink>,
+    zone_keypairs: Vec<KeyPair<Private>>,
     txt_owner: Name,
     txt_records: Vec<Record>,
     txt_rrsigs: Vec<RRSIG>,
@@ -126,6 +127,14 @@ impl SignedDnssecFixture {
 
     /// Build a complete signed root-to-leaf chain for the supplied TXT payload.
     fn build(uri_payload: &str) -> Self {
+        Self::build_txt_records(
+            vec![TXT::new(vec![uri_payload.to_string()])],
+            DigestType::SHA256,
+        )
+    }
+
+    /// Sign arbitrary TXT bytes and delegation digests without using network services.
+    fn build_txt_records(txts: Vec<TXT>, digest_type: DigestType) -> Self {
         let now: u32 = 1_700_000_000;
         let inception = now - 3600;
         let expiration = now + 86400;
@@ -175,12 +184,12 @@ impl SignedDnssecFixture {
         );
 
         let tld_ds_digest = tld_dnskey
-            .to_digest(&tld_name, DigestType::SHA256)
+            .to_digest(&tld_name, digest_type)
             .expect("tld digest");
         let tld_ds = DS::new(
             tld_dnskey.calculate_key_tag().unwrap(),
             Algorithm::ECDSAP256SHA256,
-            DigestType::SHA256,
+            digest_type,
             tld_ds_digest.as_ref().to_vec(),
         );
         let tld_ds_rec = Record::from_rdata(
@@ -220,12 +229,12 @@ impl SignedDnssecFixture {
         );
 
         let domain_ds_digest = domain_dnskey
-            .to_digest(&domain_name, DigestType::SHA256)
+            .to_digest(&domain_name, digest_type)
             .expect("domain digest");
         let domain_ds = DS::new(
             domain_dnskey.calculate_key_tag().unwrap(),
             Algorithm::ECDSAP256SHA256,
-            DigestType::SHA256,
+            digest_type,
             domain_ds_digest.as_ref().to_vec(),
         );
         let domain_ds_rec = Record::from_rdata(
@@ -246,16 +255,15 @@ impl SignedDnssecFixture {
 
         // 4. Leaf TXT record (rodrigo.user._bitcoin-payment.satspath.dev.)
         let txt_owner = Name::from_ascii("rodrigo.user._bitcoin-payment.satspath.dev.").unwrap();
-        let txt_rec = Record::from_rdata(
-            txt_owner.clone(),
-            1800,
-            RData::TXT(TXT::new(vec![uri_payload.to_string()])),
-        );
+        let txt_records: Vec<_> = txts
+            .into_iter()
+            .map(|txt| Record::from_rdata(txt_owner.clone(), 1800, RData::TXT(txt)))
+            .collect();
         let (txt_rrsig, txt_rrsig_rec) = sign_rrset(
             &txt_owner,
             &domain_name,
             RecordType::TXT,
-            std::slice::from_ref(&txt_rec),
+            &txt_records,
             &domain_kp,
             &domain_dnskey,
             inception,
@@ -289,12 +297,25 @@ impl SignedDnssecFixture {
         Self {
             trust_anchor,
             chain,
+            zone_keypairs: vec![root_kp, tld_kp, domain_kp],
             txt_owner,
-            txt_records: vec![txt_rec],
+            txt_records,
             txt_rrsigs: vec![txt_rrsig],
             txt_rrsig_records: vec![txt_rrsig_rec],
             now,
         }
+    }
+
+    /// Validate this fixture at an explicit time, independent of the wall clock.
+    fn verify_at(&self, now: u32) -> satspath_core::Result<Vec<DnsTxtRecord>> {
+        verify_dnssec_zone_chain(
+            &self.trust_anchor,
+            &self.chain,
+            &self.txt_owner,
+            &self.txt_records,
+            &self.txt_rrsigs,
+            now,
+        )
     }
 }
 
@@ -679,6 +700,228 @@ async fn test_bip353_resolver_sp_profile_ownership_and_unauthenticated_fallback(
     // ChainResolver must also surface Bip353Unauthenticated or AliasNotFound cleanly without synthetic keys
     let chain = ChainResolver::new().push(resolver_no_profile);
     assert!(chain.resolve_alias("₿rodrigo@satspath.dev").await.is_err());
+}
+
+/// Each signature window includes both endpoints and excludes adjacent seconds.
+#[test]
+fn signature_validity_window_boundaries() {
+    let fixture = SignedDnssecFixture::build("bitcoin:?lno=offer");
+    let inception = fixture.txt_rrsigs[0].sig_inception();
+    let expiration = fixture.txt_rrsigs[0].sig_expiration();
+    for now in [inception, fixture.now, expiration] {
+        assert!(fixture.verify_at(now).is_ok(), "valid time: {now}");
+    }
+    for now in [inception - 1, expiration + 1] {
+        assert!(matches!(
+            fixture.verify_at(now),
+            Err(SatsPathError::NetworkError(_))
+        ));
+    }
+}
+
+/// No zone may omit its DNSKEY RRset, self-signature, or authenticated delegation.
+#[test]
+fn missing_authentication_at_every_zone_fails_closed() {
+    let mut fixture = SignedDnssecFixture::build("bitcoin:?lno=offer");
+    let original = fixture.chain.clone();
+    for zone in 0..original.len() {
+        for component in ["dnskeys", "dnskey signatures", "ds", "ds signatures"] {
+            if zone == 0 && component.starts_with("ds") {
+                continue;
+            }
+            fixture.chain = original.clone();
+            let link = &mut fixture.chain[zone];
+            match component {
+                "dnskeys" => link.dnskey_records.clear(),
+                "dnskey signatures" => link.dnskey_rrsigs.clear(),
+                "ds" => link.parent_ds_records.clear(),
+                "ds signatures" => link.parent_ds_rrsigs.clear(),
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(
+                    fixture.verify_at(fixture.now),
+                    Err(SatsPathError::DnssecUnavailable)
+                ),
+                "zone {zone} missing {component} must fail closed"
+            );
+        }
+    }
+}
+
+/// An empty chain or missing leaf data cannot authenticate a TXT answer.
+#[test]
+fn missing_chain_or_leaf_records_fails_closed() {
+    for missing in ["chain", "records", "signatures"] {
+        let mut fixture = SignedDnssecFixture::build("bitcoin:?lno=offer");
+        match missing {
+            "chain" => fixture.chain.clear(),
+            "records" => fixture.txt_records.clear(),
+            "signatures" => fixture.txt_rrsigs.clear(),
+            _ => unreachable!(),
+        }
+        assert!(matches!(
+            fixture.verify_at(fixture.now),
+            Err(SatsPathError::DnssecUnavailable)
+        ));
+    }
+}
+
+/// A self-consistent chain is insufficient unless the root key is trusted.
+#[test]
+fn untrusted_root_is_rejected() {
+    let mut fixture = SignedDnssecFixture::build("bitcoin:?lno=offer");
+    fixture.trust_anchor = TrustAnchor::new();
+    assert!(matches!(
+        fixture.verify_at(fixture.now),
+        Err(SatsPathError::NetworkError(message)) if message.contains("root DNSKEY")
+    ));
+}
+
+/// A child key must match the authenticated DS before its self-signature is trusted.
+#[test]
+fn substituted_child_dnskey_is_rejected_at_each_delegation() {
+    for zone in [1, 2] {
+        let mut fixture = SignedDnssecFixture::build("bitcoin:?lno=offer");
+        let replacement = SignedDnssecFixture::gen_ecdsa_keypair()
+            .to_dnskey(Algorithm::ECDSAP256SHA256)
+            .unwrap();
+        fixture.chain[zone].dnskey_records[0]
+            .set_data(Some(RData::DNSSEC(DNSSECRData::DNSKEY(replacement))));
+        assert!(matches!(
+            fixture.verify_at(fixture.now),
+            Err(SatsPathError::NetworkError(message)) if message.contains("matches parent DS")
+        ));
+    }
+}
+
+/// A correctly signed DS RRset still fails if its digest does not cover the child key.
+#[test]
+fn authenticated_but_mismatched_ds_digest_is_rejected() {
+    for zone in [1, 2] {
+        let mut fixture = SignedDnssecFixture::build("bitcoin:?lno=offer");
+        let record = &mut fixture.chain[zone].parent_ds_records[0];
+        let Some(RData::DNSSEC(DNSSECRData::DS(ds))) = record.data() else {
+            panic!("fixture must contain a DS record");
+        };
+        let mut digest = ds.digest().to_vec();
+        digest[0] ^= 0xff;
+        let wrong_ds = DS::new(ds.key_tag(), ds.algorithm(), ds.digest_type(), digest);
+        record.set_data(Some(RData::DNSSEC(DNSSECRData::DS(wrong_ds))));
+
+        let parent = &fixture.chain[zone - 1];
+        let Some(RData::DNSSEC(DNSSECRData::DNSKEY(parent_key))) = parent.dnskey_records[0].data()
+        else {
+            panic!("fixture must contain a parent DNSKEY");
+        };
+        let child = &fixture.chain[zone];
+        let (signature, _) = sign_rrset(
+            &child.zone_name,
+            &parent.zone_name,
+            RecordType::DS,
+            &child.parent_ds_records,
+            &fixture.zone_keypairs[zone - 1],
+            parent_key,
+            fixture.now - 3600,
+            fixture.now + 86400,
+        );
+        fixture.chain[zone].parent_ds_rrsigs = vec![signature];
+        assert!(matches!(
+            fixture.verify_at(fixture.now),
+            Err(SatsPathError::NetworkError(message)) if message.contains("matches parent DS")
+        ));
+    }
+}
+
+/// Preserve metadata while corrupting the cryptographic proof itself.
+fn corrupt_signature(sig: &RRSIG) -> RRSIG {
+    let mut bytes = sig.sig().to_vec();
+    bytes[0] ^= 0xff;
+    RRSIG::new(
+        sig.type_covered(),
+        sig.algorithm(),
+        sig.num_labels(),
+        sig.original_ttl(),
+        sig.sig_expiration(),
+        sig.sig_inception(),
+        sig.key_tag(),
+        sig.signer_name().clone(),
+        bytes,
+    )
+}
+
+/// Corruption at any DNSKEY or DS link must not be masked by a valid leaf signature.
+#[test]
+fn corrupt_signatures_at_every_zone_fail_closed() {
+    for zone in 0..3 {
+        for delegation in [false, true] {
+            if zone == 0 && delegation {
+                continue;
+            }
+            let mut fixture = SignedDnssecFixture::build("bitcoin:?lno=offer");
+            let signatures = if delegation {
+                &mut fixture.chain[zone].parent_ds_rrsigs
+            } else {
+                &mut fixture.chain[zone].dnskey_rrsigs
+            };
+            signatures[0] = corrupt_signature(&signatures[0]);
+            assert!(matches!(
+                fixture.verify_at(fixture.now),
+                Err(SatsPathError::NetworkError(_))
+            ));
+        }
+    }
+}
+
+/// During rollover, a bad candidate must not hide another valid signature.
+#[test]
+fn valid_signature_after_invalid_candidate_is_accepted() {
+    let mut fixture = SignedDnssecFixture::build("bitcoin:?lno=offer");
+    for link in &mut fixture.chain {
+        link.dnskey_rrsigs
+            .insert(0, corrupt_signature(&link.dnskey_rrsigs[0]));
+        if !link.parent_ds_rrsigs.is_empty() {
+            link.parent_ds_rrsigs
+                .insert(0, corrupt_signature(&link.parent_ds_rrsigs[0]));
+        }
+    }
+    fixture
+        .txt_rrsigs
+        .insert(0, corrupt_signature(&fixture.txt_rrsigs[0]));
+    assert!(fixture.verify_at(fixture.now).is_ok());
+}
+
+/// SHA-384 delegations must work as well as the fixture's default SHA-256 digests.
+#[test]
+fn sha384_delegations_preserve_txt_chunks_records_and_ttls() {
+    let fixture = SignedDnssecFixture::build_txt_records(
+        vec![
+            TXT::new(vec!["bit".into(), "coin:?lno=".into(), "offer".into()]),
+            TXT::new(vec!["unrelated TXT record".into()]),
+        ],
+        DigestType::SHA384,
+    );
+    let records = fixture.verify_at(fixture.now).unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].strings, ["bit", "coin:?lno=", "offer"]);
+    assert_eq!(records[0].reconstruct(), "bitcoin:?lno=offer");
+    assert_eq!(records[1].reconstruct(), "unrelated TXT record");
+    assert!(records
+        .iter()
+        .all(|record| record.dnssec_validated && record.ttl_seconds == Some(1800)));
+}
+
+/// DNSSEC authentication does not make binary TXT data valid UTF-8.
+#[test]
+fn signed_non_utf8_txt_is_rejected() {
+    let fixture = SignedDnssecFixture::build_txt_records(
+        vec![TXT::from_bytes(vec![b"bitcoin:", &[0xff]])],
+        DigestType::SHA256,
+    );
+    assert!(matches!(
+        fixture.verify_at(fixture.now),
+        Err(SatsPathError::Bip353(message)) if message.contains("UTF-8")
+    ));
 }
 
 // ─── Optional Live Network DNSSEC Smoke Tests (Ignored in Offline CI) ───────────

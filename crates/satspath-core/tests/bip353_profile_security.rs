@@ -242,3 +242,155 @@ async fn continuity_storage_failure_is_terminal() {
         Err(SatsPathError::RegistryError(_))
     ));
 }
+
+/// A higher sequence cannot roll timestamps back, and rejection must not consume it.
+#[tokio::test]
+async fn stale_timestamp_does_not_advance_the_pin() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = generate_identity_keypair();
+    let initial = sign_profile(profile(&key, Some(1)), &key.secret_key).unwrap();
+    resolve_signed(&initial, dir.path(), "₿alice@example.com", false)
+        .await
+        .unwrap();
+    let mut stale = profile(&key, Some(2));
+    stale.updated_at -= 1;
+    let stale = sign_profile(stale, &key.secret_key).unwrap();
+    assert!(matches!(
+        resolve_signed(&stale, dir.path(), "₿alice@example.com", true).await,
+        Err(SatsPathError::RegistryError(message)) if message.contains("older")
+    ));
+    let next = sign_profile(profile(&key, Some(2)), &key.secret_key).unwrap();
+    let accepted = resolve_signed(&next, dir.path(), "₿alice@example.com", false)
+        .await
+        .unwrap();
+    assert_eq!(accepted.signature, next.signature);
+}
+
+/// Tampering with a revocation must neither persist a tombstone nor block a valid update.
+#[tokio::test]
+async fn unauthenticated_revocation_cannot_poison_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = generate_identity_keypair();
+    let initial = sign_profile(profile(&key, Some(1)), &key.secret_key).unwrap();
+    resolve_signed(&initial, dir.path(), "₿alice@example.com", false)
+        .await
+        .unwrap();
+    let mut forged = initial.clone();
+    forged.profile.revoked = true;
+    forged.profile.sequence = Some(2);
+    assert!(matches!(
+        resolve_signed(&forged, dir.path(), "₿alice@example.com", true).await,
+        Err(SatsPathError::InvalidSignature)
+    ));
+    let next = sign_profile(profile(&key, Some(2)), &key.secret_key).unwrap();
+    resolve_signed(&next, dir.path(), "₿alice@example.com", false)
+        .await
+        .unwrap();
+}
+
+/// A valid signature for someone else's alias does not establish a first-use pin.
+#[tokio::test]
+async fn wrong_alias_profile_is_rejected_before_pinning() {
+    let dir = tempfile::tempdir().unwrap();
+    let attacker = generate_identity_keypair();
+    let mut wrong_alias = profile(&attacker, Some(1));
+    wrong_alias.alias = "mallory@example.com".into();
+    let wrong_alias = sign_profile(wrong_alias, &attacker.secret_key).unwrap();
+    assert!(matches!(
+        resolve_signed(&wrong_alias, dir.path(), "₿alice@example.com", true).await,
+        Err(SatsPathError::OwnershipProofInvalid(_))
+    ));
+    let owner = generate_identity_keypair();
+    let genuine = sign_profile(profile(&owner, Some(1)), &owner.secret_key).unwrap();
+    resolve_signed(&genuine, dir.path(), "₿alice@example.com", false)
+        .await
+        .unwrap();
+}
+
+/// Even valid rotation signatures must bind the expected identity and counter.
+#[tokio::test]
+async fn signed_rotation_must_bind_alias_sequence_and_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = generate_identity_keypair();
+    let new = generate_identity_keypair();
+    let initial = sign_profile(profile(&old, Some(4)), &old.secret_key).unwrap();
+    resolve_signed(&initial, dir.path(), "₿alice@example.com", false)
+        .await
+        .unwrap();
+    for (alias, sequence, history) in [
+        ("mallory@example.com", 5, "previous-event"),
+        ("alice@example.com", 6, "previous-event"),
+        ("alice@example.com", 5, ""),
+    ] {
+        let mut metadata = profile(&new, Some(sequence));
+        metadata.rotation = Some(
+            KeyRotation::create(
+                satspath_core::identifier_hash(alias),
+                initial.profile.identity_pubkey.clone(),
+                &old.secret_key,
+                metadata.identity_pubkey.clone(),
+                &new.secret_key,
+                history.into(),
+                sequence,
+            )
+            .unwrap(),
+        );
+        let signed = sign_profile(metadata, &new.secret_key).unwrap();
+        assert!(matches!(
+            resolve_signed(&signed, dir.path(), "₿alice@example.com", true).await,
+            Err(SatsPathError::InvalidRotation(_))
+        ));
+    }
+    // All rejected replacements leave the original key eligible to update.
+    let next = sign_profile(profile(&old, Some(5)), &old.secret_key).unwrap();
+    resolve_signed(&next, dir.path(), "₿alice@example.com", false)
+        .await
+        .unwrap();
+}
+
+/// A revoked identity cannot be introduced as a first-use profile and later revived.
+#[tokio::test]
+async fn first_seen_revocation_is_a_durable_tombstone() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = generate_identity_keypair();
+    let mut revoked = profile(&key, Some(1));
+    revoked.revoked = true;
+    let revoked = sign_profile(revoked, &key.secret_key).unwrap();
+    assert!(matches!(
+        resolve_signed(&revoked, dir.path(), "₿alice@example.com", true).await,
+        Err(SatsPathError::RegistryError(message)) if message.contains("revoked")
+    ));
+    let revived = sign_profile(profile(&key, Some(2)), &key.secret_key).unwrap();
+    assert!(matches!(
+        resolve_signed(&revived, dir.path(), "₿alice@example.com", true).await,
+        Err(SatsPathError::RegistryError(message)) if message.contains("revoked")
+    ));
+}
+
+/// The profile fetch path must never follow a redirect, even to a valid profile.
+#[tokio::test]
+async fn profile_redirect_is_rejected_without_fetching_target() {
+    let mut server = mockito::Server::new_async().await;
+    let key = generate_identity_keypair();
+    let signed = sign_profile(profile(&key, Some(1)), &key.secret_key).unwrap();
+    let target = server
+        .mock("GET", "/target")
+        .with_status(200)
+        .with_body(serde_json::to_string(&signed).unwrap())
+        .expect(0)
+        .create_async()
+        .await;
+    let redirect = server
+        .mock("GET", "/profile")
+        .with_status(302)
+        .with_header("location", &format!("{}/target", server.url()))
+        .create_async()
+        .await;
+    assert!(matches!(
+        satspath_core::resolvers::http::HttpResolver::new()
+            .resolve_from_url(&format!("{}/profile", server.url())).await,
+        Err(SatsPathError::NetworkError(message)) if message.contains("302")
+    ));
+    redirect.assert_async().await;
+    target.assert_async().await;
+}
