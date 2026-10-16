@@ -16,6 +16,12 @@ public keys, and input tweak points are retained.
 Tests cover the router's public operations. They do not claim to validate wallet
 ECDH computation, secret-key aggregation, label-secret derivation, or signing.
 
+This coverage is partial progress toward [issue #154](https://github.com/satspath/satspath/issues/154).
+The issue remains incomplete: passing these public projections does not establish
+full official-vector conformance or wallet interoperability. Silent Payments stays
+`EXPERIMENTAL` in both README capability entries until the remaining requirements
+are verified with a host wallet.
+
 The official final-point-at-infinity case supplies an all-zero x-only output key.
 The router skips that invalid curve point and returns no detected outputs.
 The tests also assert that its aggregate input point is at infinity.

@@ -41,6 +41,7 @@ struct Recipient {
     scan_pub_key: PublicKey,
     spend_pub_key: PublicKey,
 }
+/// Default a vector recipient's omitted output count to one.
 fn one() -> usize {
     1
 }
@@ -101,6 +102,7 @@ struct VectorScriptPubKey {
     hex: String,
 }
 
+/// Convert a vector's public transaction fields into a router input descriptor.
 fn to_prevout_input(v: &VectorVin) -> Bip352PrevoutInput {
     Bip352PrevoutInput {
         txid: v.txid.clone(),
@@ -111,6 +113,8 @@ fn to_prevout_input(v: &VectorVin) -> Bip352PrevoutInput {
     }
 }
 
+/// Check eligible keys, recipient addresses, output keys, and the sender limit
+/// across all 28 public vector groups using supplied host-wallet ECDH points.
 #[test]
 fn official_bip352_public_sending_vectors() {
     let groups: Vec<TestGroup> = serde_json::from_str(VECTORS_JSON).unwrap();
@@ -166,6 +170,8 @@ fn official_bip352_public_sending_vectors() {
     }
 }
 
+/// Check aggregate keys, tweak points, addresses, and detected output keys across
+/// all 28 public vector groups, including the point-at-infinity case.
 #[test]
 fn official_bip352_public_receiving_vectors() {
     let groups: Vec<TestGroup> = serde_json::from_str(VECTORS_JSON).unwrap();

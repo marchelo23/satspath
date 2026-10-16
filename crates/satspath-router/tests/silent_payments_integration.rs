@@ -17,6 +17,7 @@ use satspath_router::{
     Bip352ScanKeys, BIP0352_TAG_INPUTS, BIP0352_TAG_SHARED_SECRET,
 };
 
+/// Load the first public receiving vector for wallet-boundary regression tests.
 fn fixture() -> (
     Vec<Bip352PrevoutInput>,
     Bip352ScanKeys,
@@ -26,6 +27,8 @@ fn fixture() -> (
     fixture_group(0)
 }
 
+/// Load a group's first receiving case as inputs, public keys, an ECDH point,
+/// and output keys; omit labels because these regressions use unlabeled groups.
 fn fixture_group(
     index: usize,
 ) -> (
@@ -67,6 +70,8 @@ fn fixture_group(
     )
 }
 
+/// Require the recipient network to match even without eligible inputs, and
+/// confirm that generated outputs can be detected on each supported network.
 #[test]
 fn network_context_is_enforced_before_generating_outputs() {
     let (inputs, keys, shared, _) = fixture();
@@ -124,6 +129,7 @@ fn network_context_is_enforced_before_generating_outputs() {
     }
 }
 
+/// Reject malformed output hex and lengths before input shortcuts.
 #[test]
 fn scanner_rejects_every_malformed_output_even_without_eligible_inputs() {
     let (inputs, keys, shared, valid) = fixture();
@@ -143,6 +149,8 @@ fn scanner_rejects_every_malformed_output_even_without_eligible_inputs() {
     }
 }
 
+/// Skip invalid 32-byte curve points while retaining valid output matches,
+/// including when candidate sets or eligible input sets have no matches.
 #[test]
 fn scanner_skips_invalid_curve_points_and_detects_valid_outputs() {
     let (inputs, keys, shared, valid) = fixture_group(10);
@@ -175,12 +183,15 @@ fn scanner_skips_invalid_curve_points_and_detects_valid_outputs() {
     .is_empty());
 }
 
+/// Build a public P2WPKH input, optionally nested in P2SH, with matching hashes.
 fn witness_input(nested: bool) -> Bip352PrevoutInput {
     let (_, keys, _, _) = fixture();
     let pk_bytes = keys.scan_pubkey.serialize();
     witness_input_with_key(nested, &pk_bytes)
 }
 
+/// Build a witness input whose native or nested script hashes bind the supplied
+/// key bytes, including ineligible encodings used by negative tests.
 fn witness_input_with_key(nested: bool, pk_bytes: &[u8]) -> Bip352PrevoutInput {
     let pkh = hash160::Hash::hash(pk_bytes);
     let redeem = format!("0014{pkh}");
@@ -202,6 +213,8 @@ fn witness_input_with_key(nested: bool, pk_bytes: &[u8]) -> Bip352PrevoutInput {
     }
 }
 
+/// Enforce witness and redeem-script hash bindings and reject malformed witnesses
+/// and uncompressed witness keys that do not match the bound public-key hash.
 #[test]
 fn witness_keys_must_match_both_hash_bindings() {
     let (_, keys, shared, outputs) = fixture();
@@ -261,6 +274,8 @@ fn witness_keys_must_match_both_hash_bindings() {
     }
 }
 
+/// Skip hash-bound noncompressed witness encodings and reject hash mismatches
+/// for both native and nested P2WPKH inputs.
 #[test]
 fn hash_bound_non_compressed_keys_are_ineligible() {
     let (_, keys, _, _) = fixture();
@@ -291,6 +306,8 @@ fn hash_bound_non_compressed_keys_are_ineligible() {
     }
 }
 
+/// Skip matching P2PKH pushes that are not valid compressed public keys, and
+/// reject scripts without any push matching the prevout hash.
 #[test]
 fn p2pkh_skips_matching_keys_that_are_not_valid_compressed_keys() {
     let (_, keys, _, _) = fixture();
@@ -318,6 +335,8 @@ fn p2pkh_skips_matching_keys_that_are_not_valid_compressed_keys() {
     }
 }
 
+/// Reject private input fields during deserialization and ensure that serialized
+/// inputs and the vector fixture contain only the intended public data.
 #[test]
 fn only_public_input_fields_are_accepted_and_serialized() {
     let (inputs, _, _, _) = fixture();
@@ -336,6 +355,7 @@ fn only_public_input_fields_are_accepted_and_serialized() {
         "data/bip352_send_and_receive_test_vectors.json"
     ))
     .unwrap();
+    /// Recursively reject private-key and signature field names in the fixture.
     fn assert_public(value: &serde_json::Value) {
         match value {
             serde_json::Value::Object(fields) => {
@@ -356,6 +376,7 @@ fn only_public_input_fields_are_accepted_and_serialized() {
     assert_public(&vectors);
 }
 
+/// Count repeated public keys from distinct inputs and reject repeated outpoints.
 #[test]
 fn duplicate_keys_count_but_duplicate_outpoints_fail() {
     let input = witness_input(false);
@@ -371,6 +392,8 @@ fn duplicate_keys_count_but_duplicate_outpoints_fail() {
     assert_eq!(context.aggregate_pubkey, Some(expected));
 }
 
+/// Reject missing spend data, invalid Taproot keys, and mixed-case addresses,
+/// while accepting uniformly uppercase address encodings.
 #[test]
 fn malformed_or_missing_spend_data_fails_closed() {
     let (inputs, keys, shared, outputs) = fixture();
@@ -411,6 +434,8 @@ fn malformed_or_missing_spend_data_fails_closed() {
     );
 }
 
+/// Require host-wallet ECDH points and validate recipient counts and addresses
+/// before allocating outputs, including when the input set is empty.
 #[test]
 fn sender_requires_wallet_ecdh_and_bounds_counts_before_allocation() {
     let (inputs, keys, _, _) = fixture();
@@ -443,6 +468,8 @@ fn sender_requires_wallet_ecdh_and_bounds_counts_before_allocation() {
     assert!(scan_bip352_transaction(&keys, &inputs, &[], None, Network::Bitcoin).is_err());
 }
 
+/// Preserve Silent Payment networks and exact satoshi amounts through profile
+/// validation and BIP-21 handoff formatting, rejecting profile network mismatches.
 #[test]
 fn silent_payment_profile_and_wallet_handoff_preserve_network_and_amount() {
     let (_, keys, _, _) = fixture();
@@ -496,6 +523,7 @@ fn silent_payment_profile_and_wallet_handoff_preserve_network_and_amount() {
     }
 }
 
+/// Ensure input hashing and output tweak hashing use distinct BIP-352 domains.
 #[test]
 fn tags_are_domain_separated() {
     assert_ne!(

@@ -525,6 +525,8 @@ mod tests {
         assert!(validate_claim_policy(&policy).is_ok());
     }
 
+    /// Accept valid Silent Payment encodings on their expected networks and
+    /// reject network mismatches, empty/private material, truncation, and versions.
     #[test]
     fn silent_payment_address_validation() {
         use bech32::{u5, ToBase32};

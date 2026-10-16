@@ -546,6 +546,10 @@ pub fn scan_bip352_transaction(
     Ok(result)
 }
 
+/// Derive `B_spend + t_k * G` from a host-wallet ECDH point and output index.
+///
+/// Returns an error if the tagged hash is outside the scalar range or the
+/// resulting output point is at infinity.
 fn derive_output_pubkey<C: bitcoin::secp256k1::Verification>(
     secp: &Secp256k1<C>,
     spend: &PublicKey,
@@ -562,6 +566,7 @@ fn derive_output_pubkey<C: bitcoin::secp256k1::Verification>(
         .map_err(|e| anyhow!("Invalid output public key: {e}"))
 }
 
+/// Return the BIP-352 prefix: `sp` for mainnet, `sprt` for regtest, otherwise `tsp`.
 fn silent_payment_hrp(network: Network) -> &'static str {
     match network {
         Network::Bitcoin => "sp",
