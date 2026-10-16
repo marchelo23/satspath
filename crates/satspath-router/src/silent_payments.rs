@@ -159,7 +159,8 @@ impl Bip352PrevoutInput {
 /// Returns `Ok(Some((pubkey, is_taproot)))` when eligible, or `Ok(None)` when the input must be skipped.
 ///
 /// # Errors
-/// Returns an error for malformed encodings, curve points, or witness hash bindings.
+/// Returns an error for malformed encodings, invalid Taproot or compressed witness
+/// curve points, missing P2PKH hash matches, or witness hash bindings.
 pub fn extract_bip352_input_pubkey(
     input: &Bip352PrevoutInput,
 ) -> Result<Option<(PublicKey, bool)>> {
@@ -222,18 +223,15 @@ pub fn extract_bip352_input_pubkey(
             return Err(anyhow!("Invalid or missing P2WPKH spend data"));
         }
         let pk_bytes = &witness_items[1];
+        if hash160::Hash::hash(pk_bytes).as_byte_array() != &spk[2..22] {
+            return Err(anyhow!("P2WPKH witness key does not match prevout hash"));
+        }
         if pk_bytes.len() == 33 && (pk_bytes[0] == 0x02 || pk_bytes[0] == 0x03) {
-            if hash160::Hash::hash(pk_bytes).as_byte_array() != &spk[2..22] {
-                return Err(anyhow!("P2WPKH witness key does not match prevout hash"));
-            }
             let pk = PublicKey::from_slice(pk_bytes)
                 .map_err(|e| anyhow!("Invalid P2WPKH public key: {e}"))?;
             return Ok(Some((pk, false)));
         }
-        if pk_bytes.len() == 65 && pk_bytes[0] == 0x04 {
-            return Ok(None); // Uncompressed keys are ineligible under BIP-352.
-        }
-        return Err(anyhow!("Malformed P2WPKH witness key"));
+        return Ok(None); // Only compressed keys are eligible under BIP-352.
     }
 
     // 3. P2SH-P2WPKH: spk = a914<20-byte hash>87, scriptSig = 160014<20-byte hash>
@@ -253,20 +251,17 @@ pub fn extract_bip352_input_pubkey(
                 return Err(anyhow!("Invalid or missing P2SH-P2WPKH spend data"));
             }
             let pk_bytes = &witness_items[1];
+            if hash160::Hash::hash(pk_bytes).as_byte_array() != &script_sig[3..23] {
+                return Err(anyhow!(
+                    "P2SH-P2WPKH witness key does not match redeem script hash"
+                ));
+            }
             if pk_bytes.len() == 33 && (pk_bytes[0] == 0x02 || pk_bytes[0] == 0x03) {
-                if hash160::Hash::hash(pk_bytes).as_byte_array() != &script_sig[3..23] {
-                    return Err(anyhow!(
-                        "P2SH-P2WPKH witness key does not match redeem script hash"
-                    ));
-                }
                 let pk = PublicKey::from_slice(pk_bytes)
                     .map_err(|e| anyhow!("Invalid P2SH-P2WPKH public key: {e}"))?;
                 return Ok(Some((pk, false)));
             }
-            if pk_bytes.len() == 65 && pk_bytes[0] == 0x04 {
-                return Ok(None);
-            }
-            return Err(anyhow!("Malformed P2SH-P2WPKH witness key"));
+            return Ok(None);
         }
         return Ok(None);
     }
@@ -282,7 +277,7 @@ pub fn extract_bip352_input_pubkey(
         let expected_pkh = &spk[3..23];
         let script = Script::from_bytes(&script_sig);
         let mut matched_pk: Option<PublicKey> = None;
-        let mut matched_uncompressed = false;
+        let mut matched_key = false;
         for ins in script.instructions() {
             let Instruction::PushBytes(push) =
                 ins.map_err(|e| anyhow!("Invalid P2PKH scriptSig: {e}"))?
@@ -291,17 +286,13 @@ pub fn extract_bip352_input_pubkey(
             };
             let bytes = push.as_bytes();
             if hash160::Hash::hash(bytes).as_byte_array() == expected_pkh {
-                if bytes.len() == 65 && bytes[0] == 0x04 {
-                    matched_uncompressed = true;
-                } else if bytes.len() == 33 && (bytes[0] == 0x02 || bytes[0] == 0x03) {
-                    matched_pk = Some(
-                        PublicKey::from_slice(bytes)
-                            .map_err(|e| anyhow!("Invalid P2PKH public key: {e}"))?,
-                    );
+                matched_key = true;
+                if bytes.len() == 33 && (bytes[0] == 0x02 || bytes[0] == 0x03) {
+                    matched_pk = PublicKey::from_slice(bytes).ok();
                 }
             }
         }
-        if matched_pk.is_none() && !matched_uncompressed {
+        if !matched_key {
             return Err(anyhow!("Missing P2PKH key matching the prevout hash"));
         }
         return Ok(matched_pk.map(|pk| (pk, false)));
@@ -476,7 +467,8 @@ pub struct Bip352ReceiveResult {
 /// input set, plus labeled public keys. It retains all key derivation and signing
 /// authority. No spending key or private tweak is accepted or returned.
 /// Every candidate output is parsed before scanning, including transactions with
-/// no eligible inputs; malformed hex, lengths, and curve points return errors.
+/// no eligible inputs; malformed hex and incorrect lengths return errors.
+/// Values of 32 bytes that are not valid curve points are skipped.
 /// Returned addresses use `expected_network`.
 pub fn scan_bip352_transaction(
     keys: &Bip352ScanKeys,
@@ -485,15 +477,18 @@ pub fn scan_bip352_transaction(
     shared_secret: Option<&PublicKey>,
     expected_network: Network,
 ) -> Result<Bip352ReceiveResult> {
-    let candidates: Vec<XOnlyPublicKey> = outputs_xonly
-        .iter()
-        .map(|out| {
-            let bytes =
-                hex::decode(out.trim()).map_err(|e| anyhow!("Invalid output key hex: {e}"))?;
-            XOnlyPublicKey::from_slice(&bytes)
-                .map_err(|e| anyhow!("Invalid x-only output key: {e}"))
-        })
-        .collect::<Result<_>>()?;
+    let mut candidates = Vec::with_capacity(outputs_xonly.len());
+    for out in outputs_xonly {
+        let bytes = hex::decode(out.trim()).map_err(|e| anyhow!("Invalid output key hex: {e}"))?;
+        if bytes.len() != 32 {
+            return Err(anyhow!(
+                "Invalid x-only output key length: expected 32 bytes"
+            ));
+        }
+        if let Ok(candidate) = XOnlyPublicKey::from_slice(&bytes) {
+            candidates.push(candidate);
+        }
+    }
     let context = bip352_input_context(inputs)?;
     let mut spend_keys = vec![(None, keys.spend_pubkey)];
     spend_keys.extend(keys.labels.iter().map(|(label, pk)| (Some(*label), *pk)));

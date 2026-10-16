@@ -4,10 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bitcoin::{
-    secp256k1::{PublicKey, XOnlyPublicKey},
-    Network,
-};
+use bitcoin::{secp256k1::PublicKey, Network};
 use satspath_router::{
     bip352_input_context, create_bip352_outputs, parse_silent_payment_address,
     scan_bip352_transaction, Bip352PrevoutInput, Bip352ScanKeys,
@@ -171,7 +168,6 @@ fn official_bip352_public_sending_vectors() {
 
 #[test]
 fn official_bip352_public_receiving_vectors() {
-    let mut malformed_cases = 0;
     let groups: Vec<TestGroup> = serde_json::from_str(VECTORS_JSON).unwrap();
     assert_eq!(groups.len(), 28);
     for group in groups {
@@ -200,22 +196,6 @@ fn official_bip352_public_receiving_vectors() {
                 case.given.host_shared_secret.as_ref(),
                 Network::Bitcoin,
             );
-            if case
-                .given
-                .outputs
-                .iter()
-                .any(|out| XOnlyPublicKey::from_slice(&hex::decode(out).unwrap()).is_err())
-            {
-                // The official infinity case includes the invalid all-zero x-only
-                // key. This API rejects malformed outputs before skipping inputs.
-                assert!(context.aggregate_pubkey.is_none());
-                assert!(result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("Invalid x-only output key"));
-                malformed_cases += 1;
-                continue;
-            }
             let result = result.unwrap_or_else(|e| panic!("{}: {e}", group.comment));
             assert_eq!(
                 result.addresses, case.expected.addresses,
@@ -249,5 +229,4 @@ fn official_bip352_public_receiving_vectors() {
             }
         }
     }
-    assert_eq!(malformed_cases, 1);
 }

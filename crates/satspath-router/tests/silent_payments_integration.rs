@@ -132,7 +132,6 @@ fn scanner_rejects_every_malformed_output_even_without_eligible_inputs() {
         "".into(),
         "00".repeat(31),
         "00".repeat(33),
-        "ff".repeat(32),
     ] {
         let outputs = vec![valid[0].clone(), malformed];
         for vin in [inputs.as_slice(), &[]] {
@@ -144,10 +143,46 @@ fn scanner_rejects_every_malformed_output_even_without_eligible_inputs() {
     }
 }
 
+#[test]
+fn scanner_skips_invalid_curve_points_and_detects_valid_outputs() {
+    let (inputs, keys, shared, valid) = fixture_group(10);
+    let baseline =
+        scan_bip352_transaction(&keys, &inputs, &valid, Some(&shared), Network::Bitcoin).unwrap();
+    assert_eq!(baseline.outputs.len(), 2);
+    let mut outputs = vec!["00".repeat(32), "ff".repeat(32)];
+    for output in &valid {
+        outputs.push(output.clone());
+        outputs.push("00".repeat(32));
+    }
+    assert_eq!(
+        scan_bip352_transaction(&keys, &inputs, &outputs, Some(&shared), Network::Bitcoin).unwrap(),
+        baseline
+    );
+    for candidates in [outputs.as_slice(), &outputs[..2]] {
+        let result =
+            scan_bip352_transaction(&keys, &[], candidates, None, Network::Bitcoin).unwrap();
+        assert!(result.outputs.is_empty());
+    }
+    assert!(scan_bip352_transaction(
+        &keys,
+        &inputs,
+        &outputs[..2],
+        Some(&shared),
+        Network::Bitcoin,
+    )
+    .unwrap()
+    .outputs
+    .is_empty());
+}
+
 fn witness_input(nested: bool) -> Bip352PrevoutInput {
     let (_, keys, _, _) = fixture();
     let pk_bytes = keys.scan_pubkey.serialize();
-    let pkh = hash160::Hash::hash(&pk_bytes);
+    witness_input_with_key(nested, &pk_bytes)
+}
+
+fn witness_input_with_key(nested: bool, pk_bytes: &[u8]) -> Bip352PrevoutInput {
+    let pkh = hash160::Hash::hash(pk_bytes);
     let redeem = format!("0014{pkh}");
     let redeem_bytes = hex::decode(&redeem).unwrap();
     Bip352PrevoutInput {
@@ -158,7 +193,7 @@ fn witness_input(nested: bool) -> Bip352PrevoutInput {
         } else {
             String::new()
         },
-        txinwitness: hex::encode(serialize(&Witness::from_slice(&[&[1u8][..], &pk_bytes]))),
+        txinwitness: hex::encode(serialize(&Witness::from_slice(&[&[1u8][..], pk_bytes]))),
         prevout_script_pubkey: if nested {
             format!("a914{}87", hash160::Hash::hash(&redeem_bytes))
         } else {
@@ -222,7 +257,64 @@ fn witness_keys_must_match_both_hash_bindings() {
             &[1u8][..],
             &keys.scan_pubkey.serialize_uncompressed(),
         ])));
-        assert_eq!(extract_bip352_input_pubkey(&uncompressed).unwrap(), None);
+        assert_rejected(uncompressed);
+    }
+}
+
+#[test]
+fn hash_bound_non_compressed_keys_are_ineligible() {
+    let (_, keys, _, _) = fixture();
+    let uncompressed = keys.scan_pubkey.serialize_uncompressed();
+    let mut hybrid = uncompressed;
+    hybrid[0] = 0x06 | (uncompressed[64] & 1);
+    let ineligible_keys = [
+        uncompressed.to_vec(),
+        hybrid.to_vec(),
+        vec![0x04; 33],
+        vec![0x01],
+        vec![],
+    ];
+    for pk_bytes in &ineligible_keys {
+        for nested in [false, true] {
+            let input = witness_input_with_key(nested, pk_bytes);
+            assert_eq!(extract_bip352_input_pubkey(&input).unwrap(), None);
+            let context = bip352_input_context(std::slice::from_ref(&input)).unwrap();
+            assert!(context.input_pub_keys.is_empty());
+            assert!(context.tweak.is_none());
+            let mut mismatch = input;
+            let mut other_key = pk_bytes.clone();
+            other_key.push(0x01);
+            mismatch.txinwitness =
+                hex::encode(serialize(&Witness::from_slice(&[&[1u8][..], &other_key])));
+            assert!(extract_bip352_input_pubkey(&mismatch).is_err());
+        }
+    }
+}
+
+#[test]
+fn p2pkh_skips_matching_keys_that_are_not_valid_compressed_keys() {
+    let (_, keys, _, _) = fixture();
+    let mut invalid_point = vec![0xff; 33];
+    invalid_point[0] = 0x02;
+    for pk_bytes in [
+        keys.scan_pubkey.serialize_uncompressed().to_vec(),
+        vec![0x04; 33],
+        invalid_point,
+        vec![0x01],
+        vec![],
+    ] {
+        let mut input = witness_input(false);
+        input.txinwitness.clear();
+        input.prevout_script_pubkey = format!("76a914{}88ac", hash160::Hash::hash(&pk_bytes));
+        input.script_sig = format!("{:02x}{}", pk_bytes.len(), hex::encode(&pk_bytes));
+        assert_eq!(extract_bip352_input_pubkey(&input).unwrap(), None);
+        let context = bip352_input_context(std::slice::from_ref(&input)).unwrap();
+        assert!(context.input_pub_keys.is_empty());
+        input.prevout_script_pubkey = format!(
+            "76a914{}88ac",
+            hash160::Hash::hash(&keys.scan_pubkey.serialize())
+        );
+        assert!(extract_bip352_input_pubkey(&input).is_err());
     }
 }
 

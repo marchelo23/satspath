@@ -17,6 +17,6 @@ Tests cover the router's public operations. They do not claim to validate wallet
 ECDH computation, secret-key aggregation, label-secret derivation, or signing.
 
 The official final-point-at-infinity case supplies an all-zero x-only output key.
-The router rejects that malformed output before any input-skipping shortcut.
-The tests separately assert that its aggregate input point is at infinity.
+The router skips that invalid curve point and returns no detected outputs.
+The tests also assert that its aggregate input point is at infinity.
 The sender reports an error when a recipient group exceeds `K_max`.
