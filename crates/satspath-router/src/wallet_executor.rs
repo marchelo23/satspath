@@ -666,6 +666,17 @@ impl<S: BoltzHostSignerBroadcaster> BoltzTestnetSwapBridge<S> {
                 script_pubkey: address.script_pubkey(),
             }],
         };
+        // Include the SegWit overhead and a conservative maximum DER signature
+        // plus SIGHASH_ALL byte, with the selector for this claim/refund template.
+        let mut estimated_tx = tx.clone();
+        estimated_tx.input[0].witness =
+            bitcoin::Witness::from_slice(&[&[0u8; 73][..], selector.as_slice(), script.as_bytes()]);
+        let minimum_fee = estimated_tx.vsize() as u64;
+        if fee < minimum_fee {
+            return Err(invalid_swap(&format!(
+                "miner fee {fee} sats is below the 1 sat/vB minimum ({minimum_fee} sats)"
+            )));
+        }
         let sighash = SighashCache::new(&tx)
             .p2wsh_signature_hash(0, &script, lockup.value, EcdsaSighashType::All)
             .map_err(|_| invalid_swap("cannot compute BIP143 sighash"))?

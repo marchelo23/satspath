@@ -266,56 +266,110 @@ async fn test_ldk_lightning_bridge_validates_and_executes_bolt11() {
     assert!(err_amt.to_string().contains("BOLT11 validation failed"));
 }
 
-/// Reject claims and refunds on every network without signing or broadcasting.
+/// Isolate unsupported scripts from missing evidence and disabled Mainnet execution.
 #[tokio::test]
 async fn boltz_unsupported_scripts_and_missing_evidence_fail_closed() {
     let preimage = [0x99; 32];
     let mut formerly_accepted_script = vec![0x82, 0x01, 0x20, 0x87, 0x63, 0xa8, 0x20];
     formerly_accepted_script.extend_from_slice(&Sha256::digest(preimage));
     formerly_accepted_script.push(0x88);
+    for network in [BitcoinNetwork::Testnet, BitcoinNetwork::Regtest] {
+        for reverse in [true, false] {
+            let (mut host, _) = swap_fixture(reverse);
+            host.evidence.network = network;
+            let txid = host.evidence.lockup_transaction.compute_txid().to_string();
+            let destination = host.evidence.destination_address.clone();
+            let signs = host.signs.clone();
+            let broadcasts = host.broadcasts.clone();
+            let bridge = BoltzTestnetSwapBridge::new(network, host);
+            for script in [
+                hex::encode(&formerly_accepted_script),
+                "51".into(),
+                "5120".to_owned() + &"11".repeat(32),
+                String::new(),
+            ] {
+                let result = if reverse {
+                    bridge
+                        .execute_reverse_claim(
+                            "swap",
+                            &txid,
+                            0,
+                            50_000,
+                            &hex::encode(preimage),
+                            &script,
+                            &destination,
+                            500,
+                        )
+                        .await
+                } else {
+                    bridge
+                        .execute_submarine_refund(
+                            "swap",
+                            &txid,
+                            0,
+                            50_000,
+                            800_000,
+                            800_000,
+                            &script,
+                            &destination,
+                            500,
+                        )
+                        .await
+                };
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("witness script or lockup evidence mismatch"));
+            }
+            assert_eq!(signs.load(Ordering::SeqCst), 0);
+            assert_eq!(broadcasts.load(Ordering::SeqCst), 0);
+        }
+    }
+
     for network in [
         BitcoinNetwork::Mainnet,
         BitcoinNetwork::Testnet,
         BitcoinNetwork::Regtest,
     ] {
         let bridge = BoltzTestnetSwapBridge::new(network, RejectBoltzHostCalls);
-        for script in [
-            hex::encode(&formerly_accepted_script),
-            "51".into(),
-            "5120".to_owned() + &"11".repeat(32),
-            String::new(),
-        ] {
-            let claim = bridge
-                .execute_reverse_claim(
-                    "reverse",
-                    &"22".repeat(32),
-                    0,
-                    50_000,
-                    &hex::encode(preimage),
-                    &script,
-                    "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn",
-                    500,
-                )
-                .await
-                .unwrap_err();
-            assert!(claim.to_string().contains("Boltz swap"));
-            for height in [799_999, 800_000, 800_001] {
-                let refund = bridge
-                    .execute_submarine_refund(
-                        "refund",
-                        &"22".repeat(32),
+        for reverse in [true, false] {
+            let (host, script) = swap_fixture(reverse);
+            let txid = host.evidence.lockup_transaction.compute_txid().to_string();
+            let destination = &host.evidence.destination_address;
+            let result = if reverse {
+                bridge
+                    .execute_reverse_claim(
+                        "swap",
+                        &txid,
                         0,
                         50_000,
-                        800_000,
-                        height,
+                        &hex::encode(preimage),
                         &script,
-                        "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn",
+                        destination,
                         500,
                     )
                     .await
-                    .unwrap_err();
-                assert!(refund.to_string().contains("Boltz swap"));
-            }
+            } else {
+                bridge
+                    .execute_submarine_refund(
+                        "swap",
+                        &txid,
+                        0,
+                        50_000,
+                        800_000,
+                        800_000,
+                        &script,
+                        destination,
+                        500,
+                    )
+                    .await
+            };
+            let expected = if network == BitcoinNetwork::Mainnet {
+                "Mainnet execution is disabled"
+            } else {
+                "lockup evidence: verified swap evidence unavailable"
+            };
+            assert!(result.unwrap_err().to_string().contains(expected));
         }
     }
 }
@@ -1192,7 +1246,10 @@ impl BoltzHostSignerBroadcaster for SimulatedBoltzHost {
             tx.input[0].sequence,
             bitcoin::Sequence::ENABLE_LOCKTIME_NO_RBF
         );
-        assert_eq!(tx.output[0].value.to_sat(), 49_500);
+        let fee =
+            self.evidence.lockup_transaction.output[0].value.to_sat() - tx.output[0].value.to_sat();
+        assert!(fee >= tx.vsize() as u64);
+        assert!(fee <= self.evidence.max_fee_sats);
         let stack: Vec<_> = tx.input[0].witness.iter().collect();
         assert_eq!(stack.len(), 3);
         let script = bitcoin::ScriptBuf::from_bytes(stack[2].to_vec());
@@ -1370,6 +1427,13 @@ async fn boltz_testnet_claim_refund_validation_and_host_execution() {
                     )
                     .await
             };
+            if case == 2 {
+                assert!(result
+                    .as_ref()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("witness script or lockup evidence mismatch"));
+            }
             assert_eq!(
                 result.is_ok(),
                 case == 0,
@@ -1385,6 +1449,86 @@ async fn boltz_testnet_claim_refund_validation_and_host_execution() {
                 usize::from(matches!(case, 0 | 16)),
                 "case {case}"
             );
+        }
+    }
+}
+
+/// Price each spend's worst-case witness and destination before host signing.
+#[tokio::test]
+async fn boltz_minimum_relay_fee_is_checked_before_signing() {
+    for network in [BitcoinNetwork::Testnet, BitcoinNetwork::Regtest] {
+        let bitcoin_network = match network {
+            BitcoinNetwork::Testnet => bitcoin::Network::Testnet,
+            BitcoinNetwork::Regtest => bitcoin::Network::Regtest,
+            _ => unreachable!(),
+        };
+        for reverse in [true, false] {
+            // Independently calculated weights with a 73-byte signature element:
+            // P2PKH: 557 WU claim / 520 WU refund; P2WSH: 593 / 556 WU.
+            for (destination, minimum_fee) in [
+                (
+                    "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn".to_string(),
+                    if reverse { 140 } else { 130 },
+                ),
+                (
+                    Address::p2wsh(&bitcoin::ScriptBuf::new(), bitcoin_network).to_string(),
+                    if reverse { 149 } else { 139 },
+                ),
+            ] {
+                for fee in [1, minimum_fee - 1, minimum_fee] {
+                    let (mut host, script) = swap_fixture(reverse);
+                    host.evidence.network = network;
+                    host.evidence.destination_address = destination.clone();
+                    let txid = host.evidence.lockup_transaction.compute_txid().to_string();
+                    let signs = host.signs.clone();
+                    let broadcasts = host.broadcasts.clone();
+                    let bridge = BoltzTestnetSwapBridge::new(network, host);
+                    let result = if reverse {
+                        bridge
+                            .execute_reverse_claim(
+                                "swap",
+                                &txid,
+                                0,
+                                50_000,
+                                &hex::encode([0x99; 32]),
+                                &script,
+                                &destination,
+                                fee,
+                            )
+                            .await
+                    } else {
+                        bridge
+                            .execute_submarine_refund(
+                                "swap",
+                                &txid,
+                                0,
+                                50_000,
+                                800_000,
+                                800_000,
+                                &script,
+                                &destination,
+                                fee,
+                            )
+                            .await
+                    };
+                    if fee < minimum_fee {
+                        assert!(result
+                            .unwrap_err()
+                            .to_string()
+                            .contains(&format!("below the 1 sat/vB minimum ({minimum_fee} sats)")));
+                    } else {
+                        assert!(matches!(
+                            result.unwrap(),
+                            HandoffExecutionReceipt::SwapSettlement {
+                                fee_sats, output_amount_sats, ..
+                            } if fee_sats == fee && output_amount_sats == 50_000 - fee
+                        ));
+                    }
+                    let expected_calls = usize::from(fee == minimum_fee);
+                    assert_eq!(signs.load(Ordering::SeqCst), expected_calls);
+                    assert_eq!(broadcasts.load(Ordering::SeqCst), expected_calls);
+                }
+            }
         }
     }
 }
