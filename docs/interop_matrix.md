@@ -51,3 +51,8 @@ The harness clears the driver's inherited environment and runs it from `/`;
 the executable must be an absolute path and load its own credentials from a
 separately provisioned host wallet. This is not an OS sandbox: run only trusted
 drivers on a host with appropriate filesystem permissions.
+Fee-source HTTP calls in the quote path reject private or loopback endpoints,
+credentials in URLs, and non-HTTPS schemes. The connector rejects private or
+mixed DNS answers and disables proxies and redirects. A local Bitcoin Core RPC
+address cannot be used as a quote fee oracle; use a public HTTPS oracle or an
+explicit static fee source in controlled regtest environments.

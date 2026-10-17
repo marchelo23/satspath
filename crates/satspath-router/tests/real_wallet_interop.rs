@@ -56,6 +56,7 @@ async fn invoke(executable: &Path, payload: &Value) -> satspath_core::Result<Val
     invoke_with_timeout(executable, payload, DRIVER_TIMEOUT).await
 }
 
+/// Enforce a bounded request/response and a minimal process environment for both drivers.
 async fn invoke_with_timeout(
     executable: &Path,
     payload: &Value,
@@ -120,6 +121,7 @@ async fn invoke_with_timeout(
     }
 }
 
+/// Reject a host receipt unless it matches the approved destination, amount and fee cap.
 fn validate_wallet_receipt(
     receipt: OnchainReceipt,
     destination: &str,
@@ -141,16 +143,19 @@ fn validate_wallet_receipt(
 
 #[async_trait]
 impl WalletExecutor for ExternalWallet {
+    /// Bind the external host to the explicitly configured test network.
     fn network(&self) -> BitcoinNetwork {
         self.network
     }
 
+    /// Lightning is not exercised by this on-chain interoperability harness.
     async fn pay_bolt11(&self, _: &str, _: Option<u64>) -> satspath_core::Result<PaymentReceipt> {
         Err(SatsPathError::ValidationError(
             "Lightning driver is not configured".into(),
         ))
     }
 
+    /// Do not permit wallet execution without an approved fee cap.
     async fn send_onchain(
         &self,
         _: &str,
@@ -162,12 +167,14 @@ impl WalletExecutor for ExternalWallet {
         ))
     }
 
+    /// Do not expose raw PSBT signing through the interop driver.
     async fn sign_and_broadcast_psbt(&self, _: &str) -> satspath_core::Result<String> {
         Err(SatsPathError::ValidationError(
             "direct PSBT signing disabled".into(),
         ))
     }
 
+    /// Send only bounded public payment terms and validate the host's receipt.
     async fn send_onchain_with_max_fee(
         &self,
         destination: &str,
@@ -196,6 +203,7 @@ struct ReceiverConfirmation {
     confirmations: u32,
 }
 
+/// Match an independent receiver report to the host receipt and require confirmation.
 fn validate_receiver_confirmation(
     confirmed: &ReceiverConfirmation,
     receipt: &OnchainReceipt,
@@ -296,6 +304,7 @@ async fn https_onchain_wallet_receiver_confirms_payment() {
         .expect("broadcast is not receiver confirmation");
 }
 
+/// A forged or mismatched host receipt must not count as payment evidence.
 #[test]
 fn invalid_host_receipts_fail_closed() {
     let valid = OnchainReceipt {
@@ -319,6 +328,7 @@ fn invalid_host_receipts_fail_closed() {
     }
 }
 
+/// A receiver report must match the exact transaction, amount and destination.
 #[test]
 fn receiver_must_confirm_exact_payment() {
     let receipt = OnchainReceipt {
@@ -348,6 +358,7 @@ fn receiver_must_confirm_exact_payment() {
     assert!(validate_receiver_confirmation(&confirmed, &receipt).is_err());
 }
 
+/// Kill drivers that stall or exceed the response size limit.
 #[cfg(unix)]
 #[tokio::test]
 async fn external_driver_timeout_and_output_limit() {
@@ -367,6 +378,7 @@ async fn external_driver_timeout_and_output_limit() {
     assert!(error.to_string().contains("exceeds 8192 bytes"), "{error}");
 }
 
+/// Drivers cannot inherit the test runner's credentials or current directory.
 #[cfg(unix)]
 #[tokio::test]
 async fn external_driver_does_not_inherit_host_environment_or_directory() {

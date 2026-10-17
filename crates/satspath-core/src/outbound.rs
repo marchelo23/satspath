@@ -255,6 +255,29 @@ Connection: close
         }
     }
 
+    /// The HTTP client used by fee sources rejects all private or mixed DNS
+    /// answers before opening a socket, even if one public answer is present.
+    #[tokio::test]
+    async fn http_connector_rejects_private_and_mixed_dns_answers() {
+        for addresses in [
+            vec!["10.0.0.1:0"],
+            vec!["8.8.8.8:0", "127.0.0.1:0"],
+            vec!["169.254.169.254:0", "8.8.8.8:0"],
+        ] {
+            let resolver = Arc::new(RebindingResolver {
+                first: addresses.into_iter().map(|a| a.parse().unwrap()).collect(),
+                calls: AtomicUsize::new(0),
+            });
+            let client = http_client_with_resolver(Duration::from_secs(2), resolver.clone());
+            assert!(client
+                .get("https://fee.example/api/fee-estimates")
+                .send()
+                .await
+                .is_err());
+            assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
     /// Literal IPs and unsafe URL forms cannot bypass relay host validation.
     #[test]
     fn reject_unsafe_relay_urls() {
