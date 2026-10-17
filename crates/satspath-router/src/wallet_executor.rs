@@ -500,7 +500,7 @@ impl<W: BdkHostWallet, L: LdkHostNode> WalletExecutor for HostWalletSdkBridge<W,
             ));
         }
         let validated = validate_handoff_bolt11(invoice, amount_msats / 1_000, self.network)?;
-        let adapter_cap = amount_msats.saturating_mul(self.ldk.max_fee_bps) / 10_000;
+        let adapter_cap = (amount_msats.saturating_mul(self.ldk.max_fee_bps) / 10_000).max(1_000);
         let cap = max_fee_msats.min(adapter_cap);
         if cap == 0 {
             return Err(SatsPathError::ValidationError(
@@ -889,12 +889,13 @@ pub struct IntentVerification {
 }
 
 impl PaymentIntent {
-    /// RFC 8785 serialization: no floating point amounts or unordered map fields.
+    /// RFC 8785 serialization. Reject numbers that cannot be represented exactly
+    /// by JCS/ECMAScript so distinct approved intents cannot share a digest.
     pub fn canonical_bytes(&self) -> CoreResult<Vec<u8>> {
         let value = serde_json::to_value(self)
             .map_err(|e| SatsPathError::SerializationError(e.to_string()))?;
-        canonical_json::to_string(&value)
-            .map(String::into_bytes)
+        ensure_jcs_exact_numbers(&value)?;
+        serde_json_canonicalizer::to_vec(&value)
             .map_err(|e| SatsPathError::SerializationError(e.to_string()))
     }
 
@@ -924,6 +925,35 @@ impl PaymentIntent {
             digest: digest.into(),
         })
     }
+}
+
+fn ensure_jcs_exact_numbers(value: &serde_json::Value) -> CoreResult<()> {
+    const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+    match value {
+        serde_json::Value::Number(number) => {
+            let exact = number.as_u64().is_some_and(|n| n <= MAX_SAFE_INTEGER)
+                || number.as_i64().is_some_and(|n| {
+                    n >= -(MAX_SAFE_INTEGER as i64) && n <= MAX_SAFE_INTEGER as i64
+                });
+            if !exact {
+                return Err(SatsPathError::ValidationError(
+                    "payment intent contains a number outside the exact JCS integer range".into(),
+                ));
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                ensure_jcs_exact_numbers(item)?;
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for item in fields.values() {
+                ensure_jcs_exact_numbers(item)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Non-deserializable, single-use approval. Its fields cannot be edited after

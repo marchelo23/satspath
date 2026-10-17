@@ -32,7 +32,8 @@ use satspath_router::wallet_executor::{
     HostWalletSdkBridge, LdkHostNode, LdkLightningBridge,
 };
 use sha2::{Digest, Sha256};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 // ─── Simulated Sovereign BDK Host Wallet ────────────────────────────────────────
@@ -107,6 +108,31 @@ impl LdkHostNode for SimulatedLdkNode {
             preimage: Some(preimage),
             amount_msats: expected_amount_msats,
             fee_msats: 250,
+            timestamp: 1_700_000_000,
+        })
+    }
+}
+
+struct FeeCapLdkNode {
+    last_cap: Arc<AtomicU64>,
+}
+
+#[async_trait]
+impl LdkHostNode for FeeCapLdkNode {
+    async fn send_bolt11_payment(
+        &self,
+        invoice: &str,
+        amount_msats: u64,
+        max_fee_msats: u64,
+    ) -> Result<PaymentReceipt> {
+        self.last_cap.store(max_fee_msats, Ordering::SeqCst);
+        Ok(PaymentReceipt {
+            payment_hash: lightning_invoice::Bolt11Invoice::from_str(invoice)?
+                .payment_hash()
+                .to_string(),
+            preimage: None,
+            amount_msats,
+            fee_msats: 0,
             timestamp: 1_700_000_000,
         })
     }
@@ -1648,6 +1674,11 @@ async fn approval_binds_amount_destination_fee_and_current_state() {
     let mut tampered = intent.clone();
     tampered.amount_sats += 1;
     assert_ne!(tampered.canonical_bytes().unwrap(), bytes);
+    tampered.max_fee_sats = (1 << 53) - 1;
+    assert!(tampered.canonical_bytes().is_ok());
+    tampered.max_fee_sats += 1;
+    assert!(tampered.canonical_bytes().is_err());
+    assert!(tampered.approve(true).is_err());
     assert!(prepare_payment_intent(
         &store,
         &trust,
@@ -1729,4 +1760,54 @@ async fn bdk_fee_cap_rejects_before_host_signs() {
         .await
         .unwrap();
     assert_eq!(receipt.fee_sats, 705);
+}
+
+#[tokio::test]
+async fn ldk_fee_cap_restores_floor_without_exceeding_approval() {
+    let last_cap = Arc::new(AtomicU64::new(0));
+    let bridge = HostWalletSdkBridge::new(
+        BitcoinNetwork::Testnet,
+        BdkOnchainBridge::new(
+            BitcoinNetwork::Testnet,
+            5,
+            100,
+            SimulatedBdkWallet::new_testnet(),
+        ),
+        LdkLightningBridge::new(
+            BitcoinNetwork::Testnet,
+            100,
+            FeeCapLdkNode {
+                last_cap: last_cap.clone(),
+            },
+        ),
+    );
+    let invoice = make_testnet_bolt11(1);
+    bridge
+        .pay_bolt11_with_max_fee(&invoice, 1_000, 2_000)
+        .await
+        .unwrap();
+    assert_eq!(last_cap.load(Ordering::SeqCst), 1_000);
+    bridge
+        .pay_bolt11_with_max_fee(&invoice, 1_000, 500)
+        .await
+        .unwrap();
+    assert_eq!(last_cap.load(Ordering::SeqCst), 500);
+    assert!(bridge
+        .pay_bolt11_with_max_fee(&invoice, 1_000, 0)
+        .await
+        .is_err());
+    assert_eq!(last_cap.load(Ordering::SeqCst), 500);
+}
+
+#[test]
+fn rfc8785_number_vector_uses_ecmascript_formatting() {
+    // RFC 8785 section 3.2.2.3; gibson042 Canonical JSON formats these differently.
+    let value: serde_json::Value = serde_json::from_str(
+        r#"{"numbers":[333333333.33333329,1E30,4.50,2e-3,0.000000000000000000000000001]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json_canonicalizer::to_string(&value).unwrap(),
+        r#"{"numbers":[333333333.3333333,1e+30,4.5,0.002,1e-27]}"#
+    );
 }

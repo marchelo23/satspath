@@ -10,6 +10,9 @@ Approval yields a non-deserializable, single-use token. Pass it to
 `execute_quote_handoff`: it re-reads the signed profile and evidence, compares
 the RFC 8785 canonical intent and refuses modified amounts, destinations,
 networks, fees or identity state. No spending keys enter SatsPath.
+Canonical bytes follow RFC 8785 JCS; numeric fields outside the exact
+ECMAScript integer range (±(2^53−1)) are rejected rather than rounded, so
+distinct payment terms cannot produce the same approval digest.
 
 Host adapters must implement fee-bound `WalletExecutor` methods. The default
 implementations reject execution. BDK calculates the actual PSBT input/output
