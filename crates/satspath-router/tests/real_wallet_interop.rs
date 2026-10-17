@@ -50,7 +50,8 @@ struct ExternalWallet {
 
 /// No shell is involved. Wallet credentials remain with the external host
 /// process; only public destination, amount, fee cap and receipt cross the
-/// SatsPath boundary.
+/// SatsPath boundary. Drivers load credentials out of band, not from this
+/// test runner's inherited environment or working directory.
 async fn invoke(executable: &Path, payload: &Value) -> satspath_core::Result<Value> {
     invoke_with_timeout(executable, payload, DRIVER_TIMEOUT).await
 }
@@ -60,9 +61,17 @@ async fn invoke_with_timeout(
     payload: &Value,
     timeout: Duration,
 ) -> satspath_core::Result<Value> {
+    if !executable.is_absolute() {
+        return Err(SatsPathError::ValidationError(
+            "external driver path must be absolute".into(),
+        ));
+    }
     let bytes = serde_json::to_vec(payload)
         .map_err(|e| SatsPathError::SerializationError(e.to_string()))?;
     let mut child = Command::new(executable)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .current_dir("/")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -356,4 +365,21 @@ async fn external_driver_timeout_and_output_limit() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("exceeds 8192 bytes"), "{error}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn external_driver_does_not_inherit_host_environment_or_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("driver");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nprintf '{\"home\":\"%s\",\"cwd\":\"%s\"}' \"${HOME-unset}\" \"$(pwd)\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output = invoke(&script, &json!({})).await.unwrap();
+    assert_eq!(output, json!({"home": "unset", "cwd": "/"}));
+    assert!(invoke(Path::new("./driver"), &json!({})).await.is_err());
 }

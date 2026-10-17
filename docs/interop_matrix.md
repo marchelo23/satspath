@@ -47,3 +47,7 @@ an 8 KiB output limit. If the receiver times out **after broadcast**, inspect
 the txid and receiving wallet before any retry: rerunning the test could send
 a second payment. The test cannot attest independence from executable output
 alone: keep the receiver's transaction/UTXO evidence for manual verification.
+The harness clears the driver's inherited environment and runs it from `/`;
+the executable must be an absolute path and load its own credentials from a
+separately provisioned host wallet. This is not an OS sandbox: run only trusted
+drivers on a host with appropriate filesystem permissions.
