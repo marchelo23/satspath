@@ -483,7 +483,26 @@ pub mod native_fees {
 
     const MAX_FEE_RESPONSE_BYTES: usize = 32 * 1024;
 
-    async fn fetch_rpc_target_fee(
+    // Public compatibility wrappers never send through an arbitrary supplied
+    // reqwest client: it could use a proxy or unvalidated DNS answers.
+    fn protected_fee_client(url: &str) -> Option<Client> {
+        outbound::validate_request_url(url).ok()?;
+        Some(outbound::http_client(std::time::Duration::from_secs(3)))
+    }
+
+    /// Fetch an RPC target using the protected connector. The legacy client
+    /// argument is ignored: caller-provided transports cannot enforce SSRF policy.
+    pub async fn fetch_rpc_target_fee(
+        target: u64,
+        _client: &Client,
+        url: &str,
+        auth: &Option<(String, Option<String>)>,
+    ) -> Option<u64> {
+        let protected = protected_fee_client(url)?;
+        fetch_rpc_target_fee_with_client(target, &protected, url, auth).await
+    }
+
+    async fn fetch_rpc_target_fee_with_client(
         target: u64,
         client: &Client,
         url: &str,
@@ -518,16 +537,26 @@ pub mod native_fees {
         Some(std::cmp::max(1, sat_vb))
     }
 
-    async fn fetch_bitcoin_core_fee(
+    /// Fetch Bitcoin Core estimates through a protected, URL-validated client.
+    pub async fn fetch_bitcoin_core_fee(
+        url: &str,
+        auth: &Option<(String, Option<String>)>,
+        _client: &Client,
+    ) -> Option<FeeEstimate> {
+        let protected = protected_fee_client(url)?;
+        fetch_bitcoin_core_fee_with_client(url, auth, &protected).await
+    }
+
+    async fn fetch_bitcoin_core_fee_with_client(
         url: &str,
         auth: &Option<(String, Option<String>)>,
         client: &Client,
     ) -> Option<FeeEstimate> {
         let (t1, t3, t6, t24) = tokio::join!(
-            fetch_rpc_target_fee(1, client, url, auth),
-            fetch_rpc_target_fee(3, client, url, auth),
-            fetch_rpc_target_fee(6, client, url, auth),
-            fetch_rpc_target_fee(24, client, url, auth),
+            fetch_rpc_target_fee_with_client(1, client, url, auth),
+            fetch_rpc_target_fee_with_client(3, client, url, auth),
+            fetch_rpc_target_fee_with_client(6, client, url, auth),
+            fetch_rpc_target_fee_with_client(24, client, url, auth),
         );
 
         let fastest = t1.or(t3).or(t6)?;
@@ -547,7 +576,13 @@ pub mod native_fees {
         Some(est)
     }
 
-    async fn fetch_mempool_fee(url: &str, client: &Client) -> Option<FeeEstimate> {
+    /// Fetch mempool.space fees through the protected connector.
+    pub async fn fetch_mempool_fee(url: &str, _client: &Client) -> Option<FeeEstimate> {
+        let protected = protected_fee_client(url)?;
+        fetch_mempool_fee_with_client(url, &protected).await
+    }
+
+    async fn fetch_mempool_fee_with_client(url: &str, client: &Client) -> Option<FeeEstimate> {
         let resp = client.get(url).send().await.ok()?;
         if !resp.status().is_success() {
             return None;
@@ -559,7 +594,13 @@ pub mod native_fees {
         Some(est.into())
     }
 
-    async fn fetch_esplora_fee(url: &str, client: &Client) -> Option<FeeEstimate> {
+    /// Fetch Esplora fees through the protected connector.
+    pub async fn fetch_esplora_fee(url: &str, _client: &Client) -> Option<FeeEstimate> {
+        let protected = protected_fee_client(url)?;
+        fetch_esplora_fee_with_client(url, &protected).await
+    }
+
+    async fn fetch_esplora_fee_with_client(url: &str, client: &Client) -> Option<FeeEstimate> {
         let resp = client.get(url).send().await.ok()?;
         if !resp.status().is_success() {
             return None;
@@ -571,7 +612,32 @@ pub mod native_fees {
         map.to_fee_estimate()
     }
 
-    async fn fetch_source_estimate(source: &FeeSource, client: &Client) -> Option<FeeEstimate> {
+    /// Fetch a configured fee source without trusting a caller-provided client.
+    pub async fn fetch_source_estimate(
+        source: &FeeSource,
+        _client: &Client,
+    ) -> Option<FeeEstimate> {
+        match source {
+            FeeSource::Static(est) => {
+                let mut estimate = est.clone();
+                estimate.sanitize();
+                Some(estimate)
+            }
+            FeeSource::BitcoinCore { rpc_url, .. } => {
+                let protected = protected_fee_client(rpc_url)?;
+                fetch_source_estimate_with_client(source, &protected).await
+            }
+            FeeSource::MempoolSpace { url } | FeeSource::Esplora { url } => {
+                let protected = protected_fee_client(url)?;
+                fetch_source_estimate_with_client(source, &protected).await
+            }
+        }
+    }
+
+    async fn fetch_source_estimate_with_client(
+        source: &FeeSource,
+        client: &Client,
+    ) -> Option<FeeEstimate> {
         match source {
             FeeSource::Static(est) => {
                 let mut e = est.clone();
@@ -586,15 +652,15 @@ pub mod native_fees {
                 // Reject unsafe endpoints before attaching any RPC credentials.
                 outbound::validate_request_url(rpc_url).ok()?;
                 let auth = rpc_user.as_ref().map(|u| (u.clone(), rpc_password.clone()));
-                fetch_bitcoin_core_fee(rpc_url, &auth, client).await
+                fetch_bitcoin_core_fee_with_client(rpc_url, &auth, client).await
             }
             FeeSource::MempoolSpace { url } => {
                 outbound::validate_request_url(url).ok()?;
-                fetch_mempool_fee(url, client).await
+                fetch_mempool_fee_with_client(url, client).await
             }
             FeeSource::Esplora { url } => {
                 outbound::validate_request_url(url).ok()?;
-                fetch_esplora_fee(url, client).await
+                fetch_esplora_fee_with_client(url, client).await
             }
         }
     }
@@ -612,7 +678,7 @@ pub mod native_fees {
             let cl = client.clone();
             set.spawn(async move {
                 let name = src.name();
-                let est = fetch_source_estimate(&src, &cl).await;
+                let est = fetch_source_estimate_with_client(&src, &cl).await;
                 (name, est)
             });
         }
@@ -723,21 +789,21 @@ pub mod native_fees {
                 .await;
             let client = Client::new();
             assert_eq!(
-                fetch_mempool_fee(&format!("{}/mempool", server.url()), &client)
+                fetch_mempool_fee_with_client(&format!("{}/mempool", server.url()), &client)
                     .await
                     .unwrap()
                     .fastest_fee,
                 25
             );
             assert_eq!(
-                fetch_esplora_fee(&format!("{}/esplora", server.url()), &client)
+                fetch_esplora_fee_with_client(&format!("{}/esplora", server.url()), &client)
                     .await
                     .unwrap()
                     .half_hour_fee,
                 19
             );
             assert_eq!(
-                fetch_bitcoin_core_fee(&server.url(), &None, &client)
+                fetch_bitcoin_core_fee_with_client(&server.url(), &None, &client)
                     .await
                     .unwrap()
                     .fastest_fee,
@@ -755,11 +821,12 @@ pub mod native_fees {
                 .with_body("x".repeat(MAX_FEE_RESPONSE_BYTES + 1))
                 .create_async()
                 .await;
-            assert!(
-                fetch_mempool_fee(&format!("{}/oversized", server.url()), &Client::new())
-                    .await
-                    .is_none()
-            );
+            assert!(fetch_mempool_fee_with_client(
+                &format!("{}/oversized", server.url()),
+                &Client::new()
+            )
+            .await
+            .is_none());
         }
     }
 }

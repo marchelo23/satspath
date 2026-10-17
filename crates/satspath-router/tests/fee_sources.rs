@@ -1,3 +1,4 @@
+use satspath_router::fees::native_fees;
 use satspath_router::fees::{
     current_time_secs, normalize_esplora_url, CachedEstimate, EsploraFeeEstimate, FeeEstimate,
     FeeEstimatorConfig, FeeSource, FALLBACK_FEES,
@@ -67,6 +68,41 @@ async fn fee_sources_reject_private_credentials_and_insecure_urls_before_network
         assert_eq!(report.sources_succeeded, 0, "{url}");
         assert_eq!(report.estimate, FALLBACK_FEES, "{url}");
     }
+
+    // A reachable local endpoint must receive zero requests, even with RPC
+    // credentials configured. Fallback alone would not prove this boundary.
+    let mut server = mockito::Server::new_async().await;
+    let rpc = server.mock("POST", "/").expect(0).create_async().await;
+    let mempool = server.mock("GET", "/").expect(0).create_async().await;
+    let report = fetch_fee_estimate_with_config(&config(vec![
+        FeeSource::BitcoinCore {
+            rpc_url: server.url(),
+            rpc_user: Some("test-user".into()),
+            rpc_password: Some("test-secret".into()),
+        },
+        FeeSource::MempoolSpace { url: server.url() },
+        FeeSource::Esplora { url: server.url() },
+    ]))
+    .await
+    .unwrap();
+    assert_eq!(report.sources_succeeded, 0);
+    assert_eq!(report.estimate, FALLBACK_FEES);
+    let unprotected = reqwest::Client::new();
+    assert!(native_fees::fetch_mempool_fee(&server.url(), &unprotected)
+        .await
+        .is_none());
+    assert!(native_fees::fetch_esplora_fee(&server.url(), &unprotected)
+        .await
+        .is_none());
+    assert!(native_fees::fetch_bitcoin_core_fee(
+        &server.url(),
+        &Some(("test-user".into(), Some("test-secret".into()))),
+        &unprotected
+    )
+    .await
+    .is_none());
+    rpc.assert_async().await;
+    mempool.assert_async().await;
 }
 
 #[tokio::test]
