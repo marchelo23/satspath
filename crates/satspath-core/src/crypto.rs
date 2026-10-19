@@ -184,7 +184,7 @@ pub fn verify_signed_profile(signed: &SignedPaymentProfile) -> Result<bool> {
 pub fn check_profile_expiry(profile: &PaymentProfile) -> Result<()> {
     if let Some(exp) = profile.expires_at {
         let now = chrono::Utc::now().timestamp();
-        if now >= exp + 60 {
+        if is_profile_expired_at(profile, now) {
             return Err(SatsPathError::RegistryError(format!(
                 "profile for '{}' expired at unix timestamp {} (now: {})",
                 profile.alias, exp, now
@@ -192,6 +192,14 @@ pub fn check_profile_expiry(profile: &PaymentProfile) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Apply the protocol's 60-second grace to a profile at a supplied Unix time.
+/// Fixed-time conformance vectors and live validation share this boundary.
+pub fn is_profile_expired_at(profile: &PaymentProfile, now: i64) -> bool {
+    profile
+        .expires_at
+        .is_some_and(|expiry| now >= expiry.saturating_add(60))
 }
 
 /// Produce a short human-readable fingerprint of a public key (first 8 hex chars of SHA-256).

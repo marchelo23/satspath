@@ -14,14 +14,23 @@ pub fn validate_method_for_network(
     sats: u64,
     network: crate::BitcoinNetwork,
 ) -> crate::Result<()> {
+    validate_method_for_network_at(method, sats, network, chrono::Utc::now().timestamp())
+}
+
+/// Validate a method for a wallet network at a fixed Unix time (for reproducible conformance checks).
+pub fn validate_method_for_network_at(
+    method: &crate::PaymentMethod,
+    sats: u64,
+    network: crate::BitcoinNetwork,
+    now: i64,
+) -> crate::Result<()> {
     let network = match network {
         crate::BitcoinNetwork::Mainnet => Network::Bitcoin,
         crate::BitcoinNetwork::Testnet => Network::Testnet,
         crate::BitcoinNetwork::Signet => Network::Signet,
         crate::BitcoinNetwork::Regtest => Network::Regtest,
     };
-    validate(method, sats, chrono::Utc::now().timestamp(), Some(network))
-        .map_err(crate::SatsPathError::InvalidPaymentPointer)
+    validate(method, sats, now, Some(network)).map_err(crate::SatsPathError::InvalidPaymentPointer)
 }
 
 /// Validate a fetched invoice against the requested network and amount before handoff.

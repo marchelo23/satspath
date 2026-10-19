@@ -9,6 +9,7 @@ members = [
     "crates/satspath-wasm",
     "crates/satspath-pqc",
     "crates/satspath-witness",
+    "crates/satspath-conformance",
 ]
 exclude = ["fuzz"]
 resolver = "2"
