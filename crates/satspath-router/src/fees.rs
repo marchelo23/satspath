@@ -176,9 +176,38 @@ impl Default for FeeEstimatorConfig {
     }
 }
 
+fn default_network_fee_urls(network: &str) -> (&'static str, Option<&'static str>) {
+    match network {
+        "mainnet" | "bitcoin" => (
+            "https://mempool.space/api/v1/fees/recommended",
+            Some("https://blockstream.info/api/fee-estimates"),
+        ),
+        "testnet4" => (
+            "https://mempool.space/testnet4/api/v1/fees/recommended",
+            None,
+        ),
+        "signet" => ("https://mempool.space/signet/api/v1/fees/recommended", None),
+        "regtest" => ("", None),
+        // devnet and other locally defined networks use testnet-form addresses.
+        _ => (
+            "https://mempool.space/testnet/api/v1/fees/recommended",
+            Some("https://blockstream.info/testnet/api/fee-estimates"),
+        ),
+    }
+}
+
 impl FeeEstimatorConfig {
     /// Build configuration from environment variables with sensible defaults.
     pub fn from_env() -> Self {
+        let network = env::var("SATSPATH_NETWORK").unwrap_or_else(|_| "mainnet".into());
+        Self::from_env_for_network(&network)
+    }
+
+    /// Select default sources for the configured Bitcoin network, never
+    /// consulting mainnet fee oracles for testnet, signet, or regtest.
+    pub fn from_env_for_network(network: &str) -> Self {
+        let network = network.trim().to_ascii_lowercase();
+        let (default_mempool, default_esplora) = default_network_fee_urls(&network);
         let max_staleness_secs = env::var("SATSPATH_FEE_MAX_STALENESS_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -222,20 +251,23 @@ impl FeeEstimatorConfig {
                         }
                     }
                     "mempool" | "mempoolspace" => {
-                        let url = env::var("SATSPATH_MEMPOOL_URL").unwrap_or_else(|_| {
-                            "https://mempool.space/api/v1/fees/recommended".to_string()
-                        });
-                        sources.push(FeeSource::MempoolSpace {
-                            url: normalize_mempool_url(&url),
-                        });
+                        let url = env::var("SATSPATH_MEMPOOL_URL")
+                            .unwrap_or_else(|_| default_mempool.to_string());
+                        if !url.is_empty() {
+                            sources.push(FeeSource::MempoolSpace {
+                                url: normalize_mempool_url(&url),
+                            });
+                        }
                     }
                     "esplora" => {
-                        let url = env::var("SATSPATH_ESPLORA_URL").unwrap_or_else(|_| {
-                            "https://blockstream.info/api/fee-estimates".to_string()
-                        });
-                        sources.push(FeeSource::Esplora {
-                            url: normalize_esplora_url(&url),
-                        });
+                        let url = env::var("SATSPATH_ESPLORA_URL")
+                            .ok()
+                            .or(default_esplora.map(str::to_owned));
+                        if let Some(url) = url {
+                            sources.push(FeeSource::Esplora {
+                                url: normalize_esplora_url(&url),
+                            });
+                        }
                     }
                     other => {
                         if let Some(stripped) = other.strip_prefix("mempool:") {
@@ -277,21 +309,37 @@ impl FeeEstimatorConfig {
                 });
             }
 
-            let mempool_url = env::var("SATSPATH_MEMPOOL_URL")
-                .unwrap_or_else(|_| "https://mempool.space/api/v1/fees/recommended".to_string());
-            sources.push(FeeSource::MempoolSpace {
-                url: normalize_mempool_url(&mempool_url),
-            });
+            let mempool_url =
+                env::var("SATSPATH_MEMPOOL_URL").unwrap_or_else(|_| default_mempool.to_string());
+            if !mempool_url.is_empty() {
+                sources.push(FeeSource::MempoolSpace {
+                    url: normalize_mempool_url(&mempool_url),
+                });
+            }
 
-            let esplora_url = env::var("SATSPATH_ESPLORA_URL")
-                .unwrap_or_else(|_| "https://blockstream.info/api/fee-estimates".to_string());
-            sources.push(FeeSource::Esplora {
-                url: normalize_esplora_url(&esplora_url),
-            });
+            if let Some(esplora_url) = env::var("SATSPATH_ESPLORA_URL")
+                .ok()
+                .or(default_esplora.map(str::to_owned))
+            {
+                sources.push(FeeSource::Esplora {
+                    url: normalize_esplora_url(&esplora_url),
+                });
+            }
 
-            sources.push(FeeSource::MempoolSpace {
-                url: "https://mempool.ninja/api/v1/fees/recommended".to_string(),
-            });
+            if network == "mainnet" || network == "bitcoin" {
+                sources.push(FeeSource::MempoolSpace {
+                    url: "https://mempool.ninja/api/v1/fees/recommended".to_string(),
+                });
+            }
+            if network == "regtest" && sources.is_empty() {
+                sources.push(FeeSource::Static(FeeEstimate {
+                    fastest_fee: 1,
+                    half_hour_fee: 1,
+                    hour_fee: 1,
+                    economy_fee: 1,
+                    minimum_fee: 1,
+                }));
+            }
         }
 
         Self {
@@ -796,6 +844,22 @@ pub fn fallback_fees() -> FeeEstimate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_fee_defaults_never_cross_into_mainnet() {
+        let (mainnet, _) = default_network_fee_urls("mainnet");
+        assert_eq!(mainnet, "https://mempool.space/api/v1/fees/recommended");
+        for network in ["testnet", "devnet", "other"] {
+            let (mempool, esplora) = default_network_fee_urls(network);
+            assert!(mempool.contains("/testnet/"), "{network}: {mempool}");
+            assert!(esplora.unwrap().contains("/testnet/"));
+        }
+        assert!(default_network_fee_urls("testnet4")
+            .0
+            .contains("/testnet4/"));
+        assert!(default_network_fee_urls("signet").0.contains("/signet/"));
+        assert_eq!(default_network_fee_urls("regtest"), ("", None));
+    }
 
     #[test]
     fn test_fee_estimate_sanitization() {

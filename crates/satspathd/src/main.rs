@@ -53,6 +53,10 @@ async fn run() -> Result<()> {
         .network
         .or_else(|| std::env::var("SATSPATH_NETWORK").ok())
         .unwrap_or_else(|| DEFAULT_NETWORK.to_string());
+    // The shared fee estimator reads this variable. Propagate the effective
+    // --network override before starting HTTP/background tasks so it never
+    // chooses a mainnet oracle for testnet/regtest requests.
+    std::env::set_var("SATSPATH_NETWORK", &network);
     let allow_mock_alias_verification = cli.dev_mock_alias_verification
         || std::env::var("SATSPATH_DEV_MOCK_ALIAS_VERIFICATION")
             .map(|value| {
@@ -222,7 +226,7 @@ async fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use satspath_core::{
@@ -340,6 +344,22 @@ mod tests {
             onchain.payload,
             format!("bitcoin:{address}?amount=0.00021000")
         );
+        let mut testnet4 = state.clone();
+        testnet4.network = "testnet4".into();
+        for (amount_sats, expected) in [
+            (None, format!("bitcoin:{address}")),
+            (Some(21_000), format!("bitcoin:{address}?amount=0.00021000")),
+        ] {
+            let view = receive_view(
+                &testnet4,
+                ReceiveRequest {
+                    rail: Some("onchain".into()),
+                    amount_sats,
+                },
+            )
+            .unwrap();
+            assert_eq!(view.payload, expected);
+        }
     }
 
     #[tokio::test]
@@ -1130,6 +1150,345 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v2_health_never_claims_witness_quorum_or_replication_without_them() {
+        let (base, server, handle) =
+            start_test_daemon_full(rate_limit::RateLimiterConfig::default(), None, false).await;
+        let client = reqwest::Client::new();
+        let empty = client
+            .get(format!("{base}/v2/health"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(empty.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let empty: serde_json::Value = empty.json().await.unwrap();
+        assert_eq!(empty["status"], "degraded");
+        assert_eq!(empty["checkpoint_age_secs"], -1);
+        assert_eq!(empty["witness_quorum_healthy"], false);
+        assert_eq!(empty["replica_count"], 0);
+
+        let status: serde_json::Value = client
+            .get(format!("{base}/v1/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let home = PathBuf::from(status["home"].as_str().unwrap());
+        let mut wallet = load_or_create_identity(&home).unwrap();
+        wallet.alias = Some("alice@example.com".into());
+        wallet.lightning_address = Some("alice@example.com".into());
+        sign_and_store(&home, &mut wallet, "devnet").unwrap();
+        let with_checkpoint = client
+            .get(format!("{base}/v2/health"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            with_checkpoint.status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let with_checkpoint: serde_json::Value = with_checkpoint.json().await.unwrap();
+        assert_eq!(with_checkpoint["status"], "degraded");
+        assert!(with_checkpoint["checkpoint_age_secs"].as_i64().unwrap() >= 0);
+        assert_eq!(with_checkpoint["witness_quorum_healthy"], false);
+        assert_eq!(with_checkpoint["replica_count"], 0);
+        server.unblock();
+        handle.abort();
+    }
+
+    async fn create_claim_test_invite(
+        client: &reqwest::Client,
+        base_url: &str,
+    ) -> (PathBuf, String) {
+        let status: serde_json::Value = client
+            .get(format!("{base_url}/v1/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let home = PathBuf::from(status["home"].as_str().unwrap());
+        let mut store = satspath_core::InviteStore::open(&home).unwrap();
+        let invite = satspath_core::create_invite_record(
+            "carol@example.com",
+            25_000,
+            None,
+            "sender-fingerprint".into(),
+            3600,
+        );
+        let id = invite.invite_id.clone();
+        store.insert(invite).unwrap();
+        (home, id)
+    }
+
+    // A valid signature by a client-controlled identity is deliberately NOT an
+    // attestation of control over the email alias in this test fixture.
+    fn client_signed_profile_for_claim() -> satspath_core::SignedPaymentProfile {
+        let identity = generate_identity_keypair();
+        let profile = PaymentProfile {
+            alias: "carol@example.com".into(),
+            identity_pubkey: hex::encode(identity.public_key.serialize()),
+            methods: vec![PaymentMethod::Onchain {
+                label: "Bitcoin (testnet)".into(),
+                network: satspath_core::BitcoinNetwork::Testnet,
+                address: Some("mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn".into()),
+                silent_payment_pubkey: None,
+                pubkey_hint: None,
+                descriptor_hint: None,
+                address_list: vec![],
+            }],
+            updated_at: now(),
+            expires_at: None,
+            sequence: Some(0),
+            preferences: vec![],
+            nonce: None,
+            rotation: None,
+            method_verifications: vec![],
+            hybrid_pubkey: None,
+            pqc_required: false,
+            revoked: false,
+            recovery_policy: None,
+            recovery: None,
+        };
+        sign_profile(profile, &identity.secret_key).unwrap()
+    }
+
+    #[tokio::test]
+    async fn public_claim_without_mock_rejects_methods_and_valid_external_profile_without_writes() {
+        let (base_url, server, handle) =
+            start_test_daemon_full(rate_limit::RateLimiterConfig::default(), None, false).await;
+        let client = reqwest::Client::new();
+        let (home, invite_id) = create_claim_test_invite(&client, &base_url).await;
+        let invites: serde_json::Value = client
+            .get(format!("{base_url}/v1/invites"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(invites[0]["invite_id"], invite_id);
+        let inspect: serde_json::Value = client
+            .get(format!("{base_url}/v1/claim?invite_id={invite_id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(inspect["is_expired"], false);
+        assert_eq!(inspect["is_claimable"], false);
+
+        let invites_path = home.join(satspath_core::invite_store::INVITES_FILE);
+        let before = std::fs::read(&invites_path).unwrap();
+        let external = client_signed_profile_for_claim();
+        assert!(verify_signed_profile(&external).unwrap());
+        for claim in [
+            serde_json::json!({
+                "invite_id": invite_id,
+                "alias": "carol@example.com",
+                "onchain_address": "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn"
+            }),
+            serde_json::json!({
+                "invite_id": invite_id,
+                "alias": "carol@example.com",
+                "signed_profile": external
+            }),
+        ] {
+            let response = client
+                .post(format!("{base_url}/v1/claim"))
+                .json(&claim)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+            let body: serde_json::Value = response.json().await.unwrap();
+            assert!(body["error"]
+                .as_str()
+                .unwrap()
+                .contains("no real email/domain alias-control verifier"));
+            assert_eq!(std::fs::read(&invites_path).unwrap(), before);
+            assert!(!crate::config::wallet_path(&home).exists());
+            assert!(!home.join("satspath-transparency-v1.sqlite3").exists());
+        }
+        assert!(satspath_core::InviteStore::open(&home)
+            .unwrap()
+            .notifications()
+            .is_empty());
+        server.unblock();
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn explicit_dev_mock_claim_warns_but_external_profile_stays_rejected() {
+        let (base_url, server, handle) =
+            start_test_daemon_full(rate_limit::RateLimiterConfig::default(), None, true).await;
+        let client = reqwest::Client::new();
+        let (home, invite_id) = create_claim_test_invite(&client, &base_url).await;
+        let invites_path = home.join(satspath_core::invite_store::INVITES_FILE);
+        let before = std::fs::read(&invites_path).unwrap();
+        let external = client_signed_profile_for_claim();
+        let response = client
+            .post(format!("{base_url}/v1/claim"))
+            .json(&serde_json::json!({
+                "invite_id": invite_id,
+                "alias": "carol@example.com",
+                "signed_profile": external
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("does not prove alias control or authorize a NameEvent"));
+        assert_eq!(std::fs::read(&invites_path).unwrap(), before);
+        assert!(!crate::config::wallet_path(&home).exists());
+        assert!(!home.join("satspath-transparency-v1.sqlite3").exists());
+
+        let invalid_method = client
+            .post(format!("{base_url}/v1/claim"))
+            .json(&serde_json::json!({
+                "invite_id": invite_id,
+                "alias": "carol@example.com",
+                "onchain_address": "not-a-bitcoin-address"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(invalid_method.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(std::fs::read(&invites_path).unwrap(), before);
+        assert!(!crate::config::wallet_path(&home).exists());
+        assert!(!home.join("satspath-transparency-v1.sqlite3").exists());
+
+        let inspect: serde_json::Value = client
+            .get(format!("{base_url}/v1/claim/{invite_id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(inspect["is_claimable"], true);
+        let response = client
+            .post(format!("{base_url}/v1/claim"))
+            .json(&serde_json::json!({
+                "invite_id": invite_id,
+                "alias": "carol@example.com",
+                "onchain_address": "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let claimed: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(claimed["status"], "claimed");
+        assert!(claimed["message"]
+            .as_str()
+            .unwrap()
+            .contains("DEVELOPMENT ONLY"));
+        assert!(claimed["message"]
+            .as_str()
+            .unwrap()
+            .contains("without email/domain"));
+        let inspect: serde_json::Value = client
+            .get(format!("{base_url}/v1/claim/{invite_id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(inspect["status"], "claimed_with_public_profile");
+        assert_eq!(inspect["is_claimable"], false);
+        let notifications: serde_json::Value = client
+            .get(format!("{base_url}/v1/invites/notifications"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(notifications.as_array().unwrap().len(), 1);
+        let envelope: serde_json::Value = client
+            .get(format!(
+                "{base_url}/v2/resolve?identifier=carol@example.com"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            envelope["signed_profile"]["profile"]["alias"],
+            "carol@example.com"
+        );
+        assert!(envelope["name_events"][0]["identifier_attestation_hash"].is_null());
+        server.unblock();
+        handle.abort();
+    }
+
+    #[test]
+    fn mock_claim_is_refused_on_mainnet_and_testnet_before_store_access() {
+        for network in ["mainnet", "bitcoin", "testnet", "signet", "unknown"] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut state = test_state(dir.path());
+            state.network = network.into();
+            state.allow_mock_alias_verification = true;
+            let error = crate::handlers::claim::claim_invite_handler(
+                &state,
+                crate::types::ClaimRequest {
+                    invite_id: "arbitrary-public-id".into(),
+                    alias: "carol@example.com".into(),
+                    signed_profile: Some(client_signed_profile_for_claim()),
+                    lightning_address: None,
+                    onchain_address: None,
+                    onchain_pubkey: None,
+                    ark_server: None,
+                    ark_pubkey: None,
+                },
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("only on devnet/regtest"));
+            assert!(!dir
+                .path()
+                .join(satspath_core::invite_store::INVITES_FILE)
+                .exists());
+            assert!(!crate::config::wallet_path(dir.path()).exists());
+            assert!(!dir.path().join("satspath-transparency-v1.sqlite3").exists());
+        }
+    }
+
+    #[test]
+    fn mock_claim_unknown_invite_does_not_create_a_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("not-created");
+        let mut state = test_state(&home);
+        state.allow_mock_alias_verification = true;
+        let error = crate::handlers::claim::claim_invite_handler(
+            &state,
+            crate::types::ClaimRequest {
+                invite_id: "unknown".into(),
+                alias: "carol@example.com".into(),
+                signed_profile: None,
+                lightning_address: None,
+                onchain_address: Some("mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn".into()),
+                onchain_pubkey: None,
+                ark_server: None,
+                ark_pubkey: None,
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("not found"));
+        assert!(!home.exists());
+    }
+
+    #[tokio::test]
     async fn dashboard_auth_preserves_private_and_public_boundaries() {
         let config = rate_limit::RateLimiterConfig {
             burst_capacity: 100,
@@ -1232,7 +1591,7 @@ mod tests {
     }
 
     #[test]
-    fn mock_alias_verification_requires_opt_in_and_refuses_mainnet() {
+    fn mock_alias_verification_requires_opt_in_and_devnet_or_regtest() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = test_state(dir.path());
         let alias = || crate::types::AliasRequest {
@@ -1249,9 +1608,15 @@ mod tests {
         state.allow_mock_alias_verification = true;
         assert!(crate::handlers::profile::create_challenge(&state, alias()).is_ok());
 
-        state.network = "mainnet".into();
-        assert!(crate::handlers::profile::create_challenge(&state, alias()).is_err());
-        assert!(crate::handlers::profile::verify_challenge(&state, verify()).is_err());
+        for network in [
+            "mainnet", "bitcoin", "testnet", "testnet4", "signet", "unknown",
+        ] {
+            state.network = network.into();
+            assert!(crate::handlers::profile::create_challenge(&state, alias()).is_err());
+            assert!(crate::handlers::profile::verify_challenge(&state, verify()).is_err());
+            assert!(!crate::config::wallet_path(dir.path()).exists());
+            assert!(!dir.path().join("satspath-transparency-v1.sqlite3").exists());
+        }
     }
 
     #[tokio::test]
@@ -1399,6 +1764,128 @@ mod tests {
         );
 
         server.unblock();
+    }
+
+    #[tokio::test]
+    async fn chunked_json_limits_are_413_and_counted_on_all_routes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (base, server, handle) =
+            start_test_daemon(rate_limit::RateLimiterConfig::default()).await;
+        let addr = base.strip_prefix("http://").unwrap();
+        for (path, auth) in [
+            ("/v1/dns/resolve", ""),
+            ("/v1/quote", "Authorization: Bearer test_token\r\n"),
+            ("/v1/resolve", "Authorization: Bearer test_token\r\n"),
+        ] {
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let request = format!(
+                "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n{auth}\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+                65_537,
+                "a".repeat(65_537)
+            );
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut response = Vec::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                stream.read_to_end(&mut response),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let response = String::from_utf8(response).unwrap();
+            assert!(
+                response.starts_with("HTTP/1.1 413"),
+                "{path}: {}",
+                &response[..response.len().min(160)]
+            );
+            assert!(response.contains("payload too large"));
+        }
+        let client = reqwest::Client::new();
+        let diag: serde_json::Value = client
+            .get(format!("{base}/v1/diagnostics/rate_limit"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(diag["total_payload_too_large"], 3);
+        server.unblock();
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn chunked_json_respects_smaller_configured_body_limit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let config = rate_limit::RateLimiterConfig {
+            max_body_bytes: 1024,
+            ..rate_limit::RateLimiterConfig::default()
+        };
+        let (base, server, handle) = start_test_daemon(config).await;
+        let addr = base.strip_prefix("http://").unwrap();
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "POST /v1/send HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n401\r\n{}\r\n0\r\n\r\n",
+            "a".repeat(1025)
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.read_to_end(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let response = String::from_utf8(response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 413"), "{response}");
+        assert!(response.contains("maximum allowed request body is 1024 bytes"));
+        let diagnostics: serde_json::Value =
+            reqwest::get(format!("{base}/v1/diagnostics/rate_limit"))
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+        assert_eq!(diagnostics["total_payload_too_large"], 1);
+        server.unblock();
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn metrics_host_exception_rejects_duplicate_host_headers() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (base, server, handle) =
+            start_test_daemon(rate_limit::RateLimiterConfig::default()).await;
+        let addr = base.strip_prefix("http://").unwrap();
+        for (host_headers, expected) in [
+            ("Host: satspathd\r\n", "HTTP/1.1 200"),
+            ("Host: satspathd\r\nHost: evil.example\r\n", "HTTP/1.1 400"),
+        ] {
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            stream
+                .write_all(
+                    format!("GET /metrics HTTP/1.1\r\n{host_headers}Connection: close\r\n\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut response = vec![0; 64];
+            let n = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                stream.read(&mut response),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let response = String::from_utf8_lossy(&response[..n]);
+            assert!(response.starts_with(expected), "{response}");
+        }
+        server.unblock();
+        handle.abort();
     }
 
     #[tokio::test]
@@ -1632,6 +2119,30 @@ mod tests {
             assert_eq!(invites.len(), 1);
             assert_eq!(invites[0].amount_sats, 25_000);
             assert!(claim_url.contains(&format!("invite_id={}", invites[0].invite_id)));
+            let before =
+                std::fs::read(dir.path().join(satspath_core::invite_store::INVITES_FILE)).unwrap();
+            let error = crate::handlers::claim::claim_invite_handler(
+                &state,
+                crate::types::ClaimRequest {
+                    invite_id: invites[0].invite_id.clone(),
+                    alias: "₿alice@example.com".into(),
+                    signed_profile: None,
+                    lightning_address: None,
+                    onchain_address: Some("mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn".into()),
+                    onchain_pubkey: None,
+                    ark_server: None,
+                    ark_pubkey: None,
+                },
+            )
+            .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("no real email/domain alias-control verifier"));
+            assert_eq!(
+                std::fs::read(dir.path().join(satspath_core::invite_store::INVITES_FILE)).unwrap(),
+                before
+            );
+            assert!(!crate::config::wallet_path(dir.path()).exists());
         }
     }
 
@@ -1663,7 +2174,8 @@ mod tests {
     #[tokio::test]
     async fn test_end_to_end_invite_claim_flow() {
         let dir = tempfile::tempdir().unwrap();
-        let state = test_state(dir.path());
+        let mut state = test_state(dir.path());
+        state.allow_mock_alias_verification = true;
         load_or_create_identity(dir.path()).unwrap();
 
         // 1. Sender initiates send to unregistered alias
@@ -1775,7 +2287,8 @@ mod tests {
     #[tokio::test]
     async fn test_expired_and_mismatched_claims() {
         let dir = tempfile::tempdir().unwrap();
-        let state = test_state(dir.path());
+        let mut state = test_state(dir.path());
+        state.allow_mock_alias_verification = true;
         load_or_create_identity(dir.path()).unwrap();
 
         let mut store = satspath_core::InviteStore::open(dir.path()).unwrap();
@@ -1832,6 +2345,33 @@ mod tests {
         )
         .unwrap_err();
         assert!(mismatch_err.to_string().contains("does not match"));
+    }
+
+    #[tokio::test]
+    async fn anchoring_rejects_testnet_daemon_before_bitcoin_rpc_or_log_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path());
+        state.network = "testnet".into();
+        let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+        state.bind = server.server_addr().to_ip().unwrap();
+        let base = format!("http://{}", state.bind);
+        let srv = server.clone();
+        let handle = tokio::spawn(serve_server(Arc::new(state), srv));
+        let response = reqwest::Client::new()
+            .post(format!("{base}/v1/transparency/anchors"))
+            .bearer_auth("test_auth_token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("daemon --network regtest"));
+        assert!(!dir.path().join("satspath-transparency-v1.sqlite3").exists());
+        server.unblock();
+        handle.abort();
     }
 
     #[tokio::test]

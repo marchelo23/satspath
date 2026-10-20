@@ -8,7 +8,7 @@ use satspath_core::InviteStore;
 
 use crate::config::AppState;
 use crate::handlers::profile::{apply_method_updates, sign_and_store};
-use crate::handlers::wallet::{load_or_create_identity, save_wallet};
+use crate::handlers::wallet::{load_or_create_identity, load_wallet, save_wallet};
 use crate::types::{ClaimRequest, ClaimResponse, InspectInviteResponse, ProfileUpdateRequest};
 
 pub(crate) fn inspect_invite_handler(
@@ -22,7 +22,8 @@ pub(crate) fn inspect_invite_handler(
 
     let now = chrono::Utc::now().timestamp();
     let is_expired = now >= invite.expires_at || invite.status == InviteStatus::Expired;
-    let is_claimable = !is_expired
+    let is_claimable = ensure_invite_claim_enabled(state).is_ok()
+        && !is_expired
         && invite.status != InviteStatus::ClaimedWithPublicProfile
         && invite.status != InviteStatus::Cancelled;
 
@@ -53,7 +54,37 @@ pub(crate) fn inspect_invite_handler(
     })
 }
 
+/// An invite ID (also returned by public /v1/send) and a matching alias hash do
+/// not establish control of an email address or domain. No production alias
+/// attestation is implemented for this endpoint. Keep the gate ahead of every
+/// store or wallet access, including the externally signed profile path.
+fn ensure_invite_claim_enabled(state: &AppState) -> Result<()> {
+    if !state.allow_mock_alias_verification {
+        anyhow::bail!(
+            "invite claiming is disabled: no real email/domain alias-control verifier is configured; an invite ID, matching alias hash or profile signature is not proof of alias control (development only: --dev-mock-alias-verification on devnet/regtest)"
+        );
+    }
+    if !matches!(
+        state.network.trim().to_ascii_lowercase().as_str(),
+        "devnet" | "regtest"
+    ) {
+        anyhow::bail!(
+            "insecure mock invite claiming is allowed only on devnet/regtest, never on mainnet or testnet; real alias attestation is not implemented"
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn claim_invite_handler(state: &AppState, body: ClaimRequest) -> Result<ClaimResponse> {
+    ensure_invite_claim_enabled(state)?;
+    // A signature over the profile proves possession of its identity key, not
+    // control of the alias; it cannot authorize a transparency NameEvent either.
+    // The wire request has no independently signed event or alias attestation.
+    if body.signed_profile.is_some() {
+        anyhow::bail!(
+            "externally signed profiles cannot be claimed here: a profile signature does not prove alias control or authorize a NameEvent"
+        );
+    }
     if body.invite_id.trim().is_empty() {
         anyhow::bail!("missing invite_id");
     }
@@ -61,6 +92,13 @@ pub(crate) fn claim_invite_handler(state: &AppState, body: ClaimRequest) -> Resu
         anyhow::bail!("missing alias");
     }
 
+    if !state
+        .home
+        .join(satspath_core::invite_store::INVITES_FILE)
+        .try_exists()?
+    {
+        anyhow::bail!("invite '{}' not found", body.invite_id);
+    }
     let mut store = InviteStore::open(&state.home)?;
     let invite = store
         .get(&body.invite_id)
@@ -98,75 +136,36 @@ pub(crate) fn claim_invite_handler(state: &AppState, body: ClaimRequest) -> Resu
         }
     }
 
-    // Determine receiver public key and publish profile to transparency log
-    let receiver_pubkey = if let Some(signed) = body.signed_profile {
-        // Validate signed profile
-        if !satspath_core::crypto::verify_signed_profile(&signed)? {
-            anyhow::bail!("receiver signed profile verification failed");
-        }
-        if signed.profile.alias != body.alias {
-            anyhow::bail!("signed profile alias does not match claim alias");
-        }
-        if signed.profile.methods.is_empty() {
-            anyhow::bail!("signed profile must contain at least one payment method");
-        }
-        let pubkey = signed.profile.identity_pubkey.clone();
+    // Validate the public receive methods before initializing an identity: an
+    // invalid claim must not create a wallet as a side effect of rejection.
+    let mut wallet = load_wallet(&state.home)?;
+    wallet.alias = Some(body.alias.clone());
 
-        // Commit to transparency log
-        let tstore = satspath_core::TransactionalTransparencyStore::open(&state.home)?;
-        let log = tstore.load_log()?;
-        let history: Vec<_> = log.history(&expected_hash).into_iter().cloned().collect();
-        let previous_event_hash = history.last().map(|e| e.event_hash()).transpose()?;
-        let next_sequence = satspath_core::next_identifier_sequence(None, &history)?;
-
-        let event = satspath_core::NameEvent {
-            version: 1,
-            identifier_hash: expected_hash.clone(),
-            action: if history.is_empty() {
-                satspath_core::NameAction::Register
-            } else {
-                satspath_core::NameAction::UpdateProfile
-            },
-            identity_pubkey: pubkey.clone(),
-            profile_hash: satspath_core::transparency::profile_hash(&signed)?,
-            sequence: next_sequence,
-            previous_event_hash,
-            created_at: now,
-            identifier_attestation_hash: None,
-            removed_method_hashes: vec![],
-            rotation: signed.profile.rotation.clone(),
-            recovery_policy: signed.profile.recovery_policy.clone(),
-            recovery: signed.profile.recovery.clone(),
-            owner_signature: signed.signature.clone(),
-        };
-
-        let candidate = log.prepare_append(event.clone(), &signed)?;
-        let operator =
-            crate::handlers::transparency::load_or_create_transparency_operator(&state.home)?;
-        let checkpoint = candidate.prepare_checkpoint(&operator)?;
-        tstore.commit_profile_event_checkpoint(&body.alias, &signed, &event, &checkpoint)?;
-        pubkey
-    } else {
-        // Build and publish profile using daemon identity
-        let mut wallet = load_or_create_identity(&state.home)?;
-        wallet.alias = Some(body.alias.clone());
-
-        let update_req = ProfileUpdateRequest {
-            alias: Some(body.alias.clone()),
-            lightning_address: body.lightning_address,
-            onchain_address: body.onchain_address,
-            onchain_pubkey: body.onchain_pubkey,
-            ark_server: body.ark_server,
-            ark_pubkey: body.ark_pubkey,
-            remove_methods: vec![],
-            recovery_policy: None,
-        };
-
-        apply_method_updates(&mut wallet, &state.network, update_req, false)?;
-        sign_and_store(&state.home, &mut wallet, &state.network)?;
-        save_wallet(&state.home, &wallet)?;
-        wallet.identity_pubkey.unwrap_or_default()
+    let update_req = ProfileUpdateRequest {
+        alias: Some(body.alias.clone()),
+        lightning_address: body.lightning_address,
+        onchain_address: body.onchain_address,
+        onchain_pubkey: body.onchain_pubkey,
+        ark_server: body.ark_server,
+        ark_pubkey: body.ark_pubkey,
+        remove_methods: vec![],
+        recovery_policy: None,
     };
+
+    apply_method_updates(&mut wallet, &state.network, update_req, false)?;
+    if crate::types::build_methods(&wallet, &state.network).is_empty() {
+        anyhow::bail!("profile needs at least one public receive method");
+    }
+    // Development-only: the daemon's local identity key is NOT evidence of
+    // control of the email/domain alias. Do not enable this path on real networks.
+    if wallet.identity_pubkey.is_none() {
+        let identity = load_or_create_identity(&state.home)?;
+        wallet.identity_pubkey = identity.identity_pubkey;
+        wallet.created_at = identity.created_at;
+    }
+    sign_and_store(&state.home, &mut wallet, &state.network)?;
+    save_wallet(&state.home, &wallet)?;
+    let receiver_pubkey = wallet.identity_pubkey.unwrap_or_default();
 
     // Transition invite to ClaimedWithPublicProfile and create notification
     store.claim(&body.invite_id, &receiver_pubkey)?;
@@ -178,8 +177,7 @@ pub(crate) fn claim_invite_handler(state: &AppState, body: ClaimRequest) -> Resu
         amount_sats: invite.amount_sats,
         profile_pubkey: receiver_pubkey,
         claimed_at: now,
-        message: "Invite successfully claimed and receiver profile published to transparency log"
-            .into(),
+        message: "DEVELOPMENT ONLY: insecure mock claim; receiver profile published without email/domain alias-control attestation. Do not treat its signature as proof of alias ownership".into(),
     })
 }
 

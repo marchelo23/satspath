@@ -146,7 +146,11 @@ fn configured_network(network: &str) -> Result<BitcoinNetwork> {
     match network.to_ascii_lowercase().as_str() {
         "mainnet" | "bitcoin" => Ok(BitcoinNetwork::Mainnet),
         // Intentional alias: local `devnet` uses Testnet/Signet (`tb`) encodings.
-        "testnet" | "devnet" => Ok(BitcoinNetwork::Testnet),
+        // Testnet4 uses the same address encoding; the core method enum has no
+        // distinct Testnet4 variant. This does not make testnet3 UTXOs spendable
+        // on testnet4; the host wallet still selects the actual chain.
+        "testnet" | "testnet4" | "devnet" => Ok(BitcoinNetwork::Testnet),
+        "signet" => Ok(BitcoinNetwork::Signet),
         "regtest" => Ok(BitcoinNetwork::Regtest),
         _ => bail!("unsupported daemon network for payment handoff"),
     }
@@ -178,6 +182,10 @@ fn validate_bolt11(
         "mainnet" | "bitcoin" => Currency::Bitcoin,
         // Keep `devnet` aligned with `configured_network` (`BitcoinNetwork::Testnet`).
         "testnet" | "devnet" => Currency::BitcoinTestnet,
+        "signet" => Currency::Signet,
+        // BOLT11's testnet HRP does not by itself bind the distinct Testnet4
+        // chain. Do not accept a testnet3 invoice as a testnet4 payment.
+        "testnet4" => bail!("testnet4 BOLT11 invoice handoff lacks chain binding"),
         "regtest" => Currency::Regtest,
         _ => bail!("unsupported Lightning network for payment handoff"),
     };
@@ -213,6 +221,31 @@ mod tests {
         assert_eq!(fmt_btc(0), "0.00000000");
         assert_eq!(fmt_btc(21_000), "0.00021000");
         assert_eq!(fmt_btc(100_000_000), "1.00000000");
+    }
+
+    #[test]
+    fn testnet4_and_signet_receive_handoffs_use_matching_tb_addresses() {
+        for (network, method_network, address_network) in [
+            ("testnet4", BitcoinNetwork::Testnet, Network::Testnet),
+            ("signet", BitcoinNetwork::Signet, Network::Signet),
+        ] {
+            let address = segwit_address(address_network);
+            let method = PaymentMethod::Onchain {
+                label: "test network".into(),
+                network: method_network,
+                address: Some(address.clone()),
+                silent_payment_pubkey: None,
+                pubkey_hint: None,
+                descriptor_hint: None,
+                address_list: vec![],
+            };
+            assert!(address.starts_with("tb1"));
+            let receive = format!("bitcoin:{address}");
+            let payable = format!("{receive}?amount=0.00025000");
+            validate_payload(&method, &receive, network, None).unwrap();
+            validate_payload(&method, &payable, network, Some(25_000)).unwrap();
+            assert!(validate_payload(&method, &payable, "regtest", Some(25_000)).is_err());
+        }
     }
 
     fn onchain(address: &str) -> PaymentMethod {

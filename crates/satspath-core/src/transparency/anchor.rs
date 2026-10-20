@@ -135,9 +135,22 @@ impl RegtestAnchorClient {
         Ok(value["result"].clone())
     }
 
+    /// Verify the chain reported by the actual RPC node, not just the
+    /// operator-provided SATSPATH_BITCOIN_NETWORK or loopback RPC URL.
+    pub async fn ensure_regtest_chain(&self) -> crate::Result<()> {
+        let info = self.rpc("getblockchaininfo", json!([])).await?;
+        if info["chain"].as_str() != Some("regtest") {
+            return Err(crate::SatsPathError::ValidationError(
+                "Bitcoin checkpoint anchoring requires a regtest RPC node".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Bitcoin Core only serves confirmed non-mempool transactions via
     /// `getrawtransaction` when `-txindex` is enabled and synced.
     pub async fn ensure_txindex(&self) -> crate::Result<()> {
+        self.ensure_regtest_chain().await?;
         let info = self.rpc("getindexinfo", json!(["txindex"])).await?;
         if info["txindex"]["synced"].as_bool() != Some(true) {
             return Err(crate::SatsPathError::ValidationError(
@@ -149,6 +162,7 @@ impl RegtestAnchorClient {
 
     /// Create, fund, sign, broadcast and mine a legacy standalone OP_RETURN commitment.
     pub async fn anchor_checkpoint(&self, checkpoint_hash: &str) -> crate::Result<BitcoinAnchor> {
+        self.ensure_regtest_chain().await?;
         let commitment = anchor_commitment(checkpoint_hash)
             .map_err(|e| crate::SatsPathError::SerializationError(e.to_string()))?;
         let raw = self
@@ -327,6 +341,7 @@ impl RegtestAnchorClient {
         checkpoint_hash: &str,
         prev_anchor: &BitcoinAnchor,
     ) -> crate::Result<(String, BitcoinAnchor)> {
+        self.ensure_regtest_chain().await?;
         let prev_continuation_vout = prev_anchor.continuation_vout.ok_or_else(|| {
             crate::SatsPathError::ValidationError(
                 "previous anchor is missing continuation_vout for chaining".into(),
@@ -438,6 +453,7 @@ impl RegtestAnchorClient {
 
     /// Broadcast a raw signed transaction to the Bitcoin network.
     pub async fn broadcast_raw_transaction(&self, tx_hex: &str) -> crate::Result<String> {
+        self.ensure_regtest_chain().await?;
         let txid = self
             .rpc("sendrawtransaction", json!([tx_hex]))
             .await?
@@ -856,6 +872,7 @@ impl RegtestAnchorClient {
 
     /// Mine a given number of blocks to a new address.
     pub async fn mine_blocks(&self, count: u32) -> crate::Result<()> {
+        self.ensure_regtest_chain().await?;
         let miner_address = self.rpc("getnewaddress", json!([])).await?;
         self.rpc("generatetoaddress", json!([count, miner_address]))
             .await?;
@@ -864,6 +881,7 @@ impl RegtestAnchorClient {
 
     /// Persistently lock a continuation outpoint to protect it from wallet coin selection.
     pub async fn lock_continuation(&self, txid: &str, vout: u32) -> crate::Result<()> {
+        self.ensure_regtest_chain().await?;
         let lock_res = self
             .rpc(
                 "lockunspent",
@@ -939,5 +957,66 @@ impl MockAnchorClient {
             continuation_vout: Some(1),
             chain_index: Some(chain_index),
         })
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::RegtestAnchorClient;
+    use mockito::Matcher;
+
+    #[tokio::test]
+    async fn wrong_rpc_chain_blocks_anchor_signing_and_broadcast() {
+        for chain in ["main", "test", "testnet4", "signet"] {
+            let mut rpc = mockito::Server::new_async().await;
+            let chain_reply = rpc
+                .mock("POST", "/wallet/miner")
+                .match_body(Matcher::Regex("\"method\":\"getblockchaininfo\"".into()))
+                .with_status(200)
+                .with_body(format!(
+                    r#"{{"result":{{"chain":"{chain}"}},"error":null,"id":"test"}}"#
+                ))
+                .expect(2)
+                .create_async()
+                .await;
+            let client = RegtestAnchorClient {
+                rpc_url: format!("{}/wallet/miner", rpc.url()),
+                rpc_user: "unit-test".into(),
+                rpc_password: "not-a-secret".into(),
+                client: crate::outbound::http_client(std::time::Duration::from_secs(2)),
+            };
+            let error = client
+                .anchor_checkpoint(&"00".repeat(32))
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("requires a regtest RPC node"));
+            let error = client
+                .broadcast_raw_transaction("deadbeef")
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("requires a regtest RPC node"));
+            chain_reply.assert_async().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn regtest_rpc_chain_is_accepted() {
+        let mut rpc = mockito::Server::new_async().await;
+        let chain_reply = rpc
+            .mock("POST", "/wallet/miner")
+            .match_body(Matcher::Regex("\"method\":\"getblockchaininfo\"".into()))
+            .with_status(200)
+            .with_body(r#"{"result":{"chain":"regtest"},"error":null,"id":"test"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let client = RegtestAnchorClient {
+            rpc_url: format!("{}/wallet/miner", rpc.url()),
+            rpc_user: "unit-test".into(),
+            rpc_password: "not-a-secret".into(),
+            client: crate::outbound::http_client(std::time::Duration::from_secs(2)),
+        };
+        client.ensure_regtest_chain().await.unwrap();
+        chain_reply.assert_async().await;
     }
 }

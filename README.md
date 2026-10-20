@@ -56,7 +56,7 @@ A Lightning Address (`user@domain.com`) exclusively targets a Lightning receivin
 * **Log Operators & Witnesses:** Monitored via append-only Merkle logs and $K$-of-$N$ Schnorr witness quorums to detect split views and rollbacks.
 
 ### Who Holds the Private Keys?
-**Host wallets hold all private spending keys.** SatsPath does not have, never generates, and never requests private spending keys or seed phrases. SatsPath holds only a non-custodial `secp256k1` identity keypair used exclusively to sign public metadata profiles and rotation records.
+**Host wallets hold user private spending keys.** SatsPath does not have, generate, or request user spending keys or seed phrases. It holds a non-custodial `secp256k1` identity keypair for public metadata profiles and rotation records. The separate opt-in **regtest checkpoint anchoring** feature uses loopback RPC credentials to instruct an operator-controlled Bitcoin Core wallet to fund, sign, broadcast and mine its own anchor transactions; the daemon does not receive that wallet's spending keys. Never use a wallet with real funds for this feature.
 
 ### What Works Today, What is Experimental, and What Has Not Been Audited?
 * **Implemented Today:** Signed profiles, key rotation, guardian key recovery, HTTPS/Nostr resolvers, BIP-353 DNS resolution with embedded local DNSSEC validation (`HickoryDnssecTxtResolver`), standards-conformant BOLT12 offers/blinded paths/invoice requests, multi-source fee consensus, append-only Merkle transparency log, sparse Merkle state map, Catena Bitcoin `OP_RETURN` anchoring, checkpoint gossip monitoring, and witness quorum cosigning.
@@ -96,11 +96,11 @@ flowchart LR
     class F,G,H,I wallet;
 ```
 
-* **No Custody of Funds:** SatsPath does not custody, seize, freeze, or hold user funds.
-* **No Seed Phrases:** SatsPath never handles BIP-39 seeds, xprv/tprv keys, or node credentials.
+* **No Custody of User Funds:** SatsPath does not custody, seize, freeze, or hold user funds. Regtest anchoring can instruct an operator wallet to spend valueless test coins on checkpoint transactions.
+* **No User Spending Secrets:** SatsPath never handles user BIP-39 seeds, xprv/tprv keys, or user-payment credentials. Opt-in regtest anchoring does use operator Bitcoin Core RPC credentials, which must be kept private.
 * **Identity Keys Carry No Funds:** The `secp256k1` identity keypair is used exclusively to sign public profiles, authorization statements, and key rotations.
-* **Wallet Retains Final Authority:** The host wallet inspects payment instructions, presents them to the user, signs with internal spending keys, and broadcasts directly to the network.
-* **Custody Risk vs. Payment Redirection Risk:** Compromising SatsPath does not directly expose wallet spending keys or authorize Bitcoin transactions. However, a compromised discovery or handoff component may attempt payment redirection, which is why authenticated profiles, key continuity, resolver verification, and wallet-side confirmation of amounts and destinations remain security-critical.
+* **Wallet Retains Final Payment Authority:** The host wallet inspects payment instructions, presents them to the user, signs with internal spending keys, and broadcasts user payments directly to the network. Operator-authorized regtest anchoring is separate from this flow.
+* **Custody Risk vs. Payment Redirection Risk:** Compromising SatsPath does not directly expose user wallet spending keys or authorize user payments, but a compromised daemon with regtest anchor RPC credentials could direct **operator-wallet regtest transactions**. A compromised discovery or handoff component may also attempt payment redirection, so authenticated profiles, key continuity, resolver verification, and wallet-side confirmation remain security-critical.
 
 ---
 
@@ -224,7 +224,7 @@ The witness protocol requires a $K$-of-$N$ threshold (e.g. 2-of-3 or 3-of-5). If
 
 ### 6. Does SatsPath work on Bitcoin Mainnet today?
 **For public discovery and wallet handoff: YES (with documented limitations).** SatsPath can resolve mainnet Lightning Addresses, fetch mainnet BOLT11 invoices, and generate mainnet BIP-21 URIs. Standards-conformant BOLT12 offer/blinded-path/invoice-request primitives and public-projection checks for all 28 official BIP-352 test vector groups are implemented in `satspath-router`, while daemon payable handoff endpoints remain gated to verified on-chain BIP-21 payloads until live wallet interoperability is verified.  
-**For transaction execution: NO.** SatsPath does not connect to the Bitcoin P2P network to broadcast transactions, does not manage UTXOs, and does not hold spending keys. Execution is delegated to the user's wallet.
+**For user-payment execution: NO.** SatsPath does not connect to Bitcoin P2P to execute user payments or hold user spending keys; that remains the host wallet's responsibility. The distinct authenticated regtest checkpoint anchor path can direct an operator's Bitcoin Core wallet over loopback RPC to manage continuation UTXOs and broadcast valueless test transactions.
 
 ### 7. Has SatsPath been externally audited?
 **No.** SatsPath has completed internal conformance testing and automated adversarial simulation suites, but has **not yet undergone an independent third-party cryptographic or security audit**. Formal audit is a mandatory release gate before production real-funds recommendations.

@@ -91,6 +91,18 @@ pub(crate) fn is_allowed_host(
     bind.ip().is_unspecified() || ip == bind.ip() || (bind.ip().is_loopback() && ip.is_loopback())
 }
 
+/// The dedicated metrics scrape name is an exception to the normal allow-list,
+/// not an exception to HTTP's single-Host requirement.
+pub(crate) fn is_internal_metrics_host(headers: &[Header]) -> bool {
+    let mut hosts = headers.iter().filter(|header| header.field.equiv("Host"));
+    let Some(host) = hosts.next() else {
+        return false;
+    };
+    hosts.next().is_none()
+        && parse_authority(host.value.as_str())
+            .is_ok_and(|authority| authority.to_string() == "satspathd")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +160,16 @@ mod tests {
         let mut forwarded = headers("rebind.example");
         forwarded.push(Header::from_bytes("X-Forwarded-Host", "localhost").unwrap());
         assert!(!is_allowed_host(&forwarded, bind, &[]));
+    }
+
+    #[test]
+    fn metrics_scrape_exception_requires_exactly_one_host() {
+        assert!(is_internal_metrics_host(&headers("satspathd")));
+        assert!(!is_internal_metrics_host(&[]));
+        assert!(!is_internal_metrics_host(&headers("evil.example")));
+        let mut duplicate = headers("satspathd");
+        duplicate.extend(headers("evil.example"));
+        assert!(!is_internal_metrics_host(&duplicate));
     }
 
     #[test]

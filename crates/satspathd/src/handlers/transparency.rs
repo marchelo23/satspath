@@ -79,6 +79,12 @@ struct PendingCatenaAnchor {
 pub(crate) async fn anchor_latest_checkpoint(
     state: &AppState,
 ) -> Result<satspath_core::TransparencyBitcoinAnchor> {
+    // The RPC client's separate environment gate cannot establish what network
+    // this daemon serves. Refuse cross-network anchors before opening stores or
+    // issuing any Bitcoin RPC request.
+    if !state.network.trim().eq_ignore_ascii_case("regtest") {
+        anyhow::bail!("Bitcoin checkpoint anchoring requires daemon --network regtest");
+    }
     let _anchor_guard = state.anchor_lock.lock().await;
     let log = transparency_log(state)?;
     let checkpoint = log
@@ -91,6 +97,9 @@ pub(crate) async fn anchor_latest_checkpoint(
     }
     let checkpoint_hash = checkpoint.checkpoint_hash()?;
     let client = satspath_core::transparency::RegtestAnchorClient::from_env()?;
+    // Do not infer the node's chain from configuration or its wallet address.
+    // A loopback Bitcoin Core can still be running on testnet or mainnet.
+    client.ensure_regtest_chain().await?;
 
     // Find the latest Catena anchor by selecting the anchor with the maximum chain_index
     let mut prev_anchor = log
