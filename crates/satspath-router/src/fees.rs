@@ -182,10 +182,6 @@ fn default_network_fee_urls(network: &str) -> (&'static str, Option<&'static str
             "https://mempool.space/api/v1/fees/recommended",
             Some("https://blockstream.info/api/fee-estimates"),
         ),
-        "testnet4" => (
-            "https://mempool.space/testnet4/api/v1/fees/recommended",
-            None,
-        ),
         "signet" => ("https://mempool.space/signet/api/v1/fees/recommended", None),
         "regtest" => ("", None),
         // devnet and other locally defined networks use testnet-form addresses.
@@ -220,8 +216,7 @@ impl FeeEstimatorConfig {
 
         let min_sources_for_consensus = env::var("SATSPATH_FEE_MIN_SOURCES")
             .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(1);
+            .and_then(|v| v.parse::<usize>().ok());
 
         let mut sources = Vec::new();
 
@@ -290,48 +285,12 @@ impl FeeEstimatorConfig {
             }
         }
 
-        // If no explicit sources configured via SATSPATH_FEE_SOURCES, build standard multi-source set:
+        // If no explicit sources configured via SATSPATH_FEE_SOURCES, build the
+        // standard set. Regtest has no public fee market, so the default is a
+        // deterministic static estimate; an explicit RPC source is still honored
+        // when SATSPATH_FEE_SOURCES is set above.
         if sources.is_empty() {
-            let rpc_url = env::var("SATSPATH_BITCOIN_RPC_URL")
-                .ok()
-                .or_else(|| env::var("BITCOIN_RPC_URL").ok());
-            if let Some(url) = rpc_url {
-                let user = env::var("SATSPATH_BITCOIN_RPC_USER")
-                    .ok()
-                    .or_else(|| env::var("BITCOIN_RPC_USER").ok());
-                let pass = env::var("SATSPATH_BITCOIN_RPC_PASSWORD")
-                    .ok()
-                    .or_else(|| env::var("BITCOIN_RPC_PASS").ok());
-                sources.push(FeeSource::BitcoinCore {
-                    rpc_url: url,
-                    rpc_user: user,
-                    rpc_password: pass,
-                });
-            }
-
-            let mempool_url =
-                env::var("SATSPATH_MEMPOOL_URL").unwrap_or_else(|_| default_mempool.to_string());
-            if !mempool_url.is_empty() {
-                sources.push(FeeSource::MempoolSpace {
-                    url: normalize_mempool_url(&mempool_url),
-                });
-            }
-
-            if let Some(esplora_url) = env::var("SATSPATH_ESPLORA_URL")
-                .ok()
-                .or(default_esplora.map(str::to_owned))
-            {
-                sources.push(FeeSource::Esplora {
-                    url: normalize_esplora_url(&esplora_url),
-                });
-            }
-
-            if network == "mainnet" || network == "bitcoin" {
-                sources.push(FeeSource::MempoolSpace {
-                    url: "https://mempool.ninja/api/v1/fees/recommended".to_string(),
-                });
-            }
-            if network == "regtest" && sources.is_empty() {
+            if network == "regtest" {
                 sources.push(FeeSource::Static(FeeEstimate {
                     fastest_fee: 1,
                     half_hour_fee: 1,
@@ -339,9 +298,55 @@ impl FeeEstimatorConfig {
                     economy_fee: 1,
                     minimum_fee: 1,
                 }));
+            } else {
+                let rpc_url = env::var("SATSPATH_BITCOIN_RPC_URL")
+                    .ok()
+                    .or_else(|| env::var("BITCOIN_RPC_URL").ok());
+                if let Some(url) = rpc_url {
+                    let user = env::var("SATSPATH_BITCOIN_RPC_USER")
+                        .ok()
+                        .or_else(|| env::var("BITCOIN_RPC_USER").ok());
+                    let pass = env::var("SATSPATH_BITCOIN_RPC_PASSWORD")
+                        .ok()
+                        .or_else(|| env::var("BITCOIN_RPC_PASS").ok());
+                    sources.push(FeeSource::BitcoinCore {
+                        rpc_url: url,
+                        rpc_user: user,
+                        rpc_password: pass,
+                    });
+                }
+
+                let mempool_url = env::var("SATSPATH_MEMPOOL_URL")
+                    .unwrap_or_else(|_| default_mempool.to_string());
+                if !mempool_url.is_empty() {
+                    sources.push(FeeSource::MempoolSpace {
+                        url: normalize_mempool_url(&mempool_url),
+                    });
+                }
+
+                if let Some(esplora_url) = env::var("SATSPATH_ESPLORA_URL")
+                    .ok()
+                    .or(default_esplora.map(str::to_owned))
+                {
+                    sources.push(FeeSource::Esplora {
+                        url: normalize_esplora_url(&esplora_url),
+                    });
+                }
+
+                if network == "mainnet" || network == "bitcoin" {
+                    sources.push(FeeSource::MempoolSpace {
+                        url: "https://mempool.ninja/api/v1/fees/recommended".to_string(),
+                    });
+                }
             }
         }
 
+        // A single oracle is not a consensus. When multiple sources are
+        // configured, require at least two unless the operator explicitly
+        // overrides SATSPATH_FEE_MIN_SOURCES.
+        let min_sources_for_consensus = min_sources_for_consensus
+            .unwrap_or_else(|| sources.len().clamp(1, 2))
+            .max(1);
         Self {
             sources,
             min_sources_for_consensus,
@@ -854,9 +859,6 @@ mod tests {
             assert!(mempool.contains("/testnet/"), "{network}: {mempool}");
             assert!(esplora.unwrap().contains("/testnet/"));
         }
-        assert!(default_network_fee_urls("testnet4")
-            .0
-            .contains("/testnet4/"));
         assert!(default_network_fee_urls("signet").0.contains("/signet/"));
         assert_eq!(default_network_fee_urls("regtest"), ("", None));
     }

@@ -528,7 +528,9 @@ pub(crate) fn ensure_signed_profile(
         if signed.profile.revoked {
             anyhow::bail!("revoked profile cannot be broadcast");
         }
-        check_profile_expiry(&signed.profile)?;
+        // An expired profile may be renewed, but only after its signature,
+        // history, checkpoint and wallet binding have been verified below.
+        let expired = check_profile_expiry(&signed.profile).is_err();
         satspath_core::transparency::verify_identifier_history(&history)?;
         let latest = history
             .last()
@@ -570,7 +572,8 @@ pub(crate) fn ensure_signed_profile(
             .recovery_policy
             .as_ref()
             .or(signed.profile.recovery_policy.as_ref());
-        if signed.profile.methods == build_methods(wallet, network)
+        if !expired
+            && signed.profile.methods == build_methods(wallet, network)
             && recovery_policy == signed.profile.recovery_policy.as_ref()
         {
             // In particular, do not renew nonce, expiry or sequence simply

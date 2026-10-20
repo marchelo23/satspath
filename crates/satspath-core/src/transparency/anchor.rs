@@ -967,7 +967,7 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_rpc_chain_blocks_anchor_signing_and_broadcast() {
-        for chain in ["main", "test", "testnet4", "signet"] {
+        for chain in ["main", "test", "signet"] {
             let mut rpc = mockito::Server::new_async().await;
             let chain_reply = rpc
                 .mock("POST", "/wallet/miner")

@@ -6,9 +6,9 @@ use satspath_core::privacy::identifier_hash;
 use satspath_core::profile::{ClaimNotification, InviteRecord, InviteStatus};
 use satspath_core::InviteStore;
 
-use crate::config::AppState;
+use crate::config::{AppState, WalletState};
 use crate::handlers::profile::{apply_method_updates, sign_and_store};
-use crate::handlers::wallet::{load_or_create_identity, load_wallet, save_wallet};
+use crate::handlers::wallet::load_or_create_identity;
 use crate::types::{ClaimRequest, ClaimResponse, InspectInviteResponse, ProfileUpdateRequest};
 
 pub(crate) fn inspect_invite_handler(
@@ -138,8 +138,12 @@ pub(crate) fn claim_invite_handler(state: &AppState, body: ClaimRequest) -> Resu
 
     // Validate the public receive methods before initializing an identity: an
     // invalid claim must not create a wallet as a side effect of rejection.
-    let mut wallet = load_wallet(&state.home)?;
-    wallet.alias = Some(body.alias.clone());
+    // Keep the claim profile separate from the operator's wallet so a mock
+    // claim cannot rewrite the sender/operator alias or receive methods.
+    let mut wallet = WalletState {
+        alias: Some(body.alias.clone()),
+        ..WalletState::default()
+    };
 
     let update_req = ProfileUpdateRequest {
         alias: Some(body.alias.clone()),
@@ -158,13 +162,11 @@ pub(crate) fn claim_invite_handler(state: &AppState, body: ClaimRequest) -> Resu
     }
     // Development-only: the daemon's local identity key is NOT evidence of
     // control of the email/domain alias. Do not enable this path on real networks.
-    if wallet.identity_pubkey.is_none() {
-        let identity = load_or_create_identity(&state.home)?;
-        wallet.identity_pubkey = identity.identity_pubkey;
-        wallet.created_at = identity.created_at;
-    }
+    let identity = load_or_create_identity(&state.home)?;
+    wallet.identity_pubkey = identity.identity_pubkey;
+    wallet.created_at = identity.created_at;
+    wallet.updated_at = Some(now);
     sign_and_store(&state.home, &mut wallet, &state.network)?;
-    save_wallet(&state.home, &wallet)?;
     let receiver_pubkey = wallet.identity_pubkey.unwrap_or_default();
 
     // Transition invite to ClaimedWithPublicProfile and create notification

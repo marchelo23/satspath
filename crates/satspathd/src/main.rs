@@ -242,7 +242,7 @@ mod tests {
         quote::{pay_response, quote_response},
         resolve::resolve_v2_envelope,
         send::{receive_view, send_response, send_response_with_resolver},
-        wallet::{load_or_create_identity, save_identity_key, save_wallet},
+        wallet::{load_or_create_identity, load_wallet, save_identity_key, save_wallet},
     };
     use crate::rate_limit;
     use crate::server::{audit_binding_security, serve_server};
@@ -267,6 +267,17 @@ mod tests {
             )),
             is_tls: false,
         }
+    }
+
+    #[test]
+    fn devnet_is_the_default_and_mainnet_requires_an_explicit_flag() {
+        use clap::Parser;
+
+        assert_eq!(crate::config::DEFAULT_NETWORK, "devnet");
+        let default = crate::config::Cli::parse_from(["satspathd"]);
+        assert!(default.network.is_none());
+        let mainnet = crate::config::Cli::parse_from(["satspathd", "--network", "mainnet"]);
+        assert_eq!(mainnet.network.as_deref(), Some("mainnet"));
     }
 
     #[test]
@@ -344,22 +355,6 @@ mod tests {
             onchain.payload,
             format!("bitcoin:{address}?amount=0.00021000")
         );
-        let mut testnet4 = state.clone();
-        testnet4.network = "testnet4".into();
-        for (amount_sats, expected) in [
-            (None, format!("bitcoin:{address}")),
-            (Some(21_000), format!("bitcoin:{address}?amount=0.00021000")),
-        ] {
-            let view = receive_view(
-                &testnet4,
-                ReceiveRequest {
-                    rail: Some("onchain".into()),
-                    amount_sats,
-                },
-            )
-            .unwrap();
-            assert_eq!(view.payload, expected);
-        }
     }
 
     #[tokio::test]
@@ -1464,6 +1459,39 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn dev_mock_claim_does_not_overwrite_the_operator_wallet() {
+        let (base_url, server, handle) =
+            start_test_daemon_full(rate_limit::RateLimiterConfig::default(), None, true).await;
+        let client = reqwest::Client::new();
+        let (home, invite_id) = create_claim_test_invite(&client, &base_url).await;
+        let mut operator = load_or_create_identity(&home).unwrap();
+        operator.alias = Some("operator@example.com".into());
+        operator.lightning_address = Some("operator@getalby.com".into());
+        save_wallet(&home, &operator).unwrap();
+        let before = load_wallet(&home).unwrap();
+
+        let response = client
+            .post(format!("{base_url}/v1/claim"))
+            .json(&serde_json::json!({
+                "invite_id": invite_id,
+                "alias": "carol@example.com",
+                "onchain_address": "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let after = load_wallet(&home).unwrap();
+        assert_eq!(after.alias, before.alias);
+        assert_eq!(after.lightning_address, before.lightning_address);
+        assert_eq!(after.onchain_address, before.onchain_address);
+        assert_eq!(after.identity_pubkey, before.identity_pubkey);
+        server.unblock();
+        handle.abort();
+    }
+
     #[test]
     fn mock_claim_unknown_invite_does_not_create_a_store() {
         let dir = tempfile::tempdir().unwrap();
@@ -1608,9 +1636,7 @@ mod tests {
         state.allow_mock_alias_verification = true;
         assert!(crate::handlers::profile::create_challenge(&state, alias()).is_ok());
 
-        for network in [
-            "mainnet", "bitcoin", "testnet", "testnet4", "signet", "unknown",
-        ] {
+        for network in ["mainnet", "bitcoin", "testnet", "signet", "unknown"] {
             state.network = network.into();
             assert!(crate::handlers::profile::create_challenge(&state, alias()).is_err());
             assert!(crate::handlers::profile::verify_challenge(&state, verify()).is_err());
@@ -1764,6 +1790,43 @@ mod tests {
         );
 
         server.unblock();
+    }
+
+    #[tokio::test]
+    async fn json_mutations_require_json_content_type() {
+        let (base, server, handle) =
+            start_test_daemon(rate_limit::RateLimiterConfig::default()).await;
+        let client = reqwest::Client::new();
+        let endpoint = format!("{base}/v1/send");
+        let json = r#"{"recipient":"content-type@example.com","amount_sats":25000}"#;
+
+        let missing = client.post(&endpoint).body(json).send().await.unwrap();
+        assert_eq!(missing.status(), reqwest::StatusCode::BAD_REQUEST);
+        let missing: serde_json::Value = missing.json().await.unwrap();
+        assert!(missing["error"]
+            .as_str()
+            .unwrap()
+            .contains("Content-Type must be application/json"));
+
+        let wrong = client
+            .post(&endpoint)
+            .header("Content-Type", "text/plain")
+            .body(json)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(wrong.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        let valid = client
+            .post(&endpoint)
+            .header("Content-Type", "application/json; charset=utf-8")
+            .body(json)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(valid.status(), reqwest::StatusCode::OK);
+        server.unblock();
+        handle.abort();
     }
 
     #[tokio::test]

@@ -354,7 +354,7 @@ production alias verifier yet, so `/v1/profile/challenge` and `/v1/profile/verif
 regtest only**, start `satspathd` with `--dev-mock-alias-verification` (or
 `SATSPATH_DEV_MOCK_ALIAS_VERIFICATION=1`) to enable the mock verifier where the
 token equals the email address itself. The mock is refused on mainnet,
-testnet/testnet4 and signet. Even with this flag, `POST /v1/claim` does not
+testnet and signet. Even with this flag, `POST /v1/claim` does not
 produce a real alias attestation.
 
 ```bash

@@ -774,7 +774,7 @@ paths:
       summary: Complete alias verification (DEV MOCK)
       description: 'Binds the alias to the local identity and signs/stores the profile if methods already
         exist. Fails closed (`HTTP 400`) by default unless `--dev-mock-alias-verification` is enabled on a
-        devnet/regtest network. This mock cannot attest an email/domain and is refused on mainnet/testnet/testnet4/signet.'
+        devnet/regtest network. This mock cannot attest an email/domain and is refused on mainnet/testnet/signet.'
       operationId: verifyProfileChallenge
       requestBody:
         required: true

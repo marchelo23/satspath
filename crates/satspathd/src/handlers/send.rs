@@ -254,13 +254,21 @@ fn never_registered_locally(state: &AppState, alias: &str) -> Result<bool> {
     {
         return Ok(false);
     }
+    let identifier_hash = satspath_core::privacy::identifier_hash(alias);
     let store = TransactionalTransparencyStore::open(&state.home)?;
-    if store.profile(alias)?.is_some()
-        || !store
-            .load_log()?
-            .history(&satspath_core::privacy::identifier_hash(alias))
-            .is_empty()
-    {
+    if store.profile(alias)?.is_some() || !store.load_log()?.history(&identifier_hash).is_empty() {
+        return Ok(false);
+    }
+    // Do not create a second invite while one is still pending. Expired or
+    // cancelled invites may be replaced; claimed/created/email-sent invites may not.
+    let invites =
+        satspath_core::InviteStore::open(&state.home)?.get_by_identifier_hash(&identifier_hash);
+    if invites.iter().any(|invite| {
+        !matches!(
+            invite.status,
+            satspath_core::InviteStatus::Expired | satspath_core::InviteStatus::Cancelled
+        )
+    }) {
         return Ok(false);
     }
     // A legacy entry is *not* a payable resolution, but suppress an invitation
@@ -723,6 +731,16 @@ mod tests {
             .next()
             .unwrap();
         assert_eq!(invite_count(dir.path()), 1);
+        let duplicate = send_response(&state, request("carol@example.com")).await;
+        assert!(
+            matches!(duplicate, SendResponse::NoRoute { ref reason } if reason.contains("already exists locally")),
+            "{duplicate:?}"
+        );
+        assert_eq!(
+            invite_count(dir.path()),
+            1,
+            "a pending invite must not be duplicated"
+        );
         crate::handlers::claim::claim_invite_handler(
             &state,
             crate::types::ClaimRequest {

@@ -44,6 +44,20 @@ pub(crate) fn read_json<T: for<'de> serde::Deserialize<'de>>(
     if std::str::from_utf8(&body)?.trim().is_empty() {
         anyhow::bail!("request body must be JSON");
     }
+    let content_type_ok = request.headers().iter().any(|header| {
+        header.field.equiv("Content-Type")
+            && header
+                .value
+                .as_str()
+                .split(';')
+                .next()
+                .is_some_and(|media_type| {
+                    media_type.trim().eq_ignore_ascii_case("application/json")
+                })
+    });
+    if !content_type_ok {
+        anyhow::bail!("Content-Type must be application/json");
+    }
     Ok(serde_json::from_slice(&body)?)
 }
 
