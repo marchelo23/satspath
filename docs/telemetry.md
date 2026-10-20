@@ -79,4 +79,4 @@ Every incoming HTTP request is assigned a correlation ID (`X-Request-ID` header 
 | Variable | Values | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `RUST_LOG` | `info`, `debug`, `satspathd=debug` | `info` | Standard `tracing_subscriber::EnvFilter` directive. |
-| `SATSPATH_LOG_FORMAT` | `json`, `pretty` | `pretty` | Set to `json` for structured JSON log lines in production containers. |
+| `SATSPATH_LOG_FORMAT` | `text`, `pretty`, `json` | `text` | Set to `json` for structured JSON log lines in production containers (`--log-format` CLI flag). |

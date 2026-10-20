@@ -59,8 +59,8 @@ A Lightning Address (`user@domain.com`) exclusively targets a Lightning receivin
 **Host wallets hold all private spending keys.** SatsPath does not have, never generates, and never requests private spending keys or seed phrases. SatsPath holds only a non-custodial `secp256k1` identity keypair used exclusively to sign public metadata profiles and rotation records.
 
 ### What Works Today, What is Experimental, and What Has Not Been Audited?
-* **Implemented Today:** Signed profiles, key rotation, HTTPS/Nostr resolvers, multi-source fee consensus, append-only Merkle transparency log, sparse Merkle state map, and witness quorum cosigning.
-* **Preview / Experimental:** BIP-353 (Preview; strict DNSSEC fails closed without local validator), BOLT12 (Experimental / Partial; prototype TLV, offer-handling, and blinded-path primitives exist; standards-conformant checksumless BOLT12 string decoding, invoice-request construction, Merkle signing, and CLN/LDK interop remain incomplete), Silent Payments (Experimental; public operations checked against projections of all 28 official BIP-352 vector groups; wallet interoperability and production readiness remain unverified), Ark routing (Preview; ASP rounds simulated and live ASP client handoff builders).
+* **Implemented Today:** Signed profiles, key rotation, guardian key recovery, HTTPS/Nostr resolvers, BIP-353 DNS resolution with embedded local DNSSEC validation (`HickoryDnssecTxtResolver`), standards-conformant BOLT12 offers/blinded paths/invoice requests, multi-source fee consensus, append-only Merkle transparency log, sparse Merkle state map, Catena Bitcoin `OP_RETURN` anchoring, checkpoint gossip monitoring, and witness quorum cosigning.
+* **Preview / Experimental:** Ark routing (Preview; live ASP client `/v1/info`, VTXO DAG verification, and Boarding/Forfeit/OOR handoff builders), Silent Payments (Experimental; public operations checked against projections of all 28 official BIP-352 vector groups; host wallet retains private keys and ECDH), Submarine/Reverse Swaps (Experimental; testnet/regtest only).
 * **Wallet handoffs:** Daemon, router, and WASM quotes emit payable QRs only for verified on-chain addresses with a matching network and exact amount. The CLI `quote` and `preview --fetch-lnurl-invoice` commands can also emit BOLT11 invoices after shared payee-key, network, amount, and expiry validation. Amount-less Lightning pointers remain receive-only; BOLT12, Ark, and Silent Payment handoffs fail closed until protocol-aware validation is available.
 * **Audit Status:** SatsPath has completed internal test suites and automated adversarial simulations, but has **NOT yet undergone an independent third-party cryptographic or security audit**.
 
@@ -223,7 +223,7 @@ When a client contacts an identifier for the very first time without prior key p
 The witness protocol requires a $K$-of-$N$ threshold (e.g. 2-of-3 or 3-of-5). If fewer than $K$ witnesses are compromised, the rogue operator cannot obtain the cosignatures needed to validate an equivocation. If $K$ or more witnesses collude with the operator to forge a split view, clients on disparate branches cannot detect the fork locally until checkpoints are audited or gossiped out-of-band.
 
 ### 6. Does SatsPath work on Bitcoin Mainnet today?
-**For public discovery and wallet handoff: YES (with documented limitations).** SatsPath can resolve mainnet Lightning Addresses, fetch mainnet BOLT11 invoices, and generate mainnet BIP-21 URIs. Experimental BOLT12 handling exists, but standards-conformant mainnet interoperability is not yet claimed. Experimental BIP-352 primitives and address/output construction are implemented, but standards conformance and mainnet interoperability are not claimed until the official BIP-352 test vectors pass.  
+**For public discovery and wallet handoff: YES (with documented limitations).** SatsPath can resolve mainnet Lightning Addresses, fetch mainnet BOLT11 invoices, and generate mainnet BIP-21 URIs. Standards-conformant BOLT12 offer/blinded-path/invoice-request primitives and public-projection checks for all 28 official BIP-352 test vector groups are implemented in `satspath-router`, while daemon payable handoff endpoints remain gated to verified on-chain BIP-21 payloads until live wallet interoperability is verified.  
 **For transaction execution: NO.** SatsPath does not connect to the Bitcoin P2P network to broadcast transactions, does not manage UTXOs, and does not hold spending keys. Execution is delegated to the user's wallet.
 
 ### 7. Has SatsPath been externally audited?
@@ -236,10 +236,12 @@ The witness protocol requires a $K$-of-$N$ threshold (e.g. 2-of-3 or 3-of-5). If
 | Crate | Purpose | Maturity Status |
 | :--- | :--- | :--- |
 | **`crates/satspath-core`** | Canonical JSON, Schnorr crypto, Merkle log, Sparse Merkle state map, resolvers | **IMPLEMENTED** |
-| **`crates/satspath-router`** | Routing engine, fee consensus, BOLT12 handling, BIP-352 Silent Payments | **IMPLEMENTED** |
+| **`crates/satspath-handoff`** | Strict payment handoff payload validation (BIP-21, BOLT11, network/amount bounds) | **IMPLEMENTED** |
+| **`crates/satspath-router`** | Routing engine, fee consensus, BOLT12 handling, BIP-352 Silent Payments, Ark | **IMPLEMENTED** |
 | **`crates/satspath-cli`** | Reference command-line client for development and preview flows | **IMPLEMENTED** |
 | **`crates/satspathd`** | Server daemon, REST API, transparency endpoint, token-bucket rate limiting | **IMPLEMENTED** |
 | **`crates/satspath-witness`** | Independent witness node, $K$-of-$N$ checkpoint cosigning, split-view detector | **IMPLEMENTED** |
+| **`crates/satspath-gossip`** | Checkpoint gossip monitor and split-view detector | **IMPLEMENTED** |
 | **`crates/satspath-wasm`** | WebAssembly bindings for web browsers and wallet integration | **PREVIEW** |
 | **`crates/satspath-swaps`** | Experimental Boltz v2 swap scaffolding (testnet/regtest only) | **EXPERIMENTAL** |
 | **`crates/satspath-pqc`** | Hybrid classical + post-quantum signature research module (ML-DSA-65) | **RESEARCH** |
@@ -302,14 +304,15 @@ SatsPath is developed as **free and open-source public infrastructure** for the 
 
 * **Architecture:** [`docs/architecture.md`](docs/architecture.md)
 * **Threat Model & Security:** [`docs/threat_model.md`](docs/threat_model.md)
-* **Key Transparency:** [`docs/key_transparency.md`](docs/key_transparency.md)
+* **Key Transparency & Gossip:** [`docs/key_transparency.md`](docs/key_transparency.md) and [`docs/checkpoint_gossip.md`](docs/checkpoint_gossip.md)
+* **Guardian Key Recovery:** [`docs/key_recovery.md`](docs/key_recovery.md)
 * **Mainnet Safety Boundaries:** [`docs/mainnet_safety.md`](docs/mainnet_safety.md)
 * **Implementation Mapping:** [`docs/implementations.md`](docs/implementations.md)
-* **Security Simulations & Testing:** [`security_tests.md`](security_tests.md)
-* **Protocol v1 Specification:** [`docs/protocol.md`](docs/protocol.md)
-* **Resolvers Specification:** [`docs/resolvers.md`](docs/resolvers.md)
-* **BIP-353 DNS Resolution:** [`docs/bip353_dns_resolution.md`](docs/bip353_dns_resolution.md)
-* **BOLT12 Handling:** [`docs/bolt12_handling.md`](docs/bolt12_handling.md)
-* **Docker Deployment:** [`docs/docker.md`](docs/docker.md)
+* **Security Simulations & Testing:** [`security_tests.md`](security_tests.md) and [`docs/benchmarks.md`](docs/benchmarks.md)
+* **Protocol v1 & S2S v2 Specifications:** [`docs/protocol.md`](docs/protocol.md) and [`docs/s2s/protocol-v2.md`](docs/s2s/protocol-v2.md)
+* **Resolvers & BIP-353 DNS Resolution:** [`docs/resolvers.md`](docs/resolvers.md) and [`docs/bip353_dns_resolution.md`](docs/bip353_dns_resolution.md)
+* **BOLT12, Ark & Payment Intent Handoffs:** [`docs/bolt12_handling.md`](docs/bolt12_handling.md), [`docs/ark_routes.md`](docs/ark_routes.md), and [`docs/payment_intent.md`](docs/payment_intent.md)
+* **Docker, Telemetry & Proxy Hardening:** [`docs/docker.md`](docs/docker.md), [`docs/telemetry.md`](docs/telemetry.md), and [`docs/security/REVERSE_PROXY_RATE_LIMITING.md`](docs/security/REVERSE_PROXY_RATE_LIMITING.md)
 * **SDK Quickstart:** [`docs/SDK_QUICKSTART.md`](docs/SDK_QUICKSTART.md)
+* **Daemon HTTP API Reference:** [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) and OpenAPI spec [`docs/openapi.yaml`](docs/openapi.yaml)
 * **v0.2 Roadmap:** [`docs/v02_roadmap.md`](docs/v02_roadmap.md)

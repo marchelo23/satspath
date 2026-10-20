@@ -72,7 +72,7 @@ In SatsPath's routing engine, offers containing valid blinded paths receive an i
 ### 3. Bolt12InvoiceRequest
 - **HRP:** `lnr` / `lnrt`.
 - Created by the payer when initiating payment.
-- Contains `offer_id` (currently computed via SHA-256 over concatenated TLVs; full all-TLV Merkle tree root alignment is scheduled for v0.2), `invreq_amount`, `payer_node_id`, optional `payer_note`, and a BIP-340 Schnorr signature.
+- Contains `offer_id` (computed as the BOLT12 all-TLV Merkle tree root over the offer's TLV stream via `tlv_merkle_root`), `invreq_amount`, `payer_node_id`, optional `payer_note`, and a BIP-340 Schnorr signature.
 
 ### 4. Bolt12Invoice
 - **HRP:** `lni` / `lnit` / `lnib` / `lnis` (mainnet/testnet/regtest/signet).

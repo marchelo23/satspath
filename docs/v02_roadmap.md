@@ -21,10 +21,11 @@ The current codebase (`crates/`) implements and tests the following capabilities
   * Prometheus metrics (`/metrics`), structured JSON/pretty request tracing (`X-Request-ID`), and deep dependency health probes (`/health`, `/v1/health`, `/v2/health`).
 * **Witness Quorum Cosigning (IMPLEMENTED):** Standalone witness node daemon (`crates/satspath-witness`) performing $K$-of-$N$ Schnorr cosigning, consistency proof verification, and local rollback/equivocation detection.
 * **Multi-Source Fee Estimation (IMPLEMENTED):** Concurrent queries to Bitcoin Core RPC, Esplora, and Mempool.space with median consensus filtering and decaying cache fallback (`crates/satspath-router/src/fees.rs`).
-* **BIP-353 DNS Resolution (PREVIEW):** Record parsing and strict DNSSEC policy enforcement (`DnssecPolicy::Strict`) are implemented, failing closed whenever cryptographic DNSSEC validation is unavailable.
-* **BOLT12 Handling (EXPERIMENTAL / PARTIAL):** TLV, offer-handling, and blinded-path primitives exist (`crates/satspath-router/src/bolt12.rs`).
-* **Silent Payments BIP-352 (EXPERIMENTAL):** BIP-352 ECDH shared-secret and output derivation primitives (`crates/satspath-router/src/silent_payments.rs`).
-* **Ark Payment Routing (PREVIEW):** Receive pointer parsing, ownership proofs, and route scoring (`crates/satspath-router/src/ark.rs`, `ark_routes.rs`).
+* **BIP-353 DNS Resolution (IMPLEMENTED):** Embedded local DNSSEC cryptographic validation engine (`HickoryDnssecTxtResolver` in `crates/satspath-core/src/bip353.rs`) verifying `DNSKEY`/`RRSIG`/`DS` chains anchored at ICANN root KSKs (`38696`, `20326`, `19036`) under `DnssecPolicy::Strict`, plus persistent `sp-profile` continuity tracking.
+* **BOLT12 Offers & Blinded Paths (IMPLEMENTED):** Checksumless Bech32 (`NoChecksum`) decoding with `+` continuation, all-TLV Merkle root hashing (`LnLeaf`, `LnNonce` + `all-tlvs`, `LnBranch`), BOLT #4 wire-format blinded paths, and `OnionMessageTransport` `invoice_request` flow (`crates/satspath-router/src/bolt12.rs`).
+* **Silent Payments BIP-352 (EXPERIMENTAL):** Public-key address encoding, input validation, NUMS exclusion, and output verification checked against public projections of all 28 official BIP-352 test vector groups (`crates/satspath-router/src/silent_payments.rs`); host wallets retain private keys and ECDH.
+* **Ark Payment Routing (PREVIEW):** Receive pointer parsing, ownership proofs, live `arkd` `/v1/info` client (`LiveArkAspClient`), VTXO tree DAG verification (`verify_ark_vtxo_dag`), and Boarding/Forfeit/OOR handoff structs (`crates/satspath-router/src/ark.rs`, `ark_routes.rs`).
+* **Standardized Wallet Handoff & Bridges (IMPLEMENTED):** Canonical `PaymentIntent` envelope (`crates/satspath-core/src/intent.rs`) and non-custodial `WalletExecutor` bridges (`BdkWalletBridge`, `LdkNodeBridge`, `BoltzSwapBridge` in `crates/satspath-core/src/bridges.rs`).
 * **Submarine / Reverse Swaps (EXPERIMENTAL):** Boltz Exchange v2 client, encrypted store (AES-256-GCM), and claim/refund tx builders for testnet/regtest only (`crates/satspath-swaps`).
 * **Post-Quantum Cryptography (RESEARCH):** Feature-gated hybrid signature and KEM research module (`secp256k1` + ML-DSA-65 / X25519 + ML-KEM-768) in `crates/satspath-pqc`.
 
@@ -36,18 +37,20 @@ The current codebase (`crates/`) implements and tests the following capabilities
 
 - [x] **Authenticated Current-State Map (`SparseMerkleTree`):** 256-bit Sparse Merkle Tree inclusion/non-inclusion proofs bound to `TransparencyCheckpoint.map_root`.
 - [x] **Catena-Style Bitcoin On-Chain Anchoring:** UTXO-chained `OP_RETURN` commitments (`SatsPathCatenaAnchorV1`) with equivocation detection and bounded chain verification.
-- [x] **Checkpoint Gossip Protocol:** Nostr/P2P gossip observation comparison (`GOSSIP_KIND = 3978`) and `SplitViewEvidence` generation.
+- [x] **Checkpoint Gossip Protocol:** Nostr/P2P gossip observation comparison (`GOSSIP_KIND = 3978`), standalone `satspath-gossip` monitor, and `SplitViewEvidence` generation.
 - [x] **Modular `satspathd` Refactor, Rate Limiting & Telemetry:** Split daemon into `handlers/`, `rate_limit.rs`, `server.rs`, and `telemetry/` with Prometheus `/metrics` and deep health checks.
-- [x] **Protocol Parser Fuzzing Suite:** `cargo-fuzz` targets for profiles, BIP-321 URIs, BOLT12 TLVs, and Merkle proofs (`.github/workflows/fuzz.yml`).
+- [x] **Protocol Parser & Differential Fuzzing Suite (#172):** `cargo-fuzz` targets and proptest suites for profiles, BIP-321 URIs, BOLT12 TLVs, RFC 8785 canonical JSON, and Merkle proofs (`.github/workflows/fuzz.yml`).
+- [x] **Embedded Cryptographic DNSSEC Validator (#152):** In-process RFC 4034/4035 `DNSKEY`/`RRSIG`/`DS` chain verification (`HickoryDnssecTxtResolver`) anchored to the ICANN root KSKs in `satspath-core`.
+- [x] **Standards-Compliant BOLT12 & CLN/LDK Interoperability (#153):** Checksumless Bech32 decoding, all-TLV Merkle root signing, BOLT #4 wire-format blinded paths, and Onion Message invoice requests.
+- [x] **Official BIP-352 Public Vector Verification (#154):** Public-key address, input eligibility, NUMS exclusion, and output checks validated against public projections of all 28 official BIP-352 test vector groups.
+- [x] **Live Ark ASP Connector & Settlement Handoffs (#155):** `LiveArkAspClient` (`/v1/info`), VTXO tree DAG verification (`verify_ark_vtxo_dag`), and Boarding/Forfeit/OOR handoff structs.
+- [x] **Standardized Non-Custodial `WalletExecutor` Bridges & `PaymentIntent` (#156, #173):** Canonical `PaymentIntent` handoff envelope and reference `BdkWalletBridge`, `LdkNodeBridge`, and `BoltzSwapBridge` adapters.
 
-### Active / Pending v0.2 Targets
+### Active / Pending Release Gates
 
-- [ ] **Embedded Cryptographic DNSSEC Validator (#152):** Perform in-process RFC 4034/4035 `DNSKEY`/`RRSIG`/`DS` chain verification anchored to the root KSK in `satspath-core`.
-- [ ] **Standards-Compliant BOLT12 & CLN/LDK Interoperability (#153):** Full checksumless Bech32 decoding, all-TLV Merkle root signing, and Onion Message invoice requests.
-- [ ] **Official BIP-352 Test Vector Conformance (#154):** Validate full input filtering, Taproot parity, NUMS exclusion, and label derivation against the official BIP-352 JSON test vectors.
-- [ ] **Live Ark ASP Connector & Settlement Handoffs (#155):** Connect `satspath-router` to live `arkd` `/v1/info` endpoints, VTXO tree DAG verification, and Boarding/Forfeit/OOR handoff payloads.
-- [ ] **Standardized Non-Custodial `WalletExecutor` Bridges (#156):** Provide reference BDK, LDK, and Boltz testnet swap execution bridges.
 - [ ] **External Third-Party Cryptographic Audit:** Independent review per [`docs/audit/EXTERNAL_CRYPTO_REVIEW_SPEC.md`](audit/EXTERNAL_CRYPTO_REVIEW_SPEC.md).
+- [ ] **Decentralized Multi-Operator Witness Federation:** Production deployment of independent, geographically distributed witness nodes and gossip monitors.
+- [ ] **Live End-to-End Mainnet Wallet Interoperability:** Live end-to-end validation with external BOLT12, BIP-352 Silent Payment, and Ark wallets before removing experimental handoff gates in `satspathd`.
 
 ---
 
