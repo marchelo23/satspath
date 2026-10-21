@@ -262,7 +262,8 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
             &serde_json::json!({ "ok": true, "status": "healthy" }),
         ),
         (Method::Get, "/v1/health") => {
-            let health = crate::telemetry::perform_deep_health_check(&state.home).await;
+            let health =
+                crate::telemetry::perform_deep_health_check(&state.home, &state.network).await;
             let status = if health.status == "healthy" || health.status == "degraded" {
                 StatusCode(200)
             } else {

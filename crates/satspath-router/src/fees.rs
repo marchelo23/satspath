@@ -819,6 +819,32 @@ pub async fn fetch_fee_estimate() -> Result<FeeEstimate> {
     }
 }
 
+/// Fetch a fee estimate using the default sources for `network` instead of the
+/// process-global `SATSPATH_NETWORK` environment variable.
+pub async fn fetch_fee_estimate_for_network(network: &str) -> Result<FeeEstimate> {
+    #[cfg(feature = "std")]
+    {
+        let config = FeeEstimatorConfig::from_env_for_network(network);
+        match native_fees::fetch_consensus_fee(&config).await {
+            Ok(report) => Ok(report.estimate),
+            Err(_) => Ok(FALLBACK_FEES),
+        }
+    }
+    #[cfg(all(feature = "wasm", target_arch = "wasm32", not(feature = "std")))]
+    {
+        let _ = network;
+        match wasm_fees::fetch_fee_estimate().await {
+            Ok(fee) => Ok(fee),
+            Err(_) => Ok(FALLBACK_FEES),
+        }
+    }
+    #[cfg(not(any(feature = "std", feature = "wasm")))]
+    {
+        let _ = network;
+        Ok(FALLBACK_FEES)
+    }
+}
+
 /// Fetch fee estimate report using explicit configuration.
 pub async fn fetch_fee_estimate_with_config(
     config: &FeeEstimatorConfig,

@@ -9,7 +9,7 @@ use satspath_core::{
 };
 use satspath_router::{
     handoff::{fmt_btc, validate_payload},
-    quote_verified_profile, QuoteResponse,
+    quote_verified_profile_for_network, QuoteResponse,
 };
 
 #[cfg(test)]
@@ -26,6 +26,10 @@ use crate::types::{
     SendResponse,
 };
 use crate::ui::qr_svg;
+
+/// Operational bound for the invite file. Expired invites are pruned before a
+/// new record is refused, so this is not a lifetime limit on claimed invites.
+const MAX_STORED_INVITES: usize = 10_000;
 
 /// Choose a configured receive rail and validate its final public QR payload.
 pub(crate) fn receive_view(state: &AppState, req: ReceiveRequest) -> Result<ReceiveView> {
@@ -169,7 +173,14 @@ pub(crate) async fn send_response(state: &AppState, body: SendRequest) -> SendRe
             // quote_verified_profile uses select_route, amount-bound QR validation
             // and ONLY independently verified ownership descriptors. No proof is
             // synthesized from an identity signature or a static receive address.
-            match quote_verified_profile(signed, &body.recipient, body.amount_sats, &allowed).await
+            match quote_verified_profile_for_network(
+                signed,
+                &body.recipient,
+                body.amount_sats,
+                &allowed,
+                &state.network,
+            )
+            .await
             {
                 QuoteResponse::Ok {
                     selected_method,
@@ -224,6 +235,9 @@ pub(crate) async fn send_response(state: &AppState, body: SendRequest) -> SendRe
                 Some(SatsPathError::AliasNotFound(_))
             ) =>
         {
+            // Serialize the re-check and insert so two concurrent requests cannot
+            // both observe "not registered" and create duplicate invites.
+            let _guard = state.mutation_lock.lock().await;
             // An absent profile is not enough: an alias may have a transparency
             // history (including a revocation), a pending local wallet profile,
             // or a legacy entry. None of those should receive a second invite.
@@ -301,6 +315,34 @@ fn invite_response(state: &AppState, body: &SendRequest) -> SendResponse {
             }
         }
     };
+    let invite_count = match store.list() {
+        Ok(invites) => invites.len(),
+        Err(e) => {
+            return SendResponse::NoRoute {
+                reason: e.to_string(),
+            }
+        }
+    };
+    if invite_count >= MAX_STORED_INVITES {
+        if let Err(e) = store.prune_expired() {
+            return SendResponse::NoRoute {
+                reason: e.to_string(),
+            };
+        }
+        let remaining = match store.list() {
+            Ok(invites) => invites.len(),
+            Err(e) => {
+                return SendResponse::NoRoute {
+                    reason: e.to_string(),
+                }
+            }
+        };
+        if remaining >= MAX_STORED_INVITES {
+            return SendResponse::NoRoute {
+                reason: "invite store is full; wait for pending invites to expire".into(),
+            };
+        }
+    }
     let sender_fp = secret_opt
         .as_ref()
         .map(|sk| {
@@ -764,6 +806,33 @@ mod tests {
             );
             assert_eq!(invite_count(dir.path()), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn concurrent_unknown_alias_sends_create_one_invite() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        load_or_create_identity(dir.path()).unwrap();
+        let (first, second) = tokio::join!(
+            send_response(&state, request("dave@example.com")),
+            send_response(&state, request("dave@example.com")),
+        );
+        let responses = [first, second];
+        assert_eq!(
+            responses
+                .iter()
+                .filter(|response| matches!(response, SendResponse::Invite { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            responses
+                .iter()
+                .filter(|response| matches!(response, SendResponse::NoRoute { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(invite_count(dir.path()), 1);
     }
 
     #[tokio::test]

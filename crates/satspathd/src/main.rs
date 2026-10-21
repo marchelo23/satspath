@@ -53,10 +53,6 @@ async fn run() -> Result<()> {
         .network
         .or_else(|| std::env::var("SATSPATH_NETWORK").ok())
         .unwrap_or_else(|| DEFAULT_NETWORK.to_string());
-    // The shared fee estimator reads this variable. Propagate the effective
-    // --network override before starting HTTP/background tasks so it never
-    // chooses a mainnet oracle for testnet/regtest requests.
-    std::env::set_var("SATSPATH_NETWORK", &network);
     let allow_mock_alias_verification = cli.dev_mock_alias_verification
         || std::env::var("SATSPATH_DEV_MOCK_ALIAS_VERIFICATION")
             .map(|value| {
@@ -210,7 +206,10 @@ async fn run() -> Result<()> {
 
     print_startup_status(&state)?;
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-    let metrics_refresher = crate::telemetry::health::spawn_metrics_refresher(state.home.clone());
+    let metrics_refresher = crate::telemetry::health::spawn_metrics_refresher(
+        state.home.clone(),
+        state.network.clone(),
+    );
     let bridge = cli
         .p2p
         .then(|| tokio::spawn(p2p::supervise(state.clone(), stop_rx)));

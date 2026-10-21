@@ -7,7 +7,7 @@ use crate::lightning::{
 };
 use crate::onchain::{estimate_onchain_fee_sats, first_onchain_method, is_onchain_available};
 
-const LIGHTNING_THRESHOLD_SATS: u64 = 100_000;
+pub const LIGHTNING_THRESHOLD_SATS: u64 = 100_000;
 
 /// A routing request: who to pay and how much.
 #[derive(Debug, Clone)]

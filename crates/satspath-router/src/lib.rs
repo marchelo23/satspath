@@ -39,8 +39,9 @@ pub use bolt12::{
 };
 pub use fees::{
     compute_median_fee, decay_estimate, fallback_fees, fetch_fee_estimate,
-    fetch_fee_estimate_with_config, ConsensusFeeReport, EsploraFeeEstimate, FeeEstimate,
-    FeeEstimatorConfig, FeeSource, MempoolFeeEstimate, MultiSourceFeeEstimator,
+    fetch_fee_estimate_for_network, fetch_fee_estimate_with_config, ConsensusFeeReport,
+    EsploraFeeEstimate, FeeEstimate, FeeEstimatorConfig, FeeSource, MempoolFeeEstimate,
+    MultiSourceFeeEstimator,
 };
 pub use key_rotation::{
     apply_key_rotation, get_effective_identity_pubkey, is_rotation_valid, rotate_identity_key,
@@ -53,11 +54,12 @@ pub use lightning::{
 };
 pub use priority::{select_priority_route, PriorityDecision};
 pub use quote_response::{
-    build_qr_payload, quote, quote_verified_profile, quote_with_resolver, QuoteRecipient,
-    QuoteResponse,
+    build_qr_payload, quote, quote_verified_profile, quote_verified_profile_for_network,
+    quote_with_resolver, QuoteRecipient, QuoteResponse,
 };
 pub use router::{
     select_route, select_route_with_fees, FeeRateSnapshot, RouteQuote, RouteRequest, SwapDirective,
+    LIGHTNING_THRESHOLD_SATS,
 };
 pub use satspath_core::SplitPaymentRequest;
 pub use scoring::{

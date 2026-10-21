@@ -5160,7 +5160,7 @@ components:
       required:
       - challenge_id
       - message
-      description: 'Development-only mock email verifier (requires `--dev-mock-alias-verification` on non-mainnet): the token equals the email address itself. Not a real attestation.'
+      description: 'Development-only mock email verifier (requires `--dev-mock-alias-verification` on devnet/regtest only): the token equals the email address itself. Not a real attestation.'
     VerifyRequest:
       type: object
       properties:
@@ -5709,10 +5709,10 @@ components:
         checkpoint_age_secs:
           type: integer
           format: int64
-          description: -1 when the log cannot be opened.
+          description: -1 when no checkpoint exists or the log cannot be opened.
         witness_quorum_healthy:
           type: boolean
-          description: Currently mirrors log readability.
+          description: Always false; this daemon has no configured witness-quorum verifier.
         replica_count:
           type: integer
           format: int32

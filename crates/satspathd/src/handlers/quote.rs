@@ -34,11 +34,12 @@ pub(crate) async fn quote_response(
         .filter(|state| state.verified)
         .map(|state| state.descriptor.clone())
         .collect();
-    let quote = satspath_router::quote_verified_profile(
+    let quote = satspath_router::quote_verified_profile_for_network(
         resolved.signed_profile,
         &body.recipient,
         body.amount_sats,
         &allowed,
+        &state.network,
     )
     .await;
     checked_quote(quote, &state.network, body.amount_sats)
