@@ -808,16 +808,23 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_unknown_alias_sends_create_one_invite() {
         let dir = tempfile::tempdir().unwrap();
-        let state = test_state(dir.path());
+        let state = Arc::new(test_state(dir.path()));
         load_or_create_identity(dir.path()).unwrap();
-        let (first, second) = tokio::join!(
-            send_response(&state, request("dave@example.com")),
-            send_response(&state, request("dave@example.com")),
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let spawn = |state: Arc<AppState>, barrier: Arc<tokio::sync::Barrier>| {
+            tokio::spawn(async move {
+                barrier.wait().await;
+                send_response(&state, request("dave@example.com")).await
+            })
+        };
+        let (a, b) = tokio::join!(
+            spawn(state.clone(), barrier.clone()),
+            spawn(state.clone(), barrier.clone())
         );
-        let responses = [first, second];
+        let responses = [a.unwrap(), b.unwrap()];
         assert_eq!(
             responses
                 .iter()
