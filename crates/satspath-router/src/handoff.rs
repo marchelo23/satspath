@@ -140,13 +140,14 @@ pub fn validate_payload(
 ///
 /// `devnet` intentionally aliases to [`BitcoinNetwork::Testnet`] (and
 /// `Currency::BitcoinTestnet` in [`validate_bolt11`]) for local `satspathd`
-/// development. Testnet3, Testnet4, and Signet share the `tb` HRP under
+/// development. Testnet and Signet share the `tb` HRP under
 /// `bitcoin::Network::Testnet`, while Mainnet remains strictly isolated.
 fn configured_network(network: &str) -> Result<BitcoinNetwork> {
     match network.to_ascii_lowercase().as_str() {
         "mainnet" | "bitcoin" => Ok(BitcoinNetwork::Mainnet),
         // Intentional alias: local `devnet` uses Testnet/Signet (`tb`) encodings.
         "testnet" | "devnet" => Ok(BitcoinNetwork::Testnet),
+        "signet" => Ok(BitcoinNetwork::Signet),
         "regtest" => Ok(BitcoinNetwork::Regtest),
         _ => bail!("unsupported daemon network for payment handoff"),
     }
@@ -178,6 +179,7 @@ fn validate_bolt11(
         "mainnet" | "bitcoin" => Currency::Bitcoin,
         // Keep `devnet` aligned with `configured_network` (`BitcoinNetwork::Testnet`).
         "testnet" | "devnet" => Currency::BitcoinTestnet,
+        "signet" => Currency::Signet,
         "regtest" => Currency::Regtest,
         _ => bail!("unsupported Lightning network for payment handoff"),
     };
@@ -213,6 +215,26 @@ mod tests {
         assert_eq!(fmt_btc(0), "0.00000000");
         assert_eq!(fmt_btc(21_000), "0.00021000");
         assert_eq!(fmt_btc(100_000_000), "1.00000000");
+    }
+
+    #[test]
+    fn signet_receive_handoffs_use_matching_tb_addresses() {
+        let address = segwit_address(Network::Signet);
+        let method = PaymentMethod::Onchain {
+            label: "signet".into(),
+            network: BitcoinNetwork::Signet,
+            address: Some(address.clone()),
+            silent_payment_pubkey: None,
+            pubkey_hint: None,
+            descriptor_hint: None,
+            address_list: vec![],
+        };
+        assert!(address.starts_with("tb1"));
+        let receive = format!("bitcoin:{address}");
+        let payable = format!("{receive}?amount=0.00025000");
+        validate_payload(&method, &receive, "signet", None).unwrap();
+        validate_payload(&method, &payable, "signet", Some(25_000)).unwrap();
+        assert!(validate_payload(&method, &payable, "regtest", Some(25_000)).is_err());
     }
 
     fn onchain(address: &str) -> PaymentMethod {

@@ -2,25 +2,34 @@
 
 use anyhow::Result;
 use satspath_core::{
-    privacy::mask_identifier,
+    crypto::check_profile_expiry,
+    privacy::{canonical_identifier, mask_identifier, validate_ascii_identifier},
     validation::{assert_no_private_material, validate_amount_sats},
-    PaymentMethod, ProfileResolver, SatsPathError,
+    PaymentMethod, SatsPathError, TransactionalTransparencyStore,
 };
 use satspath_router::{
-    fees::fetch_fee_estimate,
     handoff::{fmt_btc, validate_payload},
-    select_priority_route,
+    quote_verified_profile_for_network, QuoteResponse,
 };
+
+#[cfg(test)]
+use satspath_core::ProfileResolver;
+#[cfg(test)]
+use satspath_router::{fees::fetch_fee_estimate, select_priority_route};
 
 use crate::config::AppState;
 use crate::handlers::profile::ensure_signed_profile;
-use crate::handlers::resolve::resolver_chain;
+use crate::handlers::resolve::resolve_profile;
 use crate::handlers::wallet::load_wallet;
 use crate::types::{
     build_methods, pct, safety_status, EmailInvite, ReceiveRequest, ReceiveView, SendRequest,
     SendResponse,
 };
 use crate::ui::qr_svg;
+
+/// Operational bound for the invite file. Expired invites are pruned before a
+/// new record is refused, so this is not a lifetime limit on claimed invites.
+const MAX_STORED_INVITES: usize = 10_000;
 
 /// Choose a configured receive rail and validate its final public QR payload.
 pub(crate) fn receive_view(state: &AppState, req: ReceiveRequest) -> Result<ReceiveView> {
@@ -116,19 +125,262 @@ pub(crate) fn receive_payload_for(method: &PaymentMethod) -> Result<String> {
     Ok(payload)
 }
 
-/// Resolve the recipient, pick a rail by priority, and return the best QR.
-/// If the recipient is not registered, return an EXPERIMENTAL email invite.
+/// Only locally transparent SQLite profiles can become payable. The legacy
+/// registry and external resolvers return signed profiles but do not supply the
+/// verified inclusion, continuity and ownership state required for a send.
 pub(crate) async fn send_response(state: &AppState, body: SendRequest) -> SendResponse {
     if let Err(e) = validate_amount_sats(body.amount_sats) {
         return SendResponse::NoRoute {
             reason: e.to_string(),
         };
     }
-    let resolver = resolver_chain(&state.home);
-    send_response_with_resolver(state, body, &resolver).await
+    // The legacy health simulation cannot constrain a proof-checked quote.
+    // Reject an explicit outage rather than silently ignoring the caller's hint.
+    if body.routing_ok == Some(false) {
+        return SendResponse::NoRoute {
+            reason: "routing_ok=false is unsupported by the verified send path".into(),
+        };
+    }
+    if let Err(e) = validate_ascii_identifier(&body.recipient) {
+        return SendResponse::NoRoute {
+            reason: e.to_string(),
+        };
+    }
+    match resolve_profile(state, &body.recipient) {
+        Ok(resolved) => {
+            let signed = resolved.signed_profile;
+            // The SQLite lookup uses an identifier hash. Never allow a corrupt
+            // store (or a substituted profile) to change the recipient.
+            if canonical_identifier(&signed.profile.alias) != canonical_identifier(&body.recipient)
+                || signed.profile.revoked
+            {
+                return SendResponse::NoRoute {
+                    reason: "recipient profile alias mismatch or revoked".into(),
+                };
+            }
+            if let Err(e) = check_profile_expiry(&signed.profile) {
+                return SendResponse::NoRoute {
+                    reason: e.to_string(),
+                };
+            }
+            let allowed: Vec<String> = resolved
+                .verification
+                .payment_method_states
+                .iter()
+                .filter(|method| method.verified)
+                .map(|method| method.descriptor.clone())
+                .collect();
+            // quote_verified_profile uses select_route, amount-bound QR validation
+            // and ONLY independently verified ownership descriptors. No proof is
+            // synthesized from an identity signature or a static receive address.
+            match quote_verified_profile_for_network(
+                signed,
+                &body.recipient,
+                body.amount_sats,
+                &allowed,
+                &state.network,
+            )
+            .await
+            {
+                QuoteResponse::Ok {
+                    selected_method,
+                    reason,
+                    qr,
+                    ..
+                } => {
+                    if let Err(e) = validate_payload(
+                        &selected_method,
+                        &qr,
+                        &state.network,
+                        Some(body.amount_sats),
+                    ) {
+                        return SendResponse::NoRoute {
+                            reason: e.to_string(),
+                        };
+                    }
+                    let qr_svg = match qr_svg(&qr) {
+                        Ok(svg) => svg,
+                        Err(e) => {
+                            return SendResponse::NoRoute {
+                                reason: e.to_string(),
+                            }
+                        }
+                    };
+                    SendResponse::Ok {
+                        mode: "preview_only",
+                        rail: selected_method.method_name().to_string(),
+                        reason,
+                        recipient: mask_identifier(&body.recipient),
+                        profile_signature_verified: true,
+                        identifier_verified: resolved.verification.identifier_verified,
+                        identifier_verification: "identifier attestation checked; see /v1/resolve for verification details",
+                        amount_sats: body.amount_sats,
+                        payload: qr,
+                        qr_svg,
+                        safety: safety_status(),
+                    }
+                }
+                QuoteResponse::NoRoute { reason } => SendResponse::NoRoute { reason },
+                QuoteResponse::InvalidSignature { .. } => SendResponse::InvalidSignature {
+                    recipient: mask_identifier(&body.recipient),
+                },
+                QuoteResponse::NotRegistered { .. } => SendResponse::NoRoute {
+                    reason: "registered recipient has no verified payment route".into(),
+                },
+            }
+        }
+        Err(error)
+            if matches!(
+                error.downcast_ref::<SatsPathError>(),
+                Some(SatsPathError::AliasNotFound(_))
+            ) =>
+        {
+            // Serialize the re-check and insert so two concurrent requests cannot
+            // both observe "not registered" and create duplicate invites.
+            let _guard = state.mutation_lock.lock().await;
+            // An absent profile is not enough: an alias may have a transparency
+            // history (including a revocation), a pending local wallet profile,
+            // or a legacy entry. None of those should receive a second invite.
+            match never_registered_locally(state, &body.recipient) {
+                Ok(true) => invite_response(state, &body),
+                Ok(false) => SendResponse::NoRoute {
+                    reason: "recipient alias already exists locally without a payable profile"
+                        .into(),
+                },
+                Err(e) => SendResponse::NoRoute {
+                    reason: e.to_string(),
+                },
+            }
+        }
+        Err(error) => SendResponse::NoRoute {
+            reason: format!("transparency verification failed: {error}"),
+        },
+    }
 }
 
-/// Resolve a recipient through the supplied resolver and gate its payable QR.
+fn never_registered_locally(state: &AppState, alias: &str) -> Result<bool> {
+    if load_wallet(&state.home)?
+        .alias
+        .as_deref()
+        .is_some_and(|wallet_alias| {
+            canonical_identifier(wallet_alias) == canonical_identifier(alias)
+        })
+    {
+        return Ok(false);
+    }
+    let identifier_hash = satspath_core::privacy::identifier_hash(alias);
+    let store = TransactionalTransparencyStore::open(&state.home)?;
+    if store.profile(alias)?.is_some() || !store.load_log()?.history(&identifier_hash).is_empty() {
+        return Ok(false);
+    }
+    // Do not create a second invite while one is still pending. Expired or
+    // cancelled invites may be replaced; claimed/created/email-sent invites may not.
+    let invites =
+        satspath_core::InviteStore::open(&state.home)?.get_by_identifier_hash(&identifier_hash);
+    if invites.iter().any(|invite| {
+        !matches!(
+            invite.status,
+            satspath_core::InviteStatus::Expired | satspath_core::InviteStatus::Cancelled
+        )
+    }) {
+        return Ok(false);
+    }
+    // A legacy entry is *not* a payable resolution, but suppress an invitation
+    // for an already registered alias. Corrupt legacy data fails closed here.
+    let registry_path = state.home.join("registry.json");
+    if registry_path.try_exists()?
+        && satspath_core::registry::Registry::open(&state.home)?.is_registered(alias)
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn invite_response(state: &AppState, body: &SendRequest) -> SendResponse {
+    let secret_opt = load_wallet(&state.home).ok().and_then(|w| {
+        w.identity_pubkey
+            .and_then(|pk| crate::handlers::wallet::load_identity_key(&state.home, &pk).ok())
+    });
+    let invite = satspath_core::create_invite(
+        &body.recipient,
+        body.amount_sats,
+        secret_opt.as_ref(),
+        86400,
+    );
+    let mut store = match satspath_core::InviteStore::open(&state.home) {
+        Ok(store) => store,
+        Err(e) => {
+            return SendResponse::NoRoute {
+                reason: e.to_string(),
+            }
+        }
+    };
+    let invite_count = match store.list() {
+        Ok(invites) => invites.len(),
+        Err(e) => {
+            return SendResponse::NoRoute {
+                reason: e.to_string(),
+            }
+        }
+    };
+    if invite_count >= MAX_STORED_INVITES {
+        if let Err(e) = store.prune_expired() {
+            return SendResponse::NoRoute {
+                reason: e.to_string(),
+            };
+        }
+        let remaining = match store.list() {
+            Ok(invites) => invites.len(),
+            Err(e) => {
+                return SendResponse::NoRoute {
+                    reason: e.to_string(),
+                }
+            }
+        };
+        if remaining >= MAX_STORED_INVITES {
+            return SendResponse::NoRoute {
+                reason: "invite store is full; wait for pending invites to expire".into(),
+            };
+        }
+    }
+    let sender_fp = secret_opt
+        .as_ref()
+        .map(|sk| {
+            let secp = secp256k1::Secp256k1::new();
+            hex::encode(secp256k1::PublicKey::from_secret_key(&secp, sk).serialize())
+        })
+        .unwrap_or_else(|| "local-sender".to_string());
+    let mut record = satspath_core::create_signed_invite_record(
+        &body.recipient,
+        body.amount_sats,
+        None,
+        sender_fp,
+        86400,
+        secret_opt.as_ref(),
+    );
+    if let Some(ref id) = invite.invite_id {
+        record.invite_id = id.clone();
+    }
+    if let Err(e) = store.insert(record) {
+        return SendResponse::NoRoute {
+            reason: e.to_string(),
+        };
+    }
+    let email = build_email_invite(&body.recipient, body.amount_sats, &invite.claim_url);
+    SendResponse::Invite {
+        mode: "preview_only",
+        experimental: true,
+        recipient_hint: mask_identifier(&body.recipient),
+        amount_sats: body.amount_sats,
+        claim_url: invite.claim_url,
+        email,
+        safety: safety_status(),
+    }
+}
+
+/// Legacy injected resolver exercised only by older unit tests. The HTTP route
+/// always uses the transparent SQLite resolver above, never this profile-only API.
+#[cfg(test)]
 pub(crate) async fn send_response_with_resolver(
     state: &AppState,
     body: SendRequest,
@@ -261,6 +513,7 @@ pub(crate) async fn send_response_with_resolver(
 }
 
 /// Retain only signed-profile methods that can produce a validated payable QR.
+#[cfg(test)]
 fn payable_methods(
     methods: &[PaymentMethod],
     amount_sats: u64,
@@ -283,16 +536,17 @@ pub(crate) fn build_email_invite(
     amount_sats: u64,
     claim_url: &str,
 ) -> EmailInvite {
-    let subject = "You were sent Bitcoin with SatsPath".to_string();
+    let subject = "Someone wants to send you Bitcoin with SatsPath".to_string();
     let body = format!(
         r"Someone wants to send you {amount_sats} sats with SatsPath.
 
-Press the button to download the SatsPath wallet and receive your funds
-locally. You generate your own keys; nobody custodies them:
+No funds have moved. This link is only an invitation preview, not a payment:
 
 {claim_url}
 
-[EXPERIMENTAL] SatsPath does not move funds or sign transactions for you."
+[EXPERIMENTAL] Claiming is disabled without a real alias-control verifier;
+the opt-in devnet/regtest mock does not prove email/domain ownership.
+SatsPath does not move funds or sign Bitcoin transactions for you."
     );
     let mailto = format!(
         "mailto:{}?subject={}&body={}",
@@ -309,6 +563,7 @@ locally. You generate your own keys; nobody custodies them:
 }
 
 /// A payable pointer for a method, including the amount where the URI supports it.
+#[cfg(test)]
 pub(crate) fn send_payload_for(method: &PaymentMethod, amount_sats: u64) -> Result<String> {
     let payload = match method {
         PaymentMethod::Lightning {
@@ -350,8 +605,45 @@ pub(crate) fn broadcast(state: &AppState) -> Result<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use satspath_core::BitcoinNetwork;
+    use crate::config::AppState;
+    use crate::handlers::wallet::{load_or_create_identity, save_wallet};
+    use crate::rate_limit::{RateLimiter, RateLimiterConfig};
+    use satspath_core::{BitcoinNetwork, TransactionalTransparencyStore};
     use satspath_router::fees::FeeEstimate;
+    use std::{path::Path, sync::Arc};
+
+    fn test_state(home: &Path) -> AppState {
+        AppState {
+            p2p: crate::p2p::Bridge::new(false),
+            home: home.to_owned(),
+            bind: "127.0.0.1:0".parse().unwrap(),
+            allowed_hosts: vec![],
+            network: "devnet".into(),
+            open_ui: false,
+            auth_token: "test_auth_token".into(),
+            allow_mock_alias_verification: false,
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            anchor_lock: Arc::new(tokio::sync::Mutex::new(())),
+            rate_limiter: Arc::new(RateLimiter::new(RateLimiterConfig::default())),
+            is_tls: false,
+        }
+    }
+
+    fn request(recipient: &str) -> SendRequest {
+        SendRequest {
+            recipient: recipient.into(),
+            amount_sats: 25_000,
+            routing_ok: Some(true),
+        }
+    }
+
+    fn invite_count(home: &Path) -> usize {
+        satspath_core::InviteStore::open(home)
+            .unwrap()
+            .list()
+            .unwrap()
+            .len()
+    }
 
     fn onchain(address: &str) -> PaymentMethod {
         PaymentMethod::Onchain {
@@ -416,5 +708,264 @@ mod tests {
             "devnet"
         )
         .is_empty());
+    }
+
+    #[tokio::test]
+    async fn send_reads_sqlite_profile_before_and_after_restart_but_requires_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let mut wallet = load_or_create_identity(dir.path()).unwrap();
+        wallet.alias = Some("alice@example.com".into());
+        save_wallet(dir.path(), &wallet).unwrap();
+        let profile = crate::handlers::profile::update_profile(
+            &state,
+            crate::types::ProfileUpdateRequest {
+                alias: Some("alice@example.com".into()),
+                lightning_address: Some("alice@example.com".into()),
+                onchain_address: None,
+                onchain_pubkey: None,
+                ark_server: None,
+                ark_pubkey: None,
+                remove_methods: vec![],
+                recovery_policy: None,
+            },
+        )
+        .unwrap();
+        assert!(profile.signature_valid.unwrap());
+        assert!(!dir.path().join("registry.json").exists());
+
+        for state in [state, test_state(dir.path())] {
+            let resolved = resolve_profile(&state, "alice@example.com").unwrap();
+            assert!(resolved.verification.profile_signature_verified);
+            assert!(resolved.verification.transparency_inclusion_verified);
+            assert!(resolved.verification.key_continuity_verified);
+            assert!(!resolved.verification.payment_methods_verified);
+            let response = send_response(&state, request("alice@example.com")).await;
+            assert!(
+                matches!(response, SendResponse::NoRoute { ref reason } if reason.contains("ownership proof")),
+                "{response:?}"
+            );
+            assert_eq!(
+                invite_count(dir.path()),
+                0,
+                "an existing alias is never re-invited"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_alias_invites_once_then_claimed_sqlite_alias_cannot_be_reinvited() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path());
+        // Claiming an email alias needs a real verifier in production; the
+        // dev-only mock is explicitly enabled only for this test fixture.
+        state.allow_mock_alias_verification = true;
+        load_or_create_identity(dir.path()).unwrap();
+        let response = send_response(&state, request("carol@example.com")).await;
+        let SendResponse::Invite { claim_url, .. } = response else {
+            panic!("unknown alias should get an invite: {response:?}");
+        };
+        let id = claim_url
+            .split("invite_id=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap();
+        assert_eq!(invite_count(dir.path()), 1);
+        let duplicate = send_response(&state, request("carol@example.com")).await;
+        assert!(
+            matches!(duplicate, SendResponse::NoRoute { ref reason } if reason.contains("already exists locally")),
+            "{duplicate:?}"
+        );
+        assert_eq!(
+            invite_count(dir.path()),
+            1,
+            "a pending invite must not be duplicated"
+        );
+        crate::handlers::claim::claim_invite_handler(
+            &state,
+            crate::types::ClaimRequest {
+                invite_id: id.into(),
+                alias: "carol@example.com".into(),
+                signed_profile: None,
+                lightning_address: Some("carol@example.com".into()),
+                onchain_address: None,
+                onchain_pubkey: None,
+                ark_server: None,
+                ark_pubkey: None,
+            },
+        )
+        .unwrap();
+        assert!(!dir.path().join("registry.json").exists());
+        for state in [state, test_state(dir.path())] {
+            let response = send_response(&state, request("carol@example.com")).await;
+            assert!(
+                matches!(response, SendResponse::NoRoute { ref reason } if reason.contains("ownership proof")),
+                "{response:?}"
+            );
+            assert_eq!(invite_count(dir.path()), 1);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_unknown_alias_sends_create_one_invite() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(test_state(dir.path()));
+        load_or_create_identity(dir.path()).unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let spawn = |state: Arc<AppState>, barrier: Arc<tokio::sync::Barrier>| {
+            tokio::spawn(async move {
+                barrier.wait().await;
+                send_response(&state, request("dave@example.com")).await
+            })
+        };
+        let (a, b) = tokio::join!(
+            spawn(state.clone(), barrier.clone()),
+            spawn(state.clone(), barrier.clone())
+        );
+        let responses = [a.unwrap(), b.unwrap()];
+        assert_eq!(
+            responses
+                .iter()
+                .filter(|response| matches!(response, SendResponse::Invite { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            responses
+                .iter()
+                .filter(|response| matches!(response, SendResponse::NoRoute { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(invite_count(dir.path()), 1);
+    }
+
+    #[tokio::test]
+    async fn send_fails_closed_for_legacy_only_and_corrupt_sqlite_profiles() {
+        use satspath_core::{
+            crypto::{generate_identity_keypair, sign_profile},
+            registry::Registry,
+            PaymentProfile,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let kp = generate_identity_keypair();
+        Registry::open(dir.path())
+            .unwrap()
+            .register_profile(
+                sign_profile(
+                    PaymentProfile {
+                        alias: "legacy@example.com".into(),
+                        identity_pubkey: hex::encode(kp.public_key.serialize()),
+                        methods: vec![PaymentMethod::Lightning {
+                            label: "LN".into(),
+                            lightning_address: Some("legacy@example.com".into()),
+                            lnurl: None,
+                            bolt12: None,
+                            receiver_pubkey: None,
+                        }],
+                        updated_at: crate::types::now(),
+                        expires_at: None,
+                        sequence: Some(0),
+                        preferences: vec![],
+                        nonce: None,
+                        rotation: None,
+                        method_verifications: vec![],
+                        hybrid_pubkey: None,
+                        pqc_required: false,
+                        revoked: false,
+                        recovery_policy: None,
+                        recovery: None,
+                    },
+                    &kp.secret_key,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(matches!(
+            send_response(&state, request("legacy@example.com")).await,
+            SendResponse::NoRoute { .. }
+        ));
+        assert_eq!(invite_count(dir.path()), 0);
+
+        let mut wallet = load_or_create_identity(dir.path()).unwrap();
+        wallet.alias = Some("alice@example.com".into());
+        wallet.lightning_address = Some("alice@example.com".into());
+        crate::handlers::profile::sign_and_store(dir.path(), &mut wallet, "devnet").unwrap();
+        save_wallet(dir.path(), &wallet).unwrap();
+        // A tampered signature must never fall through to another resolver or an invite.
+        let db = dir.path().join("satspath-transparency-v1.sqlite3");
+        let connection = rusqlite::Connection::open(db).unwrap();
+        let stored = TransactionalTransparencyStore::open(dir.path())
+            .unwrap()
+            .profile("alice@example.com")
+            .unwrap()
+            .unwrap();
+        let mut forged = stored;
+        forged.signature = "00".repeat(64);
+        connection
+            .execute(
+                "UPDATE profiles SET profile_json=?1 WHERE identifier_hash=?2",
+                (
+                    serde_json::to_string(&forged).unwrap(),
+                    satspath_core::privacy::identifier_hash("alice@example.com"),
+                ),
+            )
+            .unwrap();
+        assert!(matches!(
+            send_response(&state, request("alice@example.com")).await,
+            SendResponse::NoRoute { .. }
+        ));
+        assert_eq!(invite_count(dir.path()), 0);
+    }
+
+    #[test]
+    fn repeated_broadcast_keeps_sqlite_signature_sequence_and_checkpoint_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wallet = load_or_create_identity(dir.path()).unwrap();
+        wallet.alias = Some("alice@example.com".into());
+        wallet.lightning_address = Some("alice@example.com".into());
+        save_wallet(dir.path(), &wallet).unwrap();
+
+        let mut first_signature = None;
+        for iteration in 0..3 {
+            let state = test_state(dir.path()); // New state models a daemon restart.
+            broadcast(&state).unwrap();
+            assert!(!dir.path().join("registry.json").exists());
+            let store = TransactionalTransparencyStore::open(dir.path()).unwrap();
+            let profile = store.profile("alice@example.com").unwrap().unwrap();
+            assert_eq!(
+                profile.profile.sequence,
+                Some(0),
+                "broadcast #{iteration} mutated sequence"
+            );
+            let log = store.load_log().unwrap();
+            assert_eq!(log.events().len(), 1);
+            assert_eq!(log.checkpoints().len(), 1);
+            if iteration == 0 {
+                // The next broadcast must not overwrite the original signature.
+                first_signature = Some(profile.signature);
+            } else {
+                assert_eq!(profile.signature, *first_signature.as_ref().unwrap());
+            }
+        }
+        // A changed wallet method still produces exactly one legitimate update.
+        wallet.lightning_address = Some("alice2@example.com".into());
+        save_wallet(dir.path(), &wallet).unwrap();
+        broadcast(&test_state(dir.path())).unwrap();
+        broadcast(&test_state(dir.path())).unwrap();
+        let store = TransactionalTransparencyStore::open(dir.path()).unwrap();
+        assert_eq!(
+            store
+                .profile("alice@example.com")
+                .unwrap()
+                .unwrap()
+                .profile
+                .sequence,
+            Some(1)
+        );
+        assert_eq!(store.load_log().unwrap().events().len(), 2);
     }
 }

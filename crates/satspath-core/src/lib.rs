@@ -146,6 +146,8 @@ pub fn create_invite(
     let now = chrono::Utc::now().timestamp();
     let alias_hash = crate::privacy::identifier_hash(alias);
     let invite_id = uuid::Uuid::new_v4().to_string();
+    // A development placeholder, not a public claim service or authorization
+    // token. Production claiming is disabled until alias control is attested.
     let claim_url = format!(
         "https://satspath.local/claim?invite_id={}&alias_hash={}&amount={}",
         invite_id,
@@ -174,8 +176,7 @@ pub fn create_invite(
         created_at: now,
         expires_at: now + ttl_seconds,
         claim_url,
-        warning: "The receiver must claim this payment by generating their own keys locally. \
-                  SatsPath never holds or generates keys on behalf of users."
+        warning: "Invitation preview only: no funds have moved. The claim URL is a local placeholder, not a public claim service. Production claiming requires a real alias-control verifier; the opt-in devnet/regtest mock does not prove alias ownership."
             .into(),
         sender_signature,
         sender_pubkey,

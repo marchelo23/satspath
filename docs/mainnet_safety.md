@@ -1,6 +1,6 @@
 # Mainnet Safety & Architectural Boundaries
 
-> **Safety Notice:** SatsPath is non-custodial software designed for Bitcoin payment discovery, profile verification, and route selection. SatsPath **does not execute mainnet payments**, **does not broadcast transactions**, and **does not sign transactions**. All transaction signing and fund execution are strictly delegated to host wallets.
+> **Safety Notice:** SatsPath is non-custodial software designed for Bitcoin payment discovery, profile verification, and route selection. It **does not execute, sign or broadcast user payments**; the user's host wallet does. Separately, opt-in authenticated **regtest checkpoint anchoring** can instruct an operator Bitcoin Core wallet to sign, broadcast and mine anchor transactions using valueless test coins. Never connect that endpoint to a wallet with real funds.
 
 ---
 
@@ -9,11 +9,11 @@
 **SatsPath is an identity and capability discovery layer, NOT a wallet.**
 
 * **Zero Spending Authority:** The `Identity Key` (used to sign profiles) has no access to funds. It cannot sign Bitcoin transactions, open Lightning channels, or authorize Ark transfers.
-* **Separation of Concerns:** SatsPath leaves spending keys, seeds (BIP-39), xprv/tprv keys, and node credentials entirely inside the user's sovereign wallet.
+* **Separation of Concerns:** SatsPath leaves user spending keys, seeds (BIP-39), xprv/tprv keys, and payment credentials entirely inside the user's sovereign wallet. The regtest-only anchor integration is an explicit exception for **operator-controlled Core RPC credentials**; the daemon can request operator-wallet transactions without receiving the underlying spending keys.
 * **Why SatsPath Delegates Execution:**
   1. *Preserves self-custody:* Eliminates the risk of SatsPath becoming a custodial honeypot.
   2. *Avoids redundant wallet engineering:* Integrates with existing, battle-tested Bitcoin wallets rather than competing with them.
-  3. *Custody Risk vs. Payment Redirection Risk:* Compromising SatsPath does not directly expose wallet spending keys or authorize Bitcoin transactions. However, a compromised discovery or handoff component may attempt payment redirection, which is why authenticated profiles, key continuity, resolver verification, and wallet-side confirmation of destination details remain security-critical.
+  3. *Custody Risk vs. Payment Redirection Risk:* Compromising SatsPath does not directly expose user wallet spending keys or authorize user payments. A daemon with opt-in regtest Core RPC credentials can nevertheless direct operator-wallet test transactions. A compromised discovery or handoff component may also attempt payment redirection, so authenticated profiles, key continuity, resolver verification, and wallet-side confirmation remain security-critical.
 
 ---
 
@@ -30,8 +30,9 @@
 | **Wallet Handoff Generation (URIs, QR codes)** | **Supported** | SatsPath (Router / CLI) |
 | **Non-Custodial Host-Wallet SDK Bridges (`WalletExecutor`)** | **Supported** for BDK/LDK; quote execution requires current local state, SMT and log proofs, a pinned checkpoint, a nonzero witness quorum, and independent gossip evidence. Legacy Boltz P2WSH claims/refunds support **Testnet/Regtest only** with authenticated host-provided swap terms and confirmed unspent lockup evidence; Mainnet, Taproot and cross-chain execution remain disabled (`crates/satspath-router/src/wallet_executor.rs`) | Host Wallet Signs & Broadcasts |
 | **Mainnet Payment Execution by SatsPath** | **Unsupported / Out of Scope** | **Host Wallet Only** |
-| **Transaction Signing (PSBT / Schnorr / ECDSA)** | **Unsupported / Out of Scope** | **Host Wallet Only** |
-| **Mempool Transaction Broadcast** | **Unsupported / Out of Scope** | **Host Wallet Only** |
+| **User Payment Transaction Signing (PSBT / Schnorr / ECDSA)** | **Unsupported / Out of Scope** | **Host Wallet Only** |
+| **User Payment Mempool Broadcast** | **Unsupported / Out of Scope** | **Host Wallet Only** |
+| **Operator Checkpoint Anchoring (regtest only)** | **Opt-in / Test only**; Core funds, signs, broadcasts and mines anchor transactions over loopback RPC | **Operator Bitcoin Core wallet** |
 | **Post-Quantum Cryptography (ML-DSA / ML-KEM)** | **Experimental (Feature-Gated)** (Optional `pqc` feature flag; not part of production safety claim; classical-only verification is the default production path) | SatsPath (Core / PQC) |
 | **Mainnet Swaps Execution** | **Unsupported** | Scaffolding in `satspath-swaps` is testnet/regtest only |
 

@@ -281,7 +281,8 @@ pub(crate) struct ReceiveRequest {
 pub(crate) struct SendRequest {
     pub(crate) recipient: String,
     pub(crate) amount_sats: u64,
-    /// Model Lightning routing health (defaults to healthy).
+    /// Legacy routing simulation. Explicit false fails closed on the verified
+    /// daemon send path; true/absent use normal proof-checked routing.
     #[serde(default)]
     pub(crate) routing_ok: Option<bool>,
 }
@@ -383,6 +384,8 @@ pub(crate) fn bitcoin_network(network: &str) -> satspath_core::BitcoinNetwork {
     }
 }
 
+/// Safety of the *payment preview/handoff* endpoints, not of the separate
+/// authenticated regtest checkpoint anchor RPC operation.
 pub(crate) fn safety_status() -> SafetyStatus {
     SafetyStatus {
         moves_funds: false,
@@ -395,10 +398,10 @@ pub(crate) fn safety_status() -> SafetyStatus {
 
 pub(crate) fn safety_warnings() -> Vec<&'static str> {
     vec![
-        "satspathd does not move funds",
-        "satspathd does not sign Bitcoin transactions",
-        "satspathd does not broadcast transactions",
-        "payment execution happens in an external wallet",
+        "this payment preview does not move user funds",
+        "this payment preview does not sign or broadcast Bitcoin transactions",
+        "user payment execution happens in an external wallet",
+        "separate authenticated regtest anchoring can instruct an operator Bitcoin Core wallet to fund, sign, broadcast and mine checkpoint transactions",
     ]
 }
 

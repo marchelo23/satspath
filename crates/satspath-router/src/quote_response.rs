@@ -26,9 +26,10 @@ use satspath_core::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::fees::FeeEstimate;
+use crate::fees::{fetch_fee_estimate_for_network, FeeEstimate, FALLBACK_FEES};
 use crate::handoff::{fmt_btc, validate_payload};
-use crate::router::{select_route, select_route_with_fees, RouteRequest};
+use crate::lightning::is_lightning_available_for_amount_sync;
+use crate::router::{select_route_with_fees, RouteRequest, LIGHTNING_THRESHOLD_SATS};
 use tracing::Instrument;
 
 /// Public, frontend-facing description of the recipient.
@@ -130,10 +131,29 @@ where
 /// Route a profile only after an external transparency verifier has accepted
 /// it. The allow-list contains independently verified ownership descriptors.
 pub async fn quote_verified_profile(
+    signed: satspath_core::SignedPaymentProfile,
+    recipient: &str,
+    amount_sats: u64,
+    allowed_method_descriptors: &[String],
+) -> QuoteResponse {
+    quote_verified_profile_for_network(
+        signed,
+        recipient,
+        amount_sats,
+        allowed_method_descriptors,
+        "mainnet",
+    )
+    .await
+}
+
+/// Network-aware variant used by the daemon. Selects fee sources for `network`
+/// without mutating the process-global `SATSPATH_NETWORK` environment.
+pub async fn quote_verified_profile_for_network(
     mut signed: satspath_core::SignedPaymentProfile,
     recipient: &str,
     amount_sats: u64,
     allowed_method_descriptors: &[String],
+    network: &str,
 ) -> QuoteResponse {
     if let Err(e) = validate_amount_sats(amount_sats) {
         return QuoteResponse::NoRoute {
@@ -158,7 +178,15 @@ pub async fn quote_verified_profile(
         };
     }
     let recipient_hash = identifier_hash(recipient);
-    route_verified_signed(signed, recipient, &recipient_hash, amount_sats, None).await
+    route_verified_signed(
+        signed,
+        recipient,
+        &recipient_hash,
+        amount_sats,
+        None,
+        network,
+    )
+    .await
 }
 
 // ─── QR / payment payload ──────────────────────────────────────────────────────
@@ -265,7 +293,15 @@ where
         };
     }
 
-    route_verified_signed(signed, recipient, &recipient_hash, amount_sats, fees).await
+    route_verified_signed(
+        signed,
+        recipient,
+        &recipient_hash,
+        amount_sats,
+        fees,
+        "mainnet",
+    )
+    .await
 }
 
 async fn route_verified_signed(
@@ -274,6 +310,7 @@ async fn route_verified_signed(
     recipient_hash: &str,
     amount_sats: u64,
     fees: Option<FeeEstimate>,
+    network: &str,
 ) -> QuoteResponse {
     let recipient_info = recipient_of(&signed.profile, true);
 
@@ -321,12 +358,24 @@ async fn route_verified_signed(
         max_fee_sats: None,
         max_fee_percent: None,
     };
-    let route = match fees {
-        Some(fee_est) => {
-            let _guard = route_span.enter();
-            select_route_with_fees(&req, &fee_est)
-        }
-        None => select_route(&req).instrument(route_span).await,
+    let lightning_will_win = amount_sats < LIGHTNING_THRESHOLD_SATS
+        && signed
+            .profile
+            .methods
+            .iter()
+            .any(|method| is_lightning_available_for_amount_sync(method, amount_sats));
+    let fee_est = match fees {
+        Some(fee_est) => fee_est,
+        // Preserve the Lightning fast path: no fee-oracle round trip is needed
+        // when route selection cannot reach the on-chain/Ark branches.
+        None if lightning_will_win => FALLBACK_FEES.clone(),
+        None => fetch_fee_estimate_for_network(network)
+            .await
+            .unwrap_or_else(|_| FALLBACK_FEES.clone()),
+    };
+    let route = {
+        let _guard = route_span.enter();
+        select_route_with_fees(&req, &fee_est)
     };
     let route = match route {
         Ok(route) => route,

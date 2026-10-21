@@ -25,7 +25,8 @@ use crate::handlers::{
     },
 };
 use crate::http::{
-    empty_response, handle_read_error, json_error, json_response, json_result, read_json,
+    empty_response, handle_read_error, json_error, json_response, json_result,
+    read_error_with_status, read_json,
 };
 use crate::rate_limit;
 use crate::types::{
@@ -124,14 +125,8 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
 
     use tracing::Instrument;
     async {
-        let is_internal_scrape = template == "/metrics"
-            && request
-                .headers()
-                .iter()
-                .find(|h| h.field.equiv("Host"))
-                .and_then(|h| crate::host::parse_authority(h.value.as_str()).ok())
-                .map(|h| h.to_string() == "satspathd")
-                .unwrap_or(false);
+        let is_internal_scrape =
+            template == "/metrics" && crate::host::is_internal_metrics_host(request.headers());
 
         if !crate::host::is_allowed_host(request.headers(), state.bind, &state.allowed_hosts)
             && !is_internal_scrape
@@ -245,11 +240,11 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
         (Method::Get, "/v1/diagnostics/rate_limit") => {
             json_response(StatusCode(200), &state.rate_limiter.stats())
         }
-        (Method::Post, "/v1/receive") => match read_json::<ReceiveRequest>(&mut request) {
+        (Method::Post, "/v1/receive") => match read_json::<ReceiveRequest>(&mut request, state) {
             Ok(body) => json_result(StatusCode(200), receive_view(state, body)),
             Err(e) => handle_read_error(e),
         },
-        (Method::Post, "/v1/send") => match read_json::<SendRequest>(&mut request) {
+        (Method::Post, "/v1/send") => match read_json::<SendRequest>(&mut request, state) {
             Ok(body) => json_response(StatusCode(200), &send_response(state, body).await),
             Err(e) => handle_read_error(e),
         },
@@ -267,7 +262,8 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
             &serde_json::json!({ "ok": true, "status": "healthy" }),
         ),
         (Method::Get, "/v1/health") => {
-            let health = crate::telemetry::perform_deep_health_check(&state.home).await;
+            let health =
+                crate::telemetry::perform_deep_health_check(&state.home, &state.network).await;
             let status = if health.status == "healthy" || health.status == "degraded" {
                 StatusCode(200)
             } else {
@@ -276,16 +272,17 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
             json_response(status, &health)
         }
         (Method::Get, v2_api::routes::HEALTH) => {
-            let (checkpoint_age, log_ok) = match transparency_log(state) {
+            let checkpoint_age = match transparency_log(state) {
                 Ok(log) => {
                     let latest = log.checkpoints().last().map(|c| c.created_at).unwrap_or(0);
                     let now = chrono::Utc::now().timestamp();
-                    let age = if latest == 0 { 0 } else { now - latest };
-                    (age, true)
+                    if latest == 0 { -1 } else { now - latest }
                 }
-                Err(_) => (-1, false),
+                Err(_) => -1,
             };
-            let resp = v2_api::build_health_response(checkpoint_age, log_ok, 1);
+            // This daemon does not verify witness cosignatures or serve replicas.
+            // A readable empty log must not masquerade as a healthy S2S authority.
+            let resp = v2_api::build_health_response(checkpoint_age, false, 0);
             let status = if resp.status == "healthy" {
                 StatusCode(200)
             } else {
@@ -332,7 +329,7 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
             }
         }
         (Method::Post, v2_api::routes::RESOLVE) => {
-            match read_json::<satspath_core::transparency::ResolutionRequest>(&mut request) {
+            match read_json::<satspath_core::transparency::ResolutionRequest>(&mut request, state) {
                 Ok(body) => {
                     let res_start = std::time::Instant::now();
                     match resolve_v2_envelope(state, &body.identifier) {
@@ -376,7 +373,7 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
                 anyhow::anyhow!("control status unavailable"),
             ),
         },
-        (Method::Post, "/v1/p2p/resolve") => match read_json::<AliasRequest>(&mut request) {
+        (Method::Post, "/v1/p2p/resolve") => match read_json::<AliasRequest>(&mut request, state) {
             Ok(body) => match crate::p2p::resolve_candidate(state, &body.alias).await {
                 Ok(candidate) => json_response(StatusCode(200), &candidate),
                 Err(_) => json_error(
@@ -489,7 +486,7 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
             json_result(StatusCode(200), consistency_from_query(state, &raw_url))
         }
         (Method::Post, "/v1/transparency/verify/inclusion") => {
-            match read_json::<InclusionVerifyRequest>(&mut request).and_then(|body| {
+            match read_json::<InclusionVerifyRequest>(&mut request, state).and_then(|body| {
                 satspath_core::transparency::verify_checkpoint_inclusion(
                     &body.event_hash,
                     &body.proof,
@@ -499,23 +496,23 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
                 .map_err(Into::into)
             }) {
                 Ok(valid) => json_response(StatusCode(200), &serde_json::json!({"valid": valid})),
-                Err(e) => json_error(StatusCode(400), e),
+                Err(e) => read_error_with_status(StatusCode(400), e),
             }
         }
         (Method::Post, "/v1/transparency/verify/consistency") => {
-            match read_json::<ConsistencyVerifyRequest>(&mut request).and_then(|body| {
+            match read_json::<ConsistencyVerifyRequest>(&mut request, state).and_then(|body| {
                 satspath_core::transparency::verify_consistency_proof(&body.proof)
                     .map_err(Into::into)
             }) {
                 Ok(valid) => json_response(StatusCode(200), &serde_json::json!({"valid": valid})),
-                Err(e) => json_error(StatusCode(400), e),
+                Err(e) => read_error_with_status(StatusCode(400), e),
             }
         }
         // Evaluates purely in-memory structural consistency of the caller-supplied sequence of anchors
         // (linkage, sequence indices, and optional checkpoint hash commitments).
         // This endpoint does NOT query a live Bitcoin node; clients must independently verify on-chain confirmations and outpoints.
         (Method::Post, "/v1/transparency/verify/catena") => {
-            match read_json::<CatenaVerifyRequest>(&mut request).and_then(|body| {
+            match read_json::<CatenaVerifyRequest>(&mut request, state).and_then(|body| {
                 if let Some(genesis) = body.anchors.first() {
                     if genesis.continuation_vout
                         != Some(satspath_core::transparency::CATENA_CONTINUATION_VOUT)
@@ -555,42 +552,42 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
                     }
                     json_response(StatusCode(200), &resp)
                 }
-                Err(e) => json_error(StatusCode(400), e),
+                Err(e) => read_error_with_status(StatusCode(400), e),
             }
         }
         (Method::Put, "/v1/profile") | (Method::Post, "/v1/profile") => {
             let _guard = state.mutation_lock.lock().await;
-            match read_json::<ProfileUpdateRequest>(&mut request)
+            match read_json::<ProfileUpdateRequest>(&mut request, state)
                 .and_then(|body| update_profile(state, body))
             {
                 Ok(resp) => json_response(StatusCode(200), &resp),
-                Err(e) => json_error(StatusCode(400), e),
+                Err(e) => read_error_with_status(StatusCode(400), e),
             }
         }
         (Method::Post, "/v1/profile/challenge") => {
-            match read_json::<AliasRequest>(&mut request)
+            match read_json::<AliasRequest>(&mut request, state)
                 .and_then(|body| create_challenge(state, body))
             {
                 Ok(resp) => json_response(StatusCode(200), &resp),
-                Err(e) => json_error(StatusCode(400), e),
+                Err(e) => read_error_with_status(StatusCode(400), e),
             }
         }
         (Method::Post, "/v1/profile/verify") => {
             let _guard = state.mutation_lock.lock().await;
-            match read_json::<VerifyRequest>(&mut request)
+            match read_json::<VerifyRequest>(&mut request, state)
                 .and_then(|body| verify_challenge(state, body))
             {
                 Ok(resp) => json_response(StatusCode(200), &resp),
-                Err(e) => json_error(StatusCode(400), e),
+                Err(e) => read_error_with_status(StatusCode(400), e),
             }
         }
         (Method::Post, "/v1/profile/methods") => {
             let _guard = state.mutation_lock.lock().await;
-            match read_json::<ProfileUpdateRequest>(&mut request)
+            match read_json::<ProfileUpdateRequest>(&mut request, state)
                 .and_then(|body| update_profile_methods(state, body))
             {
                 Ok(resp) => json_response(StatusCode(200), &resp),
-                Err(e) => json_error(StatusCode(400), e),
+                Err(e) => read_error_with_status(StatusCode(400), e),
             }
         }
         (Method::Post, "/v1/profile/rotate-key") => {
@@ -601,7 +598,7 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
             }
         }
         (Method::Post, "/v1/profile/recover") => {
-            match read_json::<ProfileRecoverRequest>(&mut request) {
+            match read_json::<ProfileRecoverRequest>(&mut request, state) {
                 Ok(body) => {
                     let precheck = || -> Result<()> {
                         crate::handlers::profile::validate_recovery_request_shape(&body)?;
@@ -630,30 +627,30 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
                         }
                     }
                 }
-                Err(error) => json_error(StatusCode(400), error),
+                Err(error) => handle_read_error(error),
             }
         }
         (Method::Post, "/v1/resolve") => {
-            match read_json::<AliasRequest>(&mut request)
+            match read_json::<AliasRequest>(&mut request, state)
                 .and_then(|body| resolve_profile(state, &body.alias))
             {
                 Ok(profile) => json_response(StatusCode(200), &profile),
-                Err(e) => json_error(StatusCode(404), e),
+                Err(e) => read_error_with_status(StatusCode(404), e),
             }
         }
-        (Method::Post, "/v1/quote") => match read_json::<QuoteRequest>(&mut request) {
+        (Method::Post, "/v1/quote") => match read_json::<QuoteRequest>(&mut request, state) {
             Ok(body) => json_response(StatusCode(200), &quote_response(state, body).await),
-            Err(e) => json_error(StatusCode(400), e),
+            Err(e) => handle_read_error(e),
         },
-        (Method::Post, "/v1/pay") => match read_json::<PayRequest>(&mut request) {
+        (Method::Post, "/v1/pay") => match read_json::<PayRequest>(&mut request, state) {
             Ok(body) => json_response(StatusCode(200), &pay_response(state, body).await),
-            Err(e) => json_error(StatusCode(400), e),
+            Err(e) => handle_read_error(e),
         },
-        (Method::Post, "/v1/dns/resolve") => match read_json::<DnsResolveRequest>(&mut request) {
+        (Method::Post, "/v1/dns/resolve") => match read_json::<DnsResolveRequest>(&mut request, state) {
             Ok(body) => json_response(StatusCode(200), &dns_resolve_response(body).await),
             Err(e) => handle_read_error(e),
         },
-        (Method::Post, "/v1/preview") => match read_json::<QuoteRequest>(&mut request) {
+        (Method::Post, "/v1/preview") => match read_json::<QuoteRequest>(&mut request, state) {
             Ok(body) => {
                 let quote = quote_response(state, body).await;
                 json_response(
@@ -665,7 +662,7 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
                     },
                 )
             }
-            Err(e) => json_error(StatusCode(400), e),
+            Err(e) => handle_read_error(e),
         },
         (Method::Get, p) if p.starts_with("/v1/claim") => {
             let invite_id = query_str(&raw_url, "invite_id").or_else(|| {
@@ -686,7 +683,7 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
         }
         (Method::Post, "/v1/claim") => {
             let _guard = state.mutation_lock.lock().await;
-            match read_json::<ClaimRequest>(&mut request) {
+            match read_json::<ClaimRequest>(&mut request, state) {
                 Ok(body) => match claim_invite_handler(state, body) {
                     Ok(resp) => json_response(StatusCode(200), &resp),
                     Err(e) => {

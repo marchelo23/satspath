@@ -55,19 +55,20 @@ pub(crate) fn update_profile(
 
 /// The daemon does not ship a production alias verifier. The mocked verifier
 /// proves nothing, so both alias endpoints fail closed unless the operator
-/// explicitly opted into the development-only mock and the daemon is not
-/// serving mainnet.
+/// explicitly opted into the development-only mock on devnet/regtest.
 fn ensure_mock_alias_verification_allowed(state: &AppState) -> Result<()> {
     if !state.allow_mock_alias_verification {
         anyhow::bail!(
             "alias verification is not configured on this daemon; no alias can be verified (development only: start with --dev-mock-alias-verification)"
         );
     }
-    if matches!(
+    if !matches!(
         state.network.trim().to_ascii_lowercase().as_str(),
-        "mainnet" | "bitcoin"
+        "devnet" | "regtest"
     ) {
-        anyhow::bail!("the insecure mock alias verifier is refused on mainnet; use a test network");
+        anyhow::bail!(
+            "the insecure mock alias verifier is allowed only on devnet/regtest, never on public Bitcoin networks"
+        );
     }
     Ok(())
 }
@@ -504,13 +505,83 @@ pub(crate) fn ensure_signed_profile(
     wallet: &mut WalletState,
     network: &str,
 ) -> Result<()> {
-    use satspath_core::registry::Registry;
-    if let Some(alias) = wallet.alias.as_deref() {
-        if let Ok(signed) = Registry::open(home)?.resolve_alias(alias) {
-            if verify_signed_profile(signed)? {
-                return Ok(());
-            }
+    use satspath_core::{crypto::check_profile_expiry, privacy::identifier_hash, CheckpointStore};
+    let alias = wallet
+        .alias
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile alias is required"))?;
+    // SQLite is the authoritative profile + event + checkpoint store. The
+    // legacy registry.json is not written by sign_and_store and must not decide
+    // whether broadcast needs to sign another profile.
+    let store = TransactionalTransparencyStore::open(home)?;
+    let existing = store.profile(alias)?;
+    let log = store.load_log()?;
+    let history: Vec<_> = log
+        .history(&identifier_hash(alias))
+        .into_iter()
+        .cloned()
+        .collect();
+    if let Some(signed) = existing {
+        if signed.profile.alias != alias || !verify_signed_profile(&signed)? {
+            anyhow::bail!("stored profile alias or signature is invalid");
         }
+        if signed.profile.revoked {
+            anyhow::bail!("revoked profile cannot be broadcast");
+        }
+        // An expired profile may be renewed, but only after its signature,
+        // history, checkpoint and wallet binding have been verified below.
+        let expired = check_profile_expiry(&signed.profile).is_err();
+        satspath_core::transparency::verify_identifier_history(&history)?;
+        let latest = history
+            .last()
+            .ok_or_else(|| anyhow::anyhow!("profile has no transparency history"))?;
+        if !satspath_core::transparency::verify_event_profile(latest, &signed)? {
+            anyhow::bail!("profile does not match its latest transparency event");
+        }
+        let event_hash = latest.event_hash()?;
+        let inclusion = log.inclusion(&event_hash, None)?;
+        let checkpoint = log
+            .checkpoints()
+            .last()
+            .ok_or_else(|| anyhow::anyhow!("transparency checkpoint unavailable"))?;
+        satspath_core::transparency::verify_checkpoint_inclusion(
+            &event_hash,
+            &inclusion,
+            checkpoint,
+        )?;
+        if let Some(pin) = CheckpointStore::new(home)
+            .load()?
+            .iter()
+            .find(|pin| pin.log_id == checkpoint.log_id)
+        {
+            let consistency = (pin.tree_size < checkpoint.log_size)
+                .then(|| log.consistency(pin.tree_size, checkpoint.log_size))
+                .transpose()?;
+            satspath_core::transparency::verify_checkpoint_transition(
+                pin,
+                checkpoint,
+                consistency.as_ref(),
+            )?;
+        }
+        if wallet.identity_pubkey.as_deref() != Some(&signed.profile.identity_pubkey) {
+            anyhow::bail!(
+                "wallet identity differs from the committed profile; use key rotation or recovery"
+            );
+        }
+        let recovery_policy = wallet
+            .recovery_policy
+            .as_ref()
+            .or(signed.profile.recovery_policy.as_ref());
+        if !expired
+            && signed.profile.methods == build_methods(wallet, network)
+            && recovery_policy == signed.profile.recovery_policy.as_ref()
+        {
+            // In particular, do not renew nonce, expiry or sequence simply
+            // because registry.json is absent (also after a daemon restart).
+            return Ok(());
+        }
+    } else if !history.is_empty() {
+        anyhow::bail!("alias has transparency history but no active profile");
     }
     sign_and_store(home, wallet, network)?;
     save_wallet(home, wallet)?;

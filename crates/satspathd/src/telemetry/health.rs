@@ -102,16 +102,16 @@ pub fn check_sqlite_health(home: &Path) -> DependencyHealth {
     }
 }
 
-/// Checks external Bitcoin Fee API reachability and latency.
-pub async fn check_fee_api_health() -> DependencyHealth {
+/// Checks external Bitcoin Fee API reachability and latency for `network`.
+pub async fn check_fee_api_health(network: &str) -> DependencyHealth {
     let start = Instant::now();
+    let config = satspath_router::fees::FeeEstimatorConfig::from_env_for_network(network);
 
     // 1. Check if a recent fee estimate is already cached and still fresh
     if let Some(cached) = satspath_router::fees::get_cached_fee() {
         let now_secs = satspath_router::fees::current_time_secs();
         let age_secs = now_secs.saturating_sub(cached.timestamp_secs);
-        let max_staleness_secs =
-            satspath_router::fees::FeeEstimatorConfig::from_env().max_staleness_secs;
+        let max_staleness_secs = config.max_staleness_secs;
         if age_secs < max_staleness_secs {
             let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
             return DependencyHealth {
@@ -132,7 +132,7 @@ pub async fn check_fee_api_health() -> DependencyHealth {
     }
 
     // 2. Perform an on-demand probe with a short timeout to prevent slow health endpoints
-    let estimator = satspath_router::fees::MultiSourceFeeEstimator::default_from_env();
+    let estimator = satspath_router::fees::MultiSourceFeeEstimator::new(config);
     let probe =
         tokio::time::timeout(std::time::Duration::from_millis(500), estimator.estimate()).await;
 
@@ -265,18 +265,20 @@ pub fn check_transparency_health(home: &Path) -> DependencyHealth {
     }
 }
 
-static CACHED_DEEP_HEALTH: std::sync::RwLock<
-    Option<std::collections::HashMap<std::path::PathBuf, (Instant, DeepHealthResponse)>>,
-> = std::sync::RwLock::new(None);
+type DeepHealthCache =
+    std::collections::HashMap<(std::path::PathBuf, String), (Instant, DeepHealthResponse)>;
+static CACHED_DEEP_HEALTH: std::sync::RwLock<Option<DeepHealthCache>> =
+    std::sync::RwLock::new(None);
 const DEEP_HEALTH_CACHE_TTL_SECS: u64 = 5;
 
 /// Performs a comprehensive health check across all daemon dependencies.
-/// Caches result for 5 seconds per home path to prevent outbound request amplification and SQLite thrashing.
-pub async fn perform_deep_health_check(home: &Path) -> DeepHealthResponse {
-    let home_buf = home.to_path_buf();
+/// Caches results for 5 seconds per home/network pair to prevent outbound
+/// request amplification and SQLite thrashing.
+pub async fn perform_deep_health_check(home: &Path, network: &str) -> DeepHealthResponse {
+    let cache_key = (home.to_path_buf(), network.to_string());
     if let Ok(guard) = CACHED_DEEP_HEALTH.read() {
         if let Some(map) = guard.as_ref() {
-            if let Some((cached_at, ref resp)) = map.get(&home_buf) {
+            if let Some((cached_at, ref resp)) = map.get(&cache_key) {
                 if cached_at.elapsed().as_secs() < DEEP_HEALTH_CACHE_TTL_SECS {
                     return resp.clone();
                 }
@@ -285,7 +287,7 @@ pub async fn perform_deep_health_check(home: &Path) -> DeepHealthResponse {
     }
 
     let sqlite = check_sqlite_health(home);
-    let fee_api = check_fee_api_health().await;
+    let fee_api = check_fee_api_health(network).await;
     let transparency_log = check_transparency_health(home);
 
     let overall_status = if sqlite.status == "unhealthy" || transparency_log.status == "unhealthy" {
@@ -316,7 +318,7 @@ pub async fn perform_deep_health_check(home: &Path) -> DeepHealthResponse {
 
     if let Ok(mut guard) = CACHED_DEEP_HEALTH.write() {
         let map = guard.get_or_insert_with(std::collections::HashMap::new);
-        map.insert(home_buf, (Instant::now(), resp.clone()));
+        map.insert(cache_key, (Instant::now(), resp.clone()));
     }
 
     resp
@@ -324,13 +326,16 @@ pub async fn perform_deep_health_check(home: &Path) -> DeepHealthResponse {
 
 /// Spawns a background task that periodically refreshes checkpoint-age and fee metrics
 /// so Prometheus scrapes always have fresh samples even without separate health check calls.
-pub fn spawn_metrics_refresher(home: std::path::PathBuf) -> tokio::task::JoinHandle<()> {
+pub fn spawn_metrics_refresher(
+    home: std::path::PathBuf,
+    network: String,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
             check_transparency_health(&home);
-            let _ = check_fee_api_health().await;
+            let _ = check_fee_api_health(&network).await;
         }
     })
 }
@@ -498,7 +503,7 @@ mod tests {
         crate::handlers::wallet::load_or_create_identity(dir.path()).unwrap();
         crate::handlers::transparency::transparency_log_at(dir.path()).unwrap();
 
-        let health = perform_deep_health_check(dir.path()).await;
+        let health = perform_deep_health_check(dir.path(), "devnet").await;
         assert!(health.ok);
         assert_eq!(health.dependencies.sqlite.status, "healthy");
         assert_eq!(health.dependencies.transparency_log.status, "healthy");

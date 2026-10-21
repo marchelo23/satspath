@@ -6,21 +6,59 @@ use anyhow::Result;
 use serde::Serialize;
 use tiny_http::{Header, Request, Response, StatusCode};
 
+use crate::config::AppState;
 use crate::types::ErrorResponse;
 
 pub(crate) const MAX_JSON_BODY_BYTES: u64 = 65_536; // 64 KB limit to prevent DoS
 
-pub(crate) fn read_json<T: for<'de> serde::Deserialize<'de>>(request: &mut Request) -> Result<T> {
-    let mut body = String::new();
-    let mut reader = request.as_reader().take(MAX_JSON_BODY_BYTES + 1);
-    reader.read_to_string(&mut body)?;
-    if body.len() as u64 > MAX_JSON_BODY_BYTES {
-        anyhow::bail!("payload too large: maximum allowed request body is 65536 bytes");
+#[derive(Debug)]
+pub(crate) struct PayloadTooLarge {
+    max_bytes: u64,
+}
+
+impl std::fmt::Display for PayloadTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "payload too large: maximum allowed request body is {} bytes",
+            self.max_bytes
+        )
     }
-    if body.trim().is_empty() {
+}
+
+impl std::error::Error for PayloadTooLarge {}
+
+pub(crate) fn read_json<T: for<'de> serde::Deserialize<'de>>(
+    request: &mut Request,
+    state: &AppState,
+) -> Result<T> {
+    let max_bytes = (state.rate_limiter.max_body_bytes() as u64).min(MAX_JSON_BODY_BYTES);
+    let mut body = Vec::new();
+    let mut reader = request.as_reader().take(max_bytes + 1);
+    reader.read_to_end(&mut body)?;
+    if body.len() as u64 > max_bytes {
+        state.rate_limiter.record_payload_too_large();
+        crate::telemetry::metrics::record_rate_limit_dropped("payload_too_large");
+        return Err(PayloadTooLarge { max_bytes }.into());
+    }
+    if std::str::from_utf8(&body)?.trim().is_empty() {
         anyhow::bail!("request body must be JSON");
     }
-    Ok(serde_json::from_str(&body)?)
+    let content_type_ok = request.headers().iter().any(|header| {
+        header.field.equiv("Content-Type")
+            && header
+                .value
+                .as_str()
+                .split(';')
+                .next()
+                .is_some_and(|media_type| {
+                    media_type.trim().eq_ignore_ascii_case("application/json")
+                })
+    });
+    if !content_type_ok {
+        anyhow::bail!("Content-Type must be application/json");
+    }
+    Ok(serde_json::from_slice(&body)?)
 }
 
 pub(crate) fn json_result<T: Serialize>(
@@ -88,10 +126,17 @@ pub(crate) fn json_error(
 }
 
 pub(crate) fn handle_read_error(e: anyhow::Error) -> Response<std::io::Cursor<Vec<u8>>> {
-    if e.to_string().contains("payload too large") {
+    read_error_with_status(StatusCode(400), e)
+}
+
+pub(crate) fn read_error_with_status(
+    status: StatusCode,
+    e: anyhow::Error,
+) -> Response<std::io::Cursor<Vec<u8>>> {
+    if e.is::<PayloadTooLarge>() {
         json_error(StatusCode(413), e)
     } else {
-        json_error(StatusCode(400), e)
+        json_error(status, e)
     }
 }
 

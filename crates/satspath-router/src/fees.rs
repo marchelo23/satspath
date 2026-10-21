@@ -176,9 +176,34 @@ impl Default for FeeEstimatorConfig {
     }
 }
 
+fn default_network_fee_urls(network: &str) -> (&'static str, Option<&'static str>) {
+    match network {
+        "mainnet" | "bitcoin" => (
+            "https://mempool.space/api/v1/fees/recommended",
+            Some("https://blockstream.info/api/fee-estimates"),
+        ),
+        "signet" => ("https://mempool.space/signet/api/v1/fees/recommended", None),
+        "regtest" => ("", None),
+        // devnet and other locally defined networks use testnet-form addresses.
+        _ => (
+            "https://mempool.space/testnet/api/v1/fees/recommended",
+            Some("https://blockstream.info/testnet/api/fee-estimates"),
+        ),
+    }
+}
+
 impl FeeEstimatorConfig {
     /// Build configuration from environment variables with sensible defaults.
     pub fn from_env() -> Self {
+        let network = env::var("SATSPATH_NETWORK").unwrap_or_else(|_| "mainnet".into());
+        Self::from_env_for_network(&network)
+    }
+
+    /// Select default sources for the configured Bitcoin network, never
+    /// consulting mainnet fee oracles for testnet, signet, or regtest.
+    pub fn from_env_for_network(network: &str) -> Self {
+        let network = network.trim().to_ascii_lowercase();
+        let (default_mempool, default_esplora) = default_network_fee_urls(&network);
         let max_staleness_secs = env::var("SATSPATH_FEE_MAX_STALENESS_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -191,8 +216,7 @@ impl FeeEstimatorConfig {
 
         let min_sources_for_consensus = env::var("SATSPATH_FEE_MIN_SOURCES")
             .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(1);
+            .and_then(|v| v.parse::<usize>().ok());
 
         let mut sources = Vec::new();
 
@@ -222,20 +246,23 @@ impl FeeEstimatorConfig {
                         }
                     }
                     "mempool" | "mempoolspace" => {
-                        let url = env::var("SATSPATH_MEMPOOL_URL").unwrap_or_else(|_| {
-                            "https://mempool.space/api/v1/fees/recommended".to_string()
-                        });
-                        sources.push(FeeSource::MempoolSpace {
-                            url: normalize_mempool_url(&url),
-                        });
+                        let url = env::var("SATSPATH_MEMPOOL_URL")
+                            .unwrap_or_else(|_| default_mempool.to_string());
+                        if !url.is_empty() {
+                            sources.push(FeeSource::MempoolSpace {
+                                url: normalize_mempool_url(&url),
+                            });
+                        }
                     }
                     "esplora" => {
-                        let url = env::var("SATSPATH_ESPLORA_URL").unwrap_or_else(|_| {
-                            "https://blockstream.info/api/fee-estimates".to_string()
-                        });
-                        sources.push(FeeSource::Esplora {
-                            url: normalize_esplora_url(&url),
-                        });
+                        let url = env::var("SATSPATH_ESPLORA_URL")
+                            .ok()
+                            .or(default_esplora.map(str::to_owned));
+                        if let Some(url) = url {
+                            sources.push(FeeSource::Esplora {
+                                url: normalize_esplora_url(&url),
+                            });
+                        }
                     }
                     other => {
                         if let Some(stripped) = other.strip_prefix("mempool:") {
@@ -258,42 +285,68 @@ impl FeeEstimatorConfig {
             }
         }
 
-        // If no explicit sources configured via SATSPATH_FEE_SOURCES, build standard multi-source set:
+        // If no explicit sources configured via SATSPATH_FEE_SOURCES, build the
+        // standard set. Regtest has no public fee market, so the default is a
+        // deterministic static estimate; an explicit RPC source is still honored
+        // when SATSPATH_FEE_SOURCES is set above.
         if sources.is_empty() {
-            let rpc_url = env::var("SATSPATH_BITCOIN_RPC_URL")
-                .ok()
-                .or_else(|| env::var("BITCOIN_RPC_URL").ok());
-            if let Some(url) = rpc_url {
-                let user = env::var("SATSPATH_BITCOIN_RPC_USER")
+            if network == "regtest" {
+                sources.push(FeeSource::Static(FeeEstimate {
+                    fastest_fee: 1,
+                    half_hour_fee: 1,
+                    hour_fee: 1,
+                    economy_fee: 1,
+                    minimum_fee: 1,
+                }));
+            } else {
+                let rpc_url = env::var("SATSPATH_BITCOIN_RPC_URL")
                     .ok()
-                    .or_else(|| env::var("BITCOIN_RPC_USER").ok());
-                let pass = env::var("SATSPATH_BITCOIN_RPC_PASSWORD")
+                    .or_else(|| env::var("BITCOIN_RPC_URL").ok());
+                if let Some(url) = rpc_url {
+                    let user = env::var("SATSPATH_BITCOIN_RPC_USER")
+                        .ok()
+                        .or_else(|| env::var("BITCOIN_RPC_USER").ok());
+                    let pass = env::var("SATSPATH_BITCOIN_RPC_PASSWORD")
+                        .ok()
+                        .or_else(|| env::var("BITCOIN_RPC_PASS").ok());
+                    sources.push(FeeSource::BitcoinCore {
+                        rpc_url: url,
+                        rpc_user: user,
+                        rpc_password: pass,
+                    });
+                }
+
+                let mempool_url = env::var("SATSPATH_MEMPOOL_URL")
+                    .unwrap_or_else(|_| default_mempool.to_string());
+                if !mempool_url.is_empty() {
+                    sources.push(FeeSource::MempoolSpace {
+                        url: normalize_mempool_url(&mempool_url),
+                    });
+                }
+
+                if let Some(esplora_url) = env::var("SATSPATH_ESPLORA_URL")
                     .ok()
-                    .or_else(|| env::var("BITCOIN_RPC_PASS").ok());
-                sources.push(FeeSource::BitcoinCore {
-                    rpc_url: url,
-                    rpc_user: user,
-                    rpc_password: pass,
-                });
+                    .or(default_esplora.map(str::to_owned))
+                {
+                    sources.push(FeeSource::Esplora {
+                        url: normalize_esplora_url(&esplora_url),
+                    });
+                }
+
+                if network == "mainnet" || network == "bitcoin" {
+                    sources.push(FeeSource::MempoolSpace {
+                        url: "https://mempool.ninja/api/v1/fees/recommended".to_string(),
+                    });
+                }
             }
-
-            let mempool_url = env::var("SATSPATH_MEMPOOL_URL")
-                .unwrap_or_else(|_| "https://mempool.space/api/v1/fees/recommended".to_string());
-            sources.push(FeeSource::MempoolSpace {
-                url: normalize_mempool_url(&mempool_url),
-            });
-
-            let esplora_url = env::var("SATSPATH_ESPLORA_URL")
-                .unwrap_or_else(|_| "https://blockstream.info/api/fee-estimates".to_string());
-            sources.push(FeeSource::Esplora {
-                url: normalize_esplora_url(&esplora_url),
-            });
-
-            sources.push(FeeSource::MempoolSpace {
-                url: "https://mempool.ninja/api/v1/fees/recommended".to_string(),
-            });
         }
 
+        // A single oracle is not a consensus. When multiple sources are
+        // configured, require at least two unless the operator explicitly
+        // overrides SATSPATH_FEE_MIN_SOURCES.
+        let min_sources_for_consensus = min_sources_for_consensus
+            .unwrap_or_else(|| sources.len().clamp(1, 2))
+            .max(1);
         Self {
             sources,
             min_sources_for_consensus,
@@ -766,6 +819,32 @@ pub async fn fetch_fee_estimate() -> Result<FeeEstimate> {
     }
 }
 
+/// Fetch a fee estimate using the default sources for `network` instead of the
+/// process-global `SATSPATH_NETWORK` environment variable.
+pub async fn fetch_fee_estimate_for_network(network: &str) -> Result<FeeEstimate> {
+    #[cfg(feature = "std")]
+    {
+        let config = FeeEstimatorConfig::from_env_for_network(network);
+        match native_fees::fetch_consensus_fee(&config).await {
+            Ok(report) => Ok(report.estimate),
+            Err(_) => Ok(FALLBACK_FEES),
+        }
+    }
+    #[cfg(all(feature = "wasm", target_arch = "wasm32", not(feature = "std")))]
+    {
+        let _ = network;
+        match wasm_fees::fetch_fee_estimate().await {
+            Ok(fee) => Ok(fee),
+            Err(_) => Ok(FALLBACK_FEES),
+        }
+    }
+    #[cfg(not(any(feature = "std", feature = "wasm")))]
+    {
+        let _ = network;
+        Ok(FALLBACK_FEES)
+    }
+}
+
 /// Fetch fee estimate report using explicit configuration.
 pub async fn fetch_fee_estimate_with_config(
     config: &FeeEstimatorConfig,
@@ -796,6 +875,19 @@ pub fn fallback_fees() -> FeeEstimate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_fee_defaults_never_cross_into_mainnet() {
+        let (mainnet, _) = default_network_fee_urls("mainnet");
+        assert_eq!(mainnet, "https://mempool.space/api/v1/fees/recommended");
+        for network in ["testnet", "devnet", "other"] {
+            let (mempool, esplora) = default_network_fee_urls(network);
+            assert!(mempool.contains("/testnet/"), "{network}: {mempool}");
+            assert!(esplora.unwrap().contains("/testnet/"));
+        }
+        assert!(default_network_fee_urls("signet").0.contains("/signet/"));
+        assert_eq!(default_network_fee_urls("regtest"), ("", None));
+    }
 
     #[test]
     fn test_fee_estimate_sanitization() {

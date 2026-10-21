@@ -34,7 +34,10 @@ pub fn build_health_response(
 ) -> V2HealthResponse {
     V2HealthResponse {
         version: "2.0.0".to_string(),
-        status: if witness_quorum_healthy && (0..3600).contains(&checkpoint_age_secs) {
+        status: if witness_quorum_healthy
+            && replica_count > 0
+            && (0..3600).contains(&checkpoint_age_secs)
+        {
             "healthy".to_string()
         } else {
             "degraded".to_string()

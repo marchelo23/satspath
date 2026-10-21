@@ -5,10 +5,12 @@ Human-readable companion to the machine-readable OpenAPI 3.0.3 specification in
 response schemas; this page explains behavior that a schema cannot express
 (authentication model, request pipeline, error conventions, and known quirks).
 
-> **Non-custodial boundary.** `satspathd` never moves funds, signs Bitcoin
-> transactions, broadcasts payments, or stores seeds or spending keys.
-> `POST /v1/pay` returns a wallet-handoff payload only; the host wallet signs
-> and executes.
+> **Payment boundary.** The send/quote/pay endpoints never execute user
+> payments or hold user spending keys; `POST /v1/pay` returns a wallet handoff
+> for the host wallet to authorize and execute. Separately, authenticated,
+> opt-in **regtest checkpoint anchoring** can instruct an operator-controlled
+> Bitcoin Core wallet, using loopback RPC credentials, to fund, sign, broadcast
+> and mine its own anchor transactions. Do not use a wallet with real funds.
 
 Maturity labels follow the [README taxonomy](../README.md#maturity-taxonomy):
 BIP-353 and BOLT12 primitives are IMPLEMENTED; Ark payment routing is PREVIEW;
@@ -178,12 +180,20 @@ The OpenAPI file models these as `oneOf [success schema, Error]`.
 | Operation | Behavior |
 | :--- | :--- |
 | `POST /v1/quote`, `/v1/preview`, `/v1/pay`, `/v1/send`, `/v1/dns/resolve` | Protocol outcomes (`no_route`, `invalid_signature`, `not_registered`, `invite`, DNS `error`) are `status` values inside an HTTP 200 body. `400` is only an unparsable body. |
-| `POST /v1/resolve` | **Any** failure, including a bad body, returns `404`. |
+| `POST /v1/resolve` | Resolution errors and malformed bodies return `404`; an oversized body returns `413`. |
 | `GET`/`POST /v2/resolve` | `404` when the error message contains "not found", otherwise `400`. |
-| `POST /v1/claim` | `404` unknown invite, `409` already claimed, `400` otherwise. |
+| `POST /v1/claim` | `400` when claim is disabled or an external `signed_profile` is provided; in enabled dev mock mode, `404` unknown invite, `409` already claimed, `400` other validation failures. |
 | `POST /v1/p2p/resolve` | Candidate-resolution failures return a generic `400`; body-read failures return `400`, or `413` for an oversized body. |
 | `GET /v1/health` | `200` for `healthy`/`degraded`, `503` for `unhealthy`. |
 | `GET /v2/health` | `200` for `healthy`, `503` for `degraded`. |
+
+The daemon has no configured witness-quorum verifier or replication service:
+`/v2/health` currently reports `witness_quorum_healthy: false` and
+`replica_count: 0`, so it returns `503` even with a fresh checkpoint. With no
+checkpoint it reports `checkpoint_age_secs: -1`. A readable empty log is **not**
+evidence of V2 readiness. Oversized JSON bodies (including chunked uploads
+without `Content-Length`) return `413` and increment the payload-size metrics;
+the normal JSON limit is 65,536 bytes.
 
 ---
 
@@ -241,7 +251,7 @@ across 50 paths.
 | `POST` | `/v1/quote` | Bearer | Quote the best rail |
 | `POST` | `/v1/preview` | Bearer | Quote plus safety warnings |
 | `POST` | `/v1/pay` | Bearer | Wallet handoff (never executes payment) |
-| `POST` | `/v1/send` | Public | Preview send via legacy resolver chain |
+| `POST` | `/v1/send` | Public | Preview send using the verified local SQLite profile; otherwise no route or experimental invite for a truly unknown alias |
 | `POST` | `/v1/receive` | Public | Receive payload and QR for own profile |
 | `POST` | `/v1/dns/resolve` | Public | Resolve a BIP-353 name (local DNSSEC) |
 | `POST` | `/v1/p2p/resolve` | Bearer | Resolve a P2P candidate (EXPERIMENTAL) |
@@ -284,11 +294,26 @@ List endpoints accept `offset` (default 0) and `limit` (default 50, clamped to
 | :--- | :--- | :--- | :--- |
 | `GET` | `/v1/claim?invite_id=` | Public | Inspect an invite |
 | `GET` | `/v1/claim/{id}` | Public | Inspect an invite (path form) |
-| `POST` | `/v1/claim` | Public | Claim an invite and publish a profile |
+| `POST` | `/v1/claim` | Public | Disabled by default; insecure devnet/regtest mock claim only |
 | `GET` | `/v1/invites` | Public | List invites |
 | `GET` | `/v1/invites/notifications` | Public | List claim notifications |
 | `POST` | `/v1/invites/notifications/read-all` | Bearer | Mark all read |
 | `POST` | `/v1/invites/notifications/{id}/read` | Bearer | Mark one read |
+
+`GET /v1/claim` remains public for inspection, but reports `is_claimable: false`
+when the daemon's claim gate is disabled. Public `/v1/send` returns the claim URL
+and public `/v1/invites` exposes IDs: possession of an ID, a matching alias hash,
+or a signed profile does **not** prove control of an email address/domain. No
+production claim verifier or alias attestation exists. `POST /v1/claim` fails
+closed (HTTP 400, without changing invite, wallet or transparency state) by
+default and on mainnet/testnet/signet even if the mock flag is set. Only
+`--dev-mock-alias-verification` (or `SATSPATH_DEV_MOCK_ALIAS_VERIFICATION=1`)
+on **devnet/regtest** permits the insecure daemon-identity claim path; its
+response says `DEVELOPMENT ONLY` and explicitly disclaims alias ownership.
+The `signed_profile` branch is rejected even there: its signature proves
+identity-key possession, not alias control or a signed transparency `NameEvent`.
+Do not trust or settle payments based on a mock claim. See
+[`invite_flow.md`](invite_flow.md).
 
 ---
 
@@ -325,10 +350,12 @@ curl -s http://127.0.0.1:9737/v1/status
 
 The alias must be verified before methods can be saved. The daemon ships no
 production alias verifier yet, so `/v1/profile/challenge` and `/v1/profile/verify`
-**fail closed (`HTTP 400`) by default**. For local development on a non-mainnet
-network, start `satspathd` with `--dev-mock-alias-verification` (or
+**fail closed (`HTTP 400`) by default**. For local development on **devnet or
+regtest only**, start `satspathd` with `--dev-mock-alias-verification` (or
 `SATSPATH_DEV_MOCK_ALIAS_VERIFICATION=1`) to enable the mock verifier where the
-token equals the email address itself (refused on `mainnet`).
+token equals the email address itself. The mock is refused on mainnet,
+testnet and signet. Even with this flag, `POST /v1/claim` does not
+produce a real alias attestation.
 
 ```bash
 curl -s -X POST http://127.0.0.1:9737/v1/profile/challenge \
@@ -398,13 +425,14 @@ tagged by `status`:
 | `ok` | Route selected; `qr` holds a validated, amount-bound on-chain BIP-21 URI for the configured network. |
 | `no_route` | Profile resolution failed (including lookup or signature verification), no usable route was found, or the selected payload failed handoff validation. Resolution failures have a `reason` starting with `transparency verification failed:`. |
 
-`/v1/quote`, `/v1/preview`, and `/v1/pay` route only through the mandatory
+`/v1/quote`, `/v1/preview`, `/v1/pay`, and `/v1/send` route only through the mandatory
 transparency composition (signature, identifier history, key continuity,
 inclusion, checkpoint consistency, operator continuity). They then **keep only
 payment methods that carry a valid ownership proof**; self-asserted methods are
-dropped, so a profile with no proofs yields `no_route`. `/v1/send` uses the legacy
-resolver chain and does not apply that filter, so the two can disagree for the
-same recipient.
+dropped, so a profile with no proofs yields `no_route`. `/v1/send` no longer
+treats legacy registry or external resolver results as payable. Only a locally
+unknown alias may produce an experimental invite; it cannot be claimed in
+production without a real alias-control verifier.
 
 After the wallet-handoff gate in [#159](https://github.com/satspath/satspath/pull/159),
 `/v1/quote`, `/v1/preview`, `/v1/pay`, and successful `/v1/send` responses emit

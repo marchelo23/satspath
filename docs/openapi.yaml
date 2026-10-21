@@ -191,7 +191,7 @@ paths:
       tags:
       - Health & Diagnostics
       summary: S2S v2 readiness
-      description: 'HTTP 200 when `healthy`, **503 when `degraded`** (note: stricter than `/v1/health`).'
+      description: 'HTTP 200 when `healthy`, **503 when `degraded`** (stricter than `/v1/health`). This daemon currently does not verify witness quorum or serve replicas, so it reports `witness_quorum_healthy: false`, `replica_count: 0`, and HTTP 503 even with a fresh checkpoint. With no checkpoint, `checkpoint_age_secs` is -1.'
       operationId: getV2Health
       security: []
       responses:
@@ -208,11 +208,17 @@ paths:
                 witness_quorum_healthy: true
                 replica_count: 1
         '503':
-          description: '`degraded`.'
+          description: '`degraded` (current daemon implementation).'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V2HealthResponse'
+              example:
+                version: 2.0.0
+                status: degraded
+                checkpoint_age_secs: -1
+                witness_quorum_healthy: false
+                replica_count: 0
         '400':
           $ref: '#/components/responses/BadRequest'
         '429':
@@ -222,8 +228,7 @@ paths:
       tags:
       - Health & Diagnostics
       summary: Prometheus metrics
-      description: 'Prometheus text exposition format. Scrapers inside the compose network may send `Host:
-        satspathd`, which is exempt from the Host allow-list for this route only.'
+      description: 'Prometheus text exposition format. Scrapers inside the compose network may send exactly one valid `Host: satspathd`, which is exempt from the Host allow-list for this route only. Duplicate Host headers are rejected.'
       operationId: getMetrics
       security: []
       responses:
@@ -733,8 +738,7 @@ paths:
       - Profile
       summary: Start alias verification (DEV MOCK)
       description: 'Fails closed (`HTTP 400`) by default because no production alias verifier is configured.
-        Requires `--dev-mock-alias-verification` (or `SATSPATH_DEV_MOCK_ALIAS_VERIFICATION=1`) on a non-mainnet
-        network to enable the development-only mock verifier where the token equals the email address itself.'
+        Requires `--dev-mock-alias-verification` (or `SATSPATH_DEV_MOCK_ALIAS_VERIFICATION=1`) on devnet/regtest only; the development-only token equals the email address itself. Never use it on public Bitcoin networks.'
       operationId: createProfileChallenge
       requestBody:
         required: true
@@ -770,7 +774,7 @@ paths:
       summary: Complete alias verification (DEV MOCK)
       description: 'Binds the alias to the local identity and signs/stores the profile if methods already
         exist. Fails closed (`HTTP 400`) by default unless `--dev-mock-alias-verification` is enabled on a
-        non-mainnet network.'
+        devnet/regtest network. This mock cannot attest an email/domain and is refused on mainnet/testnet/signet.'
       operationId: verifyProfileChallenge
       requestBody:
         required: true
@@ -1219,11 +1223,8 @@ paths:
     post:
       tags:
       - Resolution & Routing
-      summary: Preview send via the legacy resolver chain
-      description: '**Public.** Resolves through registry, BIP-353, HTTPS and Nostr, picks a rail and
-        returns a validated on-chain payload and QR (`mode: preview_only`) or `no_route` for an unsafe
-        rail. If the recipient is unknown it creates a persisted invite (EXPERIMENTAL). Unlike
-        `/v1/quote` it does not apply transparency verification.'
+      summary: Preview send with local transparency and ownership checks
+      description: '**Public.** Resolves a local SQLite profile and verifies its signature, transparency inclusion, key continuity and payment-method ownership before routing. A profile found only in the legacy registry or external resolver is not payable here. Returns a validated, amount-bound on-chain payload and QR (`mode: preview_only`) or `no_route` for an unsafe/unverified rail. Only a locally unknown alias creates a persisted experimental invite; claiming it is disabled by default. The daemon never executes a payment.'
       operationId: send
       requestBody:
         required: true
@@ -1247,7 +1248,7 @@ paths:
                 recipient: a***@example.com
                 profile_signature_verified: true
                 identifier_verified: false
-                identifier_verification: identifier-only; no inbox/domain ownership proof in this response
+                identifier_verification: identifier attestation checked; see /v1/resolve for verification details
                 amount_sats: 21000
                 payload: bitcoin:tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx?amount=0.00021000
                 qr_svg: <svg xmlns='http://www.w3.org/2000/svg'/>
@@ -2156,9 +2157,7 @@ paths:
       tags:
       - Transparency
       summary: Anchor the latest checkpoint (regtest)
-      description: Broadcasts a Catena OP_RETURN anchor through Bitcoin Core RPC (`SATSPATH_BITCOIN_*`
-        env). Regtest only; fails otherwise. **Requires Bearer.** Errors are HTTP 400. This is node-side
-        anchoring of a public commitment, not a user payment.
+      description: 'Uses operator Bitcoin Core RPC (`SATSPATH_BITCOIN_*`) to fund, sign, broadcast and mine a Catena OP_RETURN anchor. Requires daemon `--network regtest`, `SATSPATH_BITCOIN_NETWORK=regtest`, and an actual RPC node reporting `chain: regtest`; mismatches fail before signing. **Requires Bearer.** Errors are HTTP 400. This is an operator-wallet checkpoint transaction, not a user payment.'
       operationId: anchorLatestCheckpoint
       security:
       - bearerAuth: []
@@ -2449,7 +2448,7 @@ paths:
                 memo: null
                 status: waiting_for_claim
                 is_expired: false
-                is_claimable: true
+                is_claimable: false
                 created_at: 1782810000
                 expires_at: 1782896400
                 sender_verified: true
@@ -2461,10 +2460,8 @@ paths:
     post:
       tags:
       - Invites
-      summary: Claim an invite and publish a profile
-      description: '**Public.** Validates sender signature, expiry and alias binding, publishes the receiver
-        profile to the transparency log and queues a sender notification. 404 unknown, 409 already claimed,
-        400 otherwise.'
+      summary: Claim an invite (explicit insecure devnet/regtest mock only)
+      description: '**Public.** Disabled by default and on mainnet/testnet/signet (HTTP 400 without mutating wallet, invite or log): there is no production email/domain alias-control verifier. Only explicit `--dev-mock-alias-verification` on devnet/regtest allows an insecure local daemon-identity claim with receive methods; it does not establish alias ownership or authorize a trusted payment. An externally supplied `signed_profile` is rejected even in mock mode. In enabled mock mode, 404 unknown invite, 409 already claimed, 400 other validation errors.'
       operationId: claimInvite
       requestBody:
         required: true
@@ -2487,7 +2484,7 @@ paths:
                 amount_sats: 250
                 profile_pubkey: 03e0fa79bc28965724d3eee52d58cf0cd11f712462582f42e79a545d13d85aac0b
                 claimed_at: 1782810000
-                message: Invite successfully claimed and receiver profile published to transparency log
+                message: 'DEVELOPMENT ONLY: insecure mock claim; receiver profile published without email/domain alias-control attestation. Do not treat its signature as proof of alias ownership'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -4384,7 +4381,7 @@ components:
       - broadcasts_transactions
       - stores_wallet_seeds_or_spending_keys
       - manages_signed_profiles
-      description: Constant non-custody attestation included in handoff responses.
+      description: Describes this payment preview/handoff only. A separate authenticated regtest checkpoint anchor endpoint can ask an operator-controlled Bitcoin Core wallet to fund, sign, broadcast and mine anchor transactions via loopback RPC; it never executes user payments.
     PreviewResponse:
       type: object
       properties:
@@ -4813,7 +4810,7 @@ components:
           maximum: 2100000000000000
         routing_ok:
           type: boolean
-          description: Model Lightning routing health (default true).
+          description: Legacy routing simulation. Explicit false fails closed on the verified send path; true/absent uses normal proof-checked routing.
       required:
       - recipient
       - amount_sats
@@ -5163,7 +5160,7 @@ components:
       required:
       - challenge_id
       - message
-      description: 'Development-only mock email verifier (requires `--dev-mock-alias-verification` on non-mainnet): the token equals the email address itself. Not a real attestation.'
+      description: 'Development-only mock email verifier (requires `--dev-mock-alias-verification` on devnet/regtest only): the token equals the email address itself. Not a real attestation.'
     VerifyRequest:
       type: object
       properties:
@@ -5364,8 +5361,7 @@ components:
       required:
       - invite_id
       - alias
-      description: Either supply a `signed_profile`, or plain receive methods (the daemon signs with its
-        own identity).
+      description: Disabled by default. Only an explicit devnet/regtest mock accepts plain receive methods and signs with the daemon's local identity (not alias-control proof). The `signed_profile` wire field remains for compatibility but is always rejected; a profile signature does not prove alias ownership or authorize a transparency event.
       example:
         invite_id: 6f1c2d3e-8a4b-4c5d-9e6f-7a8b9c0d1e2f
         alias: alice@example.com
@@ -5713,10 +5709,10 @@ components:
         checkpoint_age_secs:
           type: integer
           format: int64
-          description: -1 when the log cannot be opened.
+          description: -1 when no checkpoint exists or the log cannot be opened.
         witness_quorum_healthy:
           type: boolean
-          description: Currently mirrors log readability.
+          description: Always false; this daemon has no configured witness-quorum verifier.
         replica_count:
           type: integer
           format: int32

@@ -12,6 +12,13 @@ use crate::validation::assert_no_private_material;
 
 pub const INVITES_FILE: &str = "invites.json";
 
+fn invite_has_expired(record: &InviteRecord, now: i64) -> bool {
+    matches!(
+        record.status,
+        InviteStatus::Created | InviteStatus::EmailSent
+    ) && now >= record.expires_at
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct InviteStorage {
     #[serde(default)]
@@ -89,11 +96,11 @@ impl InviteStore {
     }
 
     /// Retrieve an invite by its unique ID.
-    /// If the invite was Created but its expiry has passed, returns with Expired status.
+    /// Unexpired Created/EmailSent invites become Expired after their TTL.
     pub fn get(&self, invite_id: &str) -> Option<InviteRecord> {
         let record = self.storage.invites.get(invite_id)?.clone();
         let now = chrono::Utc::now().timestamp();
-        if record.status == InviteStatus::Created && now >= record.expires_at {
+        if invite_has_expired(&record, now) {
             let mut expired = record;
             expired.status = InviteStatus::Expired;
             Some(expired)
@@ -111,7 +118,7 @@ impl InviteStore {
             .filter(|r| r.identifier_hash == identifier_hash)
             .map(|r| {
                 let mut record = r.clone();
-                if record.status == InviteStatus::Created && now >= record.expires_at {
+                if invite_has_expired(&record, now) {
                     record.status = InviteStatus::Expired;
                 }
                 record
@@ -125,7 +132,7 @@ impl InviteStore {
         let mut modified = false;
 
         for record in self.storage.invites.values_mut() {
-            if record.status == InviteStatus::Created && now >= record.expires_at {
+            if invite_has_expired(record, now) {
                 record.status = InviteStatus::Expired;
                 modified = true;
             }
@@ -138,6 +145,21 @@ impl InviteStore {
         let mut list: Vec<_> = self.storage.invites.values().cloned().collect();
         list.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         Ok(list)
+    }
+
+    /// Drop expired invites. Called only when the store hits its operational
+    /// cap; claimed records are retained for their notifications.
+    pub fn prune_expired(&mut self) -> Result<usize> {
+        let now = chrono::Utc::now().timestamp();
+        let before = self.storage.invites.len();
+        self.storage.invites.retain(|_, record| {
+            record.status != InviteStatus::Expired && !invite_has_expired(record, now)
+        });
+        let removed = before.saturating_sub(self.storage.invites.len());
+        if removed > 0 {
+            self.save()?;
+        }
+        Ok(removed)
     }
 
     /// Claim an invite with the receiver's published public profile key.
@@ -233,6 +255,33 @@ impl InviteStore {
 mod tests {
     use super::*;
     use crate::create_invite_record;
+
+    #[test]
+    fn test_email_sent_invites_expire_and_are_pruned() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let mut store = InviteStore::open(temp_dir.path())?;
+        let mut invite = create_invite_record(
+            "expired@example.com",
+            25_000,
+            None,
+            "sender-fp".into(),
+            3_600,
+        );
+        let id = invite.invite_id.clone();
+        let identifier_hash = invite.identifier_hash.clone();
+        invite.status = InviteStatus::EmailSent;
+        invite.expires_at = chrono::Utc::now().timestamp() - 1;
+        store.insert(invite)?;
+
+        assert_eq!(store.get(&id).unwrap().status, InviteStatus::Expired);
+        assert_eq!(
+            store.get_by_identifier_hash(&identifier_hash)[0].status,
+            InviteStatus::Expired
+        );
+        assert_eq!(store.prune_expired()?, 1);
+        assert!(store.get(&id).is_none());
+        Ok(())
+    }
 
     #[test]
     fn test_invite_store_lifecycle() -> Result<()> {

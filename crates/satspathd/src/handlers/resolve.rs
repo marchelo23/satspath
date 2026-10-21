@@ -5,8 +5,6 @@ use satspath_core::{
     bip321::parse_bip321,
     bip353::{resolve_bip353_with, DnssecPolicy, DohTxtResolver, HickoryDnssecTxtResolver},
     crypto::verify_signed_profile,
-    resolver::ChainResolver,
-    resolvers::{bip353::Bip353Resolver, http::HttpResolver, nostr::NostrResolver},
     CheckpointStore, ResolvedTransparentProfile, ResolverSource, SatsPathError,
     TransactionalTransparencyStore, VerificationStates,
 };
@@ -14,20 +12,6 @@ use satspath_core::{
 use crate::config::AppState;
 use crate::handlers::transparency::transparency_log;
 use crate::types::{now, DnsResolveRequest, DnsResolveResponse};
-
-/// Build the registry, BIP-353, HTTP, and Nostr resolver chain in that order.
-/// Skips the registry if it cannot be opened. BIP-353 continuity is stored under `home`.
-pub(crate) fn resolver_chain(home: &std::path::Path) -> ChainResolver {
-    use satspath_core::registry::Registry;
-    let mut chain = ChainResolver::new();
-    if let Ok(registry) = Registry::open(home) {
-        chain = chain.push(registry);
-    }
-    chain
-        .push(Bip353Resolver::new(home))
-        .push(HttpResolver::new())
-        .push(NostrResolver::new())
-}
 
 pub(crate) fn resolve_profile(state: &AppState, alias: &str) -> Result<ResolvedTransparentProfile> {
     let store = TransactionalTransparencyStore::open(&state.home)?;
