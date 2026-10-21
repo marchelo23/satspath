@@ -108,7 +108,8 @@ pub use invite_store::{InviteStore, INVITES_FILE};
 #[cfg(feature = "std")]
 pub use resolver::{
     verify_payment_method_states, ChainResolver, PaymentMethodVerificationState, ProfileResolver,
-    ResolvedTransparentProfile, ResolverSource, VerificationStates,
+    ResolutionReport, ResolvedTransparentProfile, ResolverObservation, ResolverRole,
+    ResolverSource, VerificationStates,
 };
 #[cfg(feature = "std")]
 pub use resolvers::{bip353::Bip353Resolver, http::HttpResolver, nostr::NostrResolver};
@@ -210,6 +211,7 @@ pub fn verify_invite(invite: &Invite) -> Result<bool> {
     crate::crypto::verify_message_signature(&message, signature, pubkey)
 }
 
+/// Creates an unsigned [`InviteRecord`] for `identifier` with a masked display hint and TTL.
 pub fn create_invite_record(
     identifier: &str,
     amount_sats: u64,
@@ -281,6 +283,7 @@ pub fn create_signed_invite_record(
 mod tests {
     use super::*;
 
+    /// Verifies that an invite record for an unknown user contains no private material.
     #[test]
     fn unknown_user_invite_record_contains_no_private_material() {
         let invite = create_invite_record(
@@ -299,6 +302,7 @@ mod tests {
         assert!(invite.claimed_profile_pubkey.is_none());
     }
 
+    /// Verifies creating and verifying a signed [`InviteRecord`] roundtrip.
     #[test]
     fn create_signed_invite_record_and_verify_roundtrip() {
         let secp = secp256k1::Secp256k1::new();

@@ -457,10 +457,7 @@ pub(crate) async fn send_response_with_resolver(
                 },
             }
         }
-        Err(SatsPathError::Bip353Unauthenticated) => SendResponse::NoRoute {
-            reason: SatsPathError::Bip353Unauthenticated.to_string(),
-        },
-        Err(_) => {
+        Err(SatsPathError::AliasNotFound(_)) => {
             let secret_opt = load_wallet(&state.home).ok().and_then(|w| {
                 w.identity_pubkey.and_then(|pk| {
                     crate::handlers::wallet::load_identity_key(&state.home, &pk).ok()
@@ -509,6 +506,9 @@ pub(crate) async fn send_response_with_resolver(
                 safety: safety_status(),
             }
         }
+        Err(error) => SendResponse::NoRoute {
+            reason: error.to_string(),
+        },
     }
 }
 
@@ -645,6 +645,7 @@ mod tests {
             .len()
     }
 
+    /// Builds a test [`PaymentMethod::Onchain`] on mainnet.
     fn onchain(address: &str) -> PaymentMethod {
         PaymentMethod::Onchain {
             label: "On-chain".into(),
@@ -657,6 +658,7 @@ mod tests {
         }
     }
 
+    /// Verifies that `payable_methods` skips unpayable preferred rails before route selection.
     #[test]
     fn send_skips_unpayable_preferred_rails_before_selecting_route() {
         let good = onchain("1BoatSLRHtKNngkdXEeobR76b53LETtpyT");
@@ -692,6 +694,7 @@ mod tests {
         .is_ok());
     }
 
+    /// Verifies that `payable_methods` returns empty when every method is unpayable.
     #[test]
     fn send_has_no_route_when_every_method_is_unpayable() {
         let methods = [PaymentMethod::Lightning {

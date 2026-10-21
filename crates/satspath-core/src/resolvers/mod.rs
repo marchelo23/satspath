@@ -1,5 +1,5 @@
 pub mod bip353;
-mod continuity;
+pub(crate) mod continuity;
 pub mod http;
 pub mod nostr;
 

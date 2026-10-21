@@ -13,6 +13,7 @@ use super::get_resolver;
 
 const EXEC_CONFIRMATION: &str = "execute testnet ark intent";
 
+/// Side of an experimental Ark swap route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArkSwapSide {
     Ark,
@@ -20,12 +21,13 @@ pub enum ArkSwapSide {
     Onchain,
 }
 
+/// Resolves `alias` and displays a testnet Ark receive intent preview.
 pub async fn cmd_ark_receive(alias: &str, testnet: bool, execute_testnet: bool) -> Result<()> {
     ensure_testnet(testnet)?;
     if execute_testnet {
         anyhow::bail!("Ark receive execution requires --confirm '{EXEC_CONFIRMATION}' in a future implementation. Preview only.");
     }
-    let signed = get_resolver()?.resolve_alias(alias).await?;
+    let signed = get_resolver(alias)?.resolve_alias(alias).await?;
     let pointer = first_ark_pointer(&signed.profile.methods)?;
     let report = build_validation_report(alias, &signed, &pointer)?;
     print_validation_report(&report);
@@ -40,6 +42,7 @@ pub async fn cmd_ark_receive(alias: &str, testnet: bool, execute_testnet: bool) 
     Ok(())
 }
 
+/// Resolves `alias`, plans an Ark route, and displays a testnet Ark send preview.
 pub async fn cmd_ark_send(
     alias: &str,
     amount_sats: u64,
@@ -48,7 +51,7 @@ pub async fn cmd_ark_send(
     confirm: Option<&str>,
 ) -> Result<()> {
     ensure_testnet(testnet)?;
-    let signed = get_resolver()?.resolve_alias(alias).await?;
+    let signed = get_resolver(alias)?.resolve_alias(alias).await?;
     let pointer = first_ark_pointer(&signed.profile.methods)?;
     let report = build_validation_report(alias, &signed, &pointer)?;
     let plan = plan_ark_route(
@@ -78,6 +81,7 @@ pub async fn cmd_ark_send(
     Ok(())
 }
 
+/// Resolves `alias` and displays a testnet Ark swap intent preview between `from` and `to`.
 pub async fn cmd_ark_swap(
     alias: &str,
     amount_sats: u64,
@@ -88,7 +92,7 @@ pub async fn cmd_ark_swap(
     confirm: Option<&str>,
 ) -> Result<()> {
     ensure_testnet(testnet)?;
-    let signed = get_resolver()?.resolve_alias(alias).await?;
+    let signed = get_resolver(alias)?.resolve_alias(alias).await?;
     let pointer = first_ark_pointer(&signed.profile.methods).ok();
     let route_kind = route_kind_from_sides(from, to)?;
     let requires_builder = match route_kind {
@@ -120,6 +124,7 @@ pub async fn cmd_ark_swap(
     Ok(())
 }
 
+/// Ensures `--testnet` was explicitly passed for experimental Ark commands.
 fn ensure_testnet(testnet: bool) -> Result<()> {
     if !testnet {
         anyhow::bail!(
@@ -129,6 +134,7 @@ fn ensure_testnet(testnet: bool) -> Result<()> {
     Ok(())
 }
 
+/// Ensures `confirm` matches [`EXEC_CONFIRMATION`] before attempting testnet execution.
 fn ensure_exact_confirmation(confirm: Option<&str>) -> Result<()> {
     if confirm != Some(EXEC_CONFIRMATION) {
         anyhow::bail!("testnet execution requires --confirm '{EXEC_CONFIRMATION}'");
@@ -136,6 +142,7 @@ fn ensure_exact_confirmation(confirm: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Verifies that `report` permits testnet execution.
 fn ensure_execution_allowed(report: &ClientValidationReport) -> Result<()> {
     if report.safe_for_testnet_execution {
         Ok(())
@@ -144,6 +151,7 @@ fn ensure_execution_allowed(report: &ClientValidationReport) -> Result<()> {
     }
 }
 
+/// Extracts the first [`ArkReceivePointer`] from `methods`.
 fn first_ark_pointer(methods: &[PaymentMethod]) -> Result<ArkReceivePointer> {
     methods
         .iter()
@@ -167,6 +175,7 @@ fn first_ark_pointer(methods: &[PaymentMethod]) -> Result<ArkReceivePointer> {
         .ok_or_else(|| anyhow::anyhow!("profile has no Ark receive pointer"))
 }
 
+/// Builds a [`ClientValidationReport`] for `alias`, `signed`, and `pointer`.
 fn build_validation_report(
     alias: &str,
     signed: &satspath_core::SignedPaymentProfile,
@@ -205,6 +214,7 @@ fn build_validation_report(
     Ok(report)
 }
 
+/// Prints the human-readable [`ClientValidationReport`] summary.
 fn print_validation_report(report: &ClientValidationReport) {
     println!(
         "Profile signature: {}",
@@ -236,6 +246,7 @@ fn print_validation_report(report: &ClientValidationReport) {
     }
 }
 
+/// Prints the human-readable [`ArkPaymentIntent`] preview.
 fn print_intent(intent: &ArkPaymentIntent) {
     println!("Ark route preview");
     println!("Route: {:?}", intent.route_kind);
@@ -248,6 +259,7 @@ fn print_intent(intent: &ArkPaymentIntent) {
     println!("No funds moved.");
 }
 
+/// Formats a boolean check as `"valid"` or `"invalid"`.
 fn valid_word(value: bool) -> &'static str {
     if value {
         "valid"
@@ -256,6 +268,7 @@ fn valid_word(value: bool) -> &'static str {
     }
 }
 
+/// Maps source and destination [`ArkSwapSide`]s into an [`ArkRouteKind`].
 fn route_kind_from_sides(from: ArkSwapSide, to: ArkSwapSide) -> Result<ArkRouteKind> {
     match (from, to) {
         (ArkSwapSide::Ark, ArkSwapSide::Lightning) => Ok(ArkRouteKind::ArkToLightning),
@@ -270,6 +283,7 @@ fn route_kind_from_sides(from: ArkSwapSide, to: ArkSwapSide) -> Result<ArkRouteK
 impl std::str::FromStr for ArkSwapSide {
     type Err = anyhow::Error;
 
+    /// Parses an [`ArkSwapSide`] from `"ark"`, `"lightning"`, or `"onchain"`.
     fn from_str(s: &str) -> Result<Self> {
         match s {
             "ark" => Ok(Self::Ark),
@@ -284,11 +298,13 @@ impl std::str::FromStr for ArkSwapSide {
 mod tests {
     use super::*;
 
+    /// Verifies that omitting `--testnet` fails closed.
     #[test]
     fn no_testnet_means_fail() {
         assert!(ensure_testnet(false).is_err());
     }
 
+    /// Verifies that exact confirmation string is required for testnet execution.
     #[test]
     fn exact_confirmation_required() {
         assert!(ensure_exact_confirmation(None).is_err());
@@ -296,6 +312,7 @@ mod tests {
         assert!(ensure_exact_confirmation(Some(EXEC_CONFIRMATION)).is_ok());
     }
 
+    /// Verifies supported and unsupported [`ArkSwapSide`] route combinations.
     #[test]
     fn swap_side_routes() {
         assert_eq!(

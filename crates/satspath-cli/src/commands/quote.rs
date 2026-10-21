@@ -22,7 +22,8 @@ use super::{
 /// else, so the UX / API layer can consume it directly. Human-facing output
 /// stays in [`cmd_quote`].
 pub async fn cmd_quote_json(alias: &str, amount_sats: u64) -> Result<()> {
-    let response = satspath_router::quote(alias, amount_sats).await;
+    let resolver = get_resolver(alias)?;
+    let response = satspath_router::quote_with_resolver(&resolver, alias, amount_sats).await;
     if let QuoteResponse::Ok {
         selected_method,
         qr,
@@ -38,7 +39,7 @@ pub async fn cmd_quote_json(alias: &str, amount_sats: u64) -> Result<()> {
 /// Resolve and print a route only when its wallet QR passes mainnet validation.
 pub async fn cmd_quote(alias: &str, amount_sats: u64) -> Result<()> {
     validate_amount_sats(amount_sats)?;
-    let resolver = get_resolver()?;
+    let resolver = get_resolver(alias)?;
 
     println!("Resolving identifier '{}'...", mask_identifier(alias));
     let signed = resolver
@@ -271,6 +272,7 @@ mod tests {
     use super::*;
     use satspath_core::{profile::Bolt12Offer, BitcoinNetwork};
 
+    /// Verifies that CLI quote validation rejects unsupported and amount-unbound QRs.
     #[test]
     fn cli_quote_rejects_unsupported_and_unbound_qrs() {
         let onchain = PaymentMethod::Onchain {
@@ -308,6 +310,7 @@ mod tests {
         assert!(validate_quote_qr(&bolt12, "lno1qoffer", 21_000).is_err());
     }
 
+    /// Verifies that a mixed profile skips unverified Lightning and selects eligible Onchain.
     #[test]
     fn mixed_profile_skips_unverified_lightning_and_selects_eligible_onchain() {
         let onchain = PaymentMethod::Onchain {

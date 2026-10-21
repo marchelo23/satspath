@@ -191,6 +191,12 @@ where
     let name = parse_bip353_name(input)?;
     let records = resolver.query_txt(&name.dns_name).await?;
 
+    if matches!(policy, DnssecPolicy::Strict)
+        && (records.is_empty() || records.iter().any(|r| !r.dnssec_validated))
+    {
+        return Err(SatsPathError::DnssecUnavailable);
+    }
+
     let (record, uri) = validated_bitcoin_record(&records)?;
 
     let mut warnings = Vec::new();
@@ -348,6 +354,7 @@ pub struct MockDnsTxtResolver {
 }
 
 impl MockDnsTxtResolver {
+    /// Creates an empty in-memory [`MockDnsTxtResolver`].
     pub fn new() -> Self {
         Self::default()
     }
@@ -363,8 +370,13 @@ impl MockDnsTxtResolver {
 
 #[async_trait]
 impl DnsTxtResolver for MockDnsTxtResolver {
+    /// Returns the mocked TXT records registered for `fqdn`, or `AliasNotFound` when absent.
     async fn query_txt(&self, fqdn: &str) -> Result<Vec<DnsTxtRecord>> {
-        Ok(self.records.get(fqdn).cloned().unwrap_or_default())
+        self.records
+            .get(fqdn)
+            .cloned()
+            .filter(|records| !records.is_empty())
+            .ok_or_else(|| SatsPathError::AliasNotFound(fqdn.to_string()))
     }
 }
 
@@ -378,12 +390,14 @@ pub struct DohTxtResolver {
 }
 
 impl Default for DohTxtResolver {
+    /// Returns the default [`DohTxtResolver`] pointing at Cloudflare's DoH endpoint.
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl DohTxtResolver {
+    /// Creates a new [`DohTxtResolver`] pointing at Cloudflare's DoH JSON endpoint.
     pub fn new() -> Self {
         Self {
             endpoint: "https://cloudflare-dns.com/dns-query".to_string(),
@@ -472,6 +486,7 @@ mod tests {
 
     const NOW: i64 = 1_700_000_000;
 
+    /// Builds a test [`DnsTxtRecord`] from character-string slices and a DNSSEC flag.
     fn txt(strings: &[&str], dnssec: bool) -> DnsTxtRecord {
         DnsTxtRecord {
             strings: strings.iter().map(|s| s.to_string()).collect(),
@@ -480,6 +495,7 @@ mod tests {
         }
     }
 
+    /// Resolves `input` against `records` under `policy` at timestamp `NOW`.
     async fn resolve(
         records: Vec<DnsTxtRecord>,
         input: &str,
@@ -493,6 +509,7 @@ mod tests {
         resolve_bip353_with(&resolver, input, policy, NOW).await
     }
 
+    /// Verifies parsing a BIP-353 name with a leading `₿` prefix.
     #[test]
     fn parses_name_with_bitcoin_prefix() {
         let n = parse_bip353_name("₿rodrigo@satspath.dev").unwrap();
@@ -502,18 +519,21 @@ mod tests {
         assert_eq!(n.dns_name, "rodrigo.user._bitcoin-payment.satspath.dev");
     }
 
+    /// Verifies parsing a BIP-353 name without a leading `₿` prefix.
     #[test]
     fn parses_name_without_prefix() {
         let n = parse_bip353_name("rodrigo@satspath.dev").unwrap();
         assert_eq!(n.dns_name, "rodrigo.user._bitcoin-payment.satspath.dev");
     }
 
+    /// Verifies building the canonical `_bitcoin-payment` DNS query name.
     #[test]
     fn builds_correct_dns_name() {
         let n = parse_bip353_name("alice@example.com").unwrap();
         assert_eq!(n.dns_name, "alice.user._bitcoin-payment.example.com");
     }
 
+    /// Verifies rejecting malformed BIP-353 user@domain names.
     #[test]
     fn rejects_malformed_names() {
         assert!(parse_bip353_name("nobody").is_err()); // no @
@@ -524,6 +544,7 @@ mod tests {
         assert!(parse_bip353_name("rodrigo@satspath.dev₿").is_err()); // non-ASCII domain
     }
 
+    /// Verifies reconstructing a multi-chunk TXT RR into a single BIP-321 URI.
     #[tokio::test]
     async fn reconstructs_chunked_txt_into_one_uri() {
         // One TXT RR split into multiple character-strings → concatenated.
@@ -542,6 +563,7 @@ mod tests {
         assert_eq!(res.ttl_seconds, Some(1800));
     }
 
+    /// Verifies ignoring non-`bitcoin:` TXT records when a valid `bitcoin:` record is present.
     #[tokio::test]
     async fn ignores_non_bitcoin_txt_records() {
         let records = vec![
@@ -554,6 +576,7 @@ mod tests {
         assert_eq!(res.bitcoin_uri, "bitcoin:?lno=lno1qoffer");
     }
 
+    /// Verifies rejecting responses with multiple `bitcoin:` TXT records per BIP-353.
     #[tokio::test]
     async fn rejects_multiple_bitcoin_txt_records() {
         let records = vec![
@@ -566,6 +589,7 @@ mod tests {
         assert!(matches!(err, SatsPathError::Bip353(_)));
     }
 
+    /// Verifies that Strict mode fails closed when DNSSEC validation is absent.
     #[tokio::test]
     async fn strict_mode_fails_closed_without_dnssec() {
         let r = txt(&["bitcoin:?lno=lno1qoffer"], false); // not DNSSEC validated
@@ -575,6 +599,7 @@ mod tests {
         assert!(matches!(err, SatsPathError::DnssecUnavailable));
     }
 
+    /// Verifies that `DevInsecure` mode allows unvalidated records with an explicit warning.
     #[tokio::test]
     async fn dev_insecure_allows_unvalidated_with_warning() {
         let r = txt(&["bitcoin:?lno=lno1qoffer"], false);
@@ -586,6 +611,7 @@ mod tests {
         assert!(res.warnings[0].contains("DNSSEC NOT validated"));
     }
 
+    /// Verifies rejecting private key material embedded in a TXT payload.
     #[tokio::test]
     async fn rejects_private_material_in_txt_payload() {
         let r = txt(&["bitcoin:?lno=lno1&note=my xprv9s1 secret"], true);
@@ -595,6 +621,7 @@ mod tests {
         assert!(matches!(err, SatsPathError::PrivateMaterialRejected(_)));
     }
 
+    /// Verifies rejecting unknown `req-*` BIP-321 parameters.
     #[tokio::test]
     async fn rejects_unknown_required_param_via_bip321() {
         let r = txt(&["bitcoin:?req-future=1"], true);
@@ -604,11 +631,13 @@ mod tests {
         assert!(matches!(err, SatsPathError::InvalidPaymentUri(_)));
     }
 
+    /// Verifies that [`DnssecPolicy::default`] is [`DnssecPolicy::Strict`].
     #[test]
     fn default_policy_is_strict() {
         assert_eq!(DnssecPolicy::default(), DnssecPolicy::Strict);
     }
 
+    /// Verifies extracting quoted character-strings from a DoH TXT data field.
     #[test]
     fn doh_extracts_quoted_strings() {
         assert_eq!(

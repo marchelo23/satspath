@@ -5,10 +5,12 @@
 use std::path::Path;
 use std::process::Command;
 
+/// Returns the compiled `satspath` CLI binary path.
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_satspath")
 }
 
+/// Runs the `satspath` CLI binary in `dir` with `args` and returns `(stdout, stderr, success)`.
 fn run(dir: &Path, args: &[&str]) -> (String, String, bool) {
     let out = Command::new(bin())
         .args(args)
@@ -24,6 +26,7 @@ fn run(dir: &Path, args: &[&str]) -> (String, String, bool) {
     )
 }
 
+/// Verifies exporting a signed profile on machine A and importing/showing it offline on machine B.
 #[test]
 fn export_then_import_across_registries() {
     // "Machine A" registers and exports.
@@ -60,14 +63,15 @@ fn export_then_import_across_registries() {
     assert!(ok, "import failed: {err}{out}");
     assert!(out.contains("signature valid"), "import output: {out}");
 
-    let (show, _e, ok) = run(b.path(), &["show", "rodrigo@satspath.dev"]);
-    assert!(ok);
+    let (show, err, ok) = run(b.path(), &["show", "rodrigo@satspath.dev"]);
+    assert!(ok, "locally imported profile must resolve offline: {err}");
     assert!(
         show.contains("Signature valid: yes"),
         "machine B should verify the imported profile:\n{show}"
     );
 }
 
+/// Verifies that `satspath import` rejects a tampered profile JSON.
 #[test]
 fn import_rejects_tampered_profile() {
     let a = tempfile::tempdir().unwrap();

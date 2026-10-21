@@ -118,7 +118,7 @@ pub async fn build_mainnet_preview_response(
 ) -> Result<QuoteResponse> {
     validate_amount_sats(amount_sats).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let resolver = get_resolver()?;
+    let resolver = get_resolver(recipient)?;
     let signed = match resolver.resolve_alias(recipient).await {
         Ok(signed) => signed,
         Err(SatsPathError::AliasNotFound(_)) => {
@@ -560,6 +560,7 @@ mod tests {
     use satspath_core::profile::PaymentMethod;
     use satspath_router::{RouteQuote, SwapDirective};
 
+    /// Builds a test [`RouteQuote`] wrapping `method`.
     fn quote_for(method: PaymentMethod) -> RouteQuote {
         RouteQuote {
             selected_method: method,
@@ -575,6 +576,7 @@ mod tests {
         }
     }
 
+    /// Verifies that Lightning preview rejects amount-less pointers.
     #[tokio::test]
     async fn lightning_preview_rejects_amountless_pointer() {
         let quote = quote_for(PaymentMethod::Lightning {
@@ -592,6 +594,7 @@ mod tests {
             .is_err());
     }
 
+    /// Verifies that on-chain preview returns a validated BIP-21 mainnet URI.
     #[tokio::test]
     async fn onchain_preview_returns_bip21_mainnet_uri() {
         let quote = quote_for(PaymentMethod::Onchain {
@@ -612,6 +615,7 @@ mod tests {
         );
     }
 
+    /// Verifies that testnet addresses are rejected in mainnet preview mode.
     #[tokio::test]
     async fn testnet_address_rejected_in_mainnet_preview() {
         let quote = quote_for(PaymentMethod::Onchain {
@@ -628,6 +632,7 @@ mod tests {
             .is_err());
     }
 
+    /// Verifies that Ark preview rejects unsupported mainnet handoffs.
     #[tokio::test]
     async fn ark_preview_rejects_unsupported_handoff() {
         let quote = quote_for(PaymentMethod::Ark {
@@ -644,6 +649,7 @@ mod tests {
             .is_err());
     }
 
+    /// Verifies that BOLT12 preview rejects unsupported mainnet handoffs.
     #[tokio::test]
     async fn bolt12_preview_rejects_unsupported_handoff() {
         let quote = quote_for(PaymentMethod::Bolt12(satspath_core::profile::Bolt12Offer {
@@ -659,6 +665,7 @@ mod tests {
             .is_err());
     }
 
+    /// Verifies that `eligible_preview_methods` filters to valid mainnet rails.
     #[test]
     fn eligible_preview_methods_filters_to_valid_mainnet_rails() {
         let onchain = PaymentMethod::Onchain {

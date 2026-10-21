@@ -15,6 +15,7 @@ use satspath_router::{select_route, RouteRequest, SwapDirective};
 
 use super::get_resolver;
 
+/// Resolves `alias`, verifies its signed profile, selects a route, and displays a non-custodial payment preview.
 pub async fn cmd_pay(
     alias: &str,
     amount_sats: u64,
@@ -71,7 +72,7 @@ pub async fn cmd_pay(
     };
 
     println!("Resolving identifier {}...", display_alias);
-    let resolver = get_resolver()?;
+    let resolver = get_resolver(alias)?;
     let signed = match resolver.resolve_alias(alias).await {
         Ok(signed) => signed,
         Err(SatsPathError::AliasNotFound(_)) => {
@@ -191,6 +192,7 @@ pub async fn cmd_pay(
     Ok(())
 }
 
+/// Validates mutually exclusive or testnet-restricted CLI payment flags.
 fn validate_pay_flags(
     mainnet_preview: bool,
     experimental_swaps: bool,
@@ -209,14 +211,18 @@ fn validate_pay_flags(
 
 // ─── Experimental Engine v0 ──────────────────────────────────────────────────
 
+/// Trait for executing simulated or testnet Lightning invoice payments.
 #[allow(dead_code)]
 pub trait LightningExecutor {
+    /// Pays `invoice` for `amount_sats`.
     async fn pay_invoice(&self, invoice: &str, amount_sats: u64) -> Result<()>;
 }
 
+/// Simulated Lightning executor used for testnet preview output.
 pub struct SimulatedLightningExecutor;
 
 impl LightningExecutor for SimulatedLightningExecutor {
+    /// Prints a simulated Lightning payment trace without moving real funds.
     async fn pay_invoice(&self, invoice: &str, amount_sats: u64) -> Result<()> {
         println!("  [Simulated Lightning Execution]");
         println!(
@@ -228,6 +234,7 @@ impl LightningExecutor for SimulatedLightningExecutor {
     }
 }
 
+/// Prints the experimental testnet swap directive preview for `directive`.
 async fn exec_experimental(
     directive: &SwapDirective,
     amount_sats: u64,
@@ -341,6 +348,7 @@ async fn exec_experimental(
     Ok(())
 }
 
+/// Converts a [`PaymentMethod`] into its corresponding public [`PaymentPointer`].
 fn payment_method_to_pointer(method: &PaymentMethod) -> Result<PaymentPointer> {
     match method {
         PaymentMethod::Lightning {
@@ -394,6 +402,7 @@ fn payment_method_to_pointer(method: &PaymentMethod) -> Result<PaymentPointer> {
     }
 }
 
+/// Validates that `pointer` contains only safe public payment material matching `network`.
 fn validate_pointer_for_preview(
     pointer: &PaymentPointer,
     mainnet_preview: bool,
@@ -453,6 +462,7 @@ fn validate_pointer_for_preview(
     Ok(())
 }
 
+/// Formats `pointer` for terminal display, masking sensitive identifiers unless `debug` is true.
 fn display_pointer(pointer: &PaymentPointer, debug: bool) -> String {
     match pointer {
         PaymentPointer::LightningAddress { address, .. } => {
@@ -488,6 +498,7 @@ fn display_pointer(pointer: &PaymentPointer, debug: bool) -> String {
     }
 }
 
+/// Formats `payload` for terminal display, masking addresses and invoices unless `debug` is true.
 fn display_payload(pointer: &PaymentPointer, payload: &str, debug: bool) -> String {
     if debug {
         return payload.to_string();
@@ -503,6 +514,7 @@ fn display_payload(pointer: &PaymentPointer, payload: &str, debug: bool) -> Stri
     }
 }
 
+/// Applies `mask` to `value` unless `debug` is enabled.
 fn display_value(value: &str, mask: fn(&str) -> String, debug: bool) -> String {
     if debug {
         value.to_string()
@@ -511,6 +523,7 @@ fn display_value(value: &str, mask: fn(&str) -> String, debug: bool) -> String {
     }
 }
 
+/// Returns the lowercase canonical name for `network`.
 fn network_name(network: BitcoinNetwork) -> &'static str {
     match network {
         BitcoinNetwork::Mainnet => "mainnet",
@@ -520,6 +533,7 @@ fn network_name(network: BitcoinNetwork) -> &'static str {
     }
 }
 
+/// Validates that `method` can produce a payable QR payload for `amount_sats` on `network`.
 fn validate_payable_method(
     method: &PaymentMethod,
     amount_sats: u64,
@@ -534,6 +548,7 @@ fn validate_payable_method(
     )
 }
 
+/// Returns the standard non-custodial preview safety lines printed by `pay`.
 fn preview_safety_lines() -> [&'static str; 5] {
     [
         "SatsPath Preview Mode",
@@ -548,6 +563,7 @@ fn preview_safety_lines() -> [&'static str; 5] {
 mod tests {
     use super::*;
 
+    /// Verifies that payable methods must match the configured Bitcoin network.
     #[test]
     fn payable_methods_must_match_configured_network() {
         let mainnet = PaymentMethod::Onchain {
@@ -574,6 +590,7 @@ mod tests {
         assert!(validate_payable_method(&testnet, 21_000, BitcoinNetwork::Testnet).is_ok());
     }
 
+    /// Verifies that route preview output states no funds moved and does not claim broadcast.
     #[test]
     fn route_preview_does_not_call_swap_execution() {
         let joined = preview_safety_lines().join("\n").to_ascii_lowercase();
@@ -582,6 +599,7 @@ mod tests {
         assert!(!joined.contains("broadcast"));
     }
 
+    /// Verifies that default pay command output states preview mode and no funds moved.
     #[test]
     fn default_pay_command_says_preview_and_no_funds_moved() {
         let joined = preview_safety_lines().join("\n");

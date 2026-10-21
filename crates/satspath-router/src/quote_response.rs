@@ -102,7 +102,7 @@ impl QuoteResponse {
 
 /// Resolve, verify, route, and build a payment payload for `recipient`.
 ///
-/// Builds the default resolver chain (local registry → BIP-353 → HTTP → Nostr)
+/// Uses the local registry for known aliases, otherwise the public resolver chain.
 /// Only amount-bound, validated on-chain payloads are emitted. Lightning and
 /// experimental rails return `no_route` until a network-bound invoice handoff
 /// can be validated here; an amount-less pointer is never a payable QR.
@@ -111,7 +111,14 @@ impl QuoteResponse {
 /// registered / no route / invalid signature) — the frontend never sees a Rust
 /// error type.
 pub async fn quote(recipient: &str, amount_sats: u64) -> QuoteResponse {
-    let resolver = default_resolver();
+    let resolver = match default_resolver(recipient) {
+        Ok(resolver) => resolver,
+        Err(error) => {
+            return QuoteResponse::NoRoute {
+                reason: error.to_string(),
+            }
+        }
+    };
     quote_inner(&resolver, recipient, amount_sats, None).await
 }
 
@@ -263,7 +270,8 @@ where
     }
     let recipient_hash = identifier_hash(recipient);
 
-    // 1. Resolve. Anything unresolvable becomes an invite — never a hard error.
+    // 1. Resolve. Only a definitive absence becomes an invite. A blocked
+    // transport or resolver disagreement must never be silently downgraded.
     let resolve_span = tracing::info_span!("satspath.resolve", identifier_hash = %recipient_hash);
     let signed = match resolver
         .resolve_alias(recipient)
@@ -271,11 +279,28 @@ where
         .await
     {
         Ok(signed) => signed,
-        Err(_) => {
+        Err(SatsPathError::AliasNotFound(_)) => {
             return QuoteResponse::NotRegistered {
                 // No sender key in preview mode; invite is unsigned (no sender identity binding)
                 // TTL: 24 hours
                 invite: create_invite(recipient, amount_sats, None, 24 * 3600),
+            };
+        }
+        Err(SatsPathError::InvalidSignature) => {
+            return QuoteResponse::InvalidSignature {
+                recipient: QuoteRecipient {
+                    alias: recipient.to_string(),
+                    verified: false,
+                    profile_signature_verified: false,
+                    identifier_verified: false,
+                    identifier_verification: "invalid profile signature".into(),
+                    fingerprint: None,
+                },
+            };
+        }
+        Err(error) => {
+            return QuoteResponse::NoRoute {
+                reason: error.to_string(),
             };
         }
     };
@@ -304,6 +329,7 @@ where
     .await
 }
 
+/// Validates profile expiry, filters methods to payable QR handoffs, selects a route, and constructs the [`QuoteResponse`].
 async fn route_verified_signed(
     mut signed: satspath_core::SignedPaymentProfile,
     recipient: &str,
@@ -409,6 +435,7 @@ async fn route_verified_signed(
     }
 }
 
+/// Builds a frontend-facing [`QuoteRecipient`] summary from a [`PaymentProfile`].
 fn recipient_of(profile: &PaymentProfile, verified: bool) -> QuoteRecipient {
     QuoteRecipient {
         alias: profile.alias.clone(),
@@ -421,17 +448,38 @@ fn recipient_of(profile: &PaymentProfile, verified: bool) -> QuoteRecipient {
     }
 }
 
-/// The default resolver chain, mirroring the CLI: local registry, then public
-/// resolvers. Registry lives in the always-gitignored `.satspath/`.
-fn default_resolver() -> ChainResolver {
-    let mut chain = ChainResolver::new();
-    let reg_dir = satspath_core::default_data_dir();
-    if let Ok(registry) = Registry::open(&reg_dir) {
-        chain = chain.push(registry);
+/// A locally configured registry has one authoritative source; absent aliases
+/// use public sources which must agree. A process's current directory is not
+/// an implicit trust root for the public quote API.
+fn default_resolver(recipient: &str) -> satspath_core::Result<ChainResolver> {
+    let configured_dir = std::env::var("SATSPATH_DIR").ok();
+    let local = configured_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(std::path::Path::new);
+    resolver_with_local_root(recipient, local)
+}
+
+/// Builds a [`ChainResolver`] for `recipient`, using `local` when explicitly provided and
+/// falling back to [`satspath_core::default_data_dir`] for public continuity state.
+fn resolver_with_local_root(
+    recipient: &str,
+    local: Option<&std::path::Path>,
+) -> satspath_core::Result<ChainResolver> {
+    let continuity_dir = local
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(satspath_core::default_data_dir);
+    let mut chain = ChainResolver::with_continuity_dir(&continuity_dir);
+    if let Some(local) = local.filter(|path| path.exists()) {
+        let registry = Registry::open(local)?;
+        if registry.is_registered(recipient) {
+            return Ok(chain.push_authoritative("local-registry", registry));
+        }
     }
-    chain = chain.push(Bip353Resolver::default());
+    chain = chain.push(Bip353Resolver::new(continuity_dir));
     chain = chain.push(HttpResolver::new());
-    chain.push(NostrResolver::new())
+    Ok(chain.push(NostrResolver::new()))
 }
 
 #[cfg(test)]
@@ -441,7 +489,16 @@ mod tests {
     use satspath_core::crypto::{generate_identity_keypair, sign_profile};
     use satspath_core::{BitcoinNetwork, PaymentProfile, SignedPaymentProfile};
 
-    // Deterministic fees: cheap next block (on-chain viable when a method exists).
+    /// Verifies that public quote resolution does not implicitly trust the current directory unless explicitly configured.
+    #[test]
+    fn public_quote_does_not_implicitly_trust_local_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("registry.json"), "invalid-json").unwrap();
+        assert!(resolver_with_local_root("alice@example.com", None).is_ok());
+        assert!(resolver_with_local_root("alice@example.com", Some(dir.path())).is_err());
+    }
+
+    /// Deterministic fees: cheap next block (on-chain viable when a method exists).
     fn cheap_fees() -> FeeEstimate {
         FeeEstimate {
             fastest_fee: 5,
@@ -452,7 +509,7 @@ mod tests {
         }
     }
 
-    // Expensive next block (> 20 sat/vB): on-chain not acceptable.
+    /// Expensive next block (> 20 sat/vB): on-chain not acceptable.
     fn expensive_fees() -> FeeEstimate {
         FeeEstimate {
             fastest_fee: 35,
@@ -463,12 +520,40 @@ mod tests {
         }
     }
 
+    /// Mock resolver returning a single preconfigured profile or `AliasNotFound`.
     struct MockResolver {
         signed: Option<SignedPaymentProfile>,
     }
 
+    /// Resolver that simulates a network outage.
+    struct OutageResolver;
+
+    #[async_trait]
+    impl ProfileResolver for OutageResolver {
+        /// Always returns a simulated network error.
+        async fn resolve_alias(&self, _: &str) -> satspath_core::Result<SignedPaymentProfile> {
+            Err(SatsPathError::NetworkError("resolver unavailable".into()))
+        }
+    }
+
+    /// Verifies that a resolver outage maps to `NoRoute` and never produces an invite or payment.
+    #[tokio::test]
+    async fn resolver_outage_never_becomes_invite_or_payment() {
+        let response = quote_inner(
+            &OutageResolver,
+            "alice@example.com",
+            1_000,
+            Some(cheap_fees()),
+        )
+        .await;
+        assert!(
+            matches!(response, QuoteResponse::NoRoute { reason } if reason.contains("resolver unavailable"))
+        );
+    }
+
     #[async_trait]
     impl ProfileResolver for MockResolver {
+        /// Returns the configured signed profile or `AliasNotFound`.
         async fn resolve_alias(&self, alias: &str) -> satspath_core::Result<SignedPaymentProfile> {
             self.signed
                 .clone()
@@ -476,10 +561,12 @@ mod tests {
         }
     }
 
+    /// Signs a [`PaymentProfile`] with `secret`.
     fn sign(profile: PaymentProfile, secret: &secp256k1::SecretKey) -> SignedPaymentProfile {
         sign_profile(profile, secret).unwrap()
     }
 
+    /// Constructs a base [`PaymentProfile`] and fresh identity secret key for tests.
     fn base_profile(
         alias: &str,
         methods: Vec<PaymentMethod>,
@@ -505,6 +592,7 @@ mod tests {
         (profile, kp.secret_key)
     }
 
+    /// Builds a test Lightning [`PaymentMethod`].
     fn lightning_method(addr: &str) -> PaymentMethod {
         PaymentMethod::Lightning {
             label: "Lightning Address".into(),
@@ -515,6 +603,7 @@ mod tests {
         }
     }
 
+    /// Builds a test Onchain [`PaymentMethod`].
     fn onchain_method(addr: &str) -> PaymentMethod {
         PaymentMethod::Onchain {
             label: "Bitcoin".into(),
@@ -527,6 +616,7 @@ mod tests {
         }
     }
 
+    /// Builds a test Ark [`PaymentMethod`].
     fn ark_method(server: &str, pubkey: &str) -> PaymentMethod {
         PaymentMethod::Ark {
             label: "Ark".into(),
@@ -539,6 +629,7 @@ mod tests {
         }
     }
 
+    /// Builds a [`MockResolver`] serving a single Lightning method.
     fn lightning_resolver(alias: &str, addr: &str) -> MockResolver {
         let (profile, secret) = base_profile(alias, vec![lightning_method(addr)]);
         MockResolver {
@@ -546,6 +637,7 @@ mod tests {
         }
     }
 
+    /// Builds a [`MockResolver`] serving a single Onchain method.
     fn onchain_resolver(alias: &str, addr: &str) -> MockResolver {
         let (profile, secret) = base_profile(alias, vec![onchain_method(addr)]);
         MockResolver {
@@ -553,7 +645,7 @@ mod tests {
         }
     }
 
-    // Amount-less Lightning addresses must not be presented as payable QRs.
+    /// Verifies that amount-less Lightning addresses are not presented as payable QRs.
     #[tokio::test]
     async fn registered_lightning_user_without_invoice_returns_no_route() {
         let resolver = lightning_resolver("rodrigo@satspath.dev", "rodrigo@getalby.com");
@@ -562,6 +654,7 @@ mod tests {
         assert!(matches!(resp, QuoteResponse::NoRoute { .. }));
     }
 
+    /// Verifies that a profile with both static Lightning and valid Onchain routes to Onchain QR.
     #[tokio::test]
     async fn lightning_plus_onchain_profile_routes_to_onchain_qr() {
         let (profile, secret) = base_profile(
@@ -591,7 +684,7 @@ mod tests {
         }
     }
 
-    // 8–9: unknown user → not_registered with invite fields.
+    /// Verifies that an unknown user returns `NotRegistered` with invite fields.
     #[tokio::test]
     async fn unknown_user_returns_not_registered_with_invite() {
         let resolver = MockResolver { signed: None };
@@ -607,6 +700,7 @@ mod tests {
         }
     }
 
+    /// Verifies that invalid amounts fail closed before creating an invite or running routing.
     #[tokio::test]
     async fn invalid_amount_does_not_create_invite_or_run_routing() {
         let resolver = MockResolver { signed: None };
@@ -618,7 +712,7 @@ mod tests {
         }
     }
 
-    // 10: no usable route → no_route.
+    /// Verifies that a profile with no usable route returns `NoRoute`.
     #[tokio::test]
     async fn no_usable_route_returns_no_route() {
         // On-chain only, fees too high (35 > 20), no Lightning/Ark fallback.
@@ -637,7 +731,7 @@ mod tests {
         assert!(matches!(resp, QuoteResponse::NoRoute { .. }));
     }
 
-    // 11 & 12: invalid signature → invalid_signature, and never ok.
+    /// Verifies that tampered profiles return `InvalidSignature` and never `Ok`.
     #[tokio::test]
     async fn tampered_profile_returns_invalid_signature_never_ok() {
         let (profile, secret) = base_profile(
@@ -668,7 +762,7 @@ mod tests {
         }
     }
 
-    // 13: on-chain QR is a BIP-21 URI.
+    /// Verifies that on-chain QR payloads format as valid BIP-21 URIs.
     #[test]
     fn qr_payload_onchain_is_bip21() {
         let method = onchain_method("1BoatSLRHtKNngkdXEeobR76b53LETtpyT");
@@ -679,7 +773,7 @@ mod tests {
         );
     }
 
-    // Experimental Ark pointers are not payable without protocol validation.
+    /// Verifies that experimental Ark pointers fail closed without protocol validation.
     #[test]
     fn qr_payload_ark_fails_closed() {
         let method = ark_method(
@@ -689,7 +783,7 @@ mod tests {
         assert!(build_qr_payload(&method, 42).is_err());
     }
 
-    // 15: JSON serialization uses snake_case status values.
+    /// Verifies that JSON serialization uses snake_case `status` values.
     #[tokio::test]
     async fn json_uses_snake_case_status_values() {
         let resolver =
@@ -736,7 +830,7 @@ mod tests {
             .contains("\"status\":\"invalid_signature\""));
     }
 
-    // Success JSON embeds PaymentMethod with its `type` tag, unchanged.
+    /// Verifies that `Ok` JSON embeds `PaymentMethod` with its `type` tag unchanged.
     #[tokio::test]
     async fn ok_json_embeds_selected_method_with_type_tag() {
         let resolver =
@@ -758,5 +852,72 @@ mod tests {
         assert_eq!(v["recipient"]["verified"], true);
         assert_eq!(v["recipient"]["profile_signature_verified"], true);
         assert_eq!(v["recipient"]["identifier_verified"], false);
+    }
+
+    /// Verifies that key continuity and revocation failures map to `QuoteResponse::NoRoute`.
+    #[tokio::test]
+    async fn continuity_and_revocation_errors_map_to_no_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut p1, s1) = base_profile(
+            "alice@example.com",
+            vec![onchain_method("1BoatSLRHtKNngkdXEeobR76b53LETtpyT")],
+        );
+        p1.sequence = Some(4);
+        let initial_chain = ChainResolver::with_continuity_dir(dir.path()).push_authoritative(
+            "https",
+            MockResolver {
+                signed: Some(sign(p1.clone(), &s1)),
+            },
+        );
+        let initial = quote_inner(
+            &initial_chain,
+            "alice@example.com",
+            21_000,
+            Some(cheap_fees()),
+        )
+        .await;
+        assert_eq!(initial.status(), "ok");
+
+        // Unauthorized key replacement -> NoRoute
+        let (mut attacker_profile, attacker_secret) = base_profile(
+            "alice@example.com",
+            vec![onchain_method("1BoatSLRHtKNngkdXEeobR76b53LETtpyT")],
+        );
+        attacker_profile.sequence = Some(5);
+        let attacker_chain = ChainResolver::with_continuity_dir(dir.path()).push_authoritative(
+            "https",
+            MockResolver {
+                signed: Some(sign(attacker_profile, &attacker_secret)),
+            },
+        );
+        let replaced = quote_inner(
+            &attacker_chain,
+            "alice@example.com",
+            21_000,
+            Some(cheap_fees()),
+        )
+        .await;
+        assert!(
+            matches!(replaced, QuoteResponse::NoRoute { reason } if reason.contains("unauthorized identity key replacement"))
+        );
+
+        // Revoked profile -> NoRoute and persists tombstone across restarts
+        let mut revoked_profile = p1.clone();
+        revoked_profile.sequence = Some(5);
+        revoked_profile.revoked = true;
+        let revoked_chain = ChainResolver::with_continuity_dir(dir.path()).push_authoritative(
+            "https",
+            MockResolver {
+                signed: Some(sign(revoked_profile, &s1)),
+            },
+        );
+        let revoked = quote_inner(
+            &revoked_chain,
+            "alice@example.com",
+            21_000,
+            Some(cheap_fees()),
+        )
+        .await;
+        assert!(matches!(revoked, QuoteResponse::NoRoute { reason } if reason.contains("revoked")));
     }
 }

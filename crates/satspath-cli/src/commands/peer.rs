@@ -76,6 +76,7 @@ pub async fn cmd_import(source: Option<&str>, url: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Reads a signed profile JSON string from `source` path or standard input when `source` is `None`.
 fn read_source(source: Option<&str>) -> Result<String> {
     match source {
         Some(path) => {

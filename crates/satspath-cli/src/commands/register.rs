@@ -12,6 +12,8 @@ use satspath_core::{
 
 use super::{keystore, open_registry, satspath_dir};
 
+/// Registers a new SatsPath alias, signs its initial payment profile, stores it in the local
+/// registry, and broadcasts it to configured Nostr relays.
 pub async fn cmd_register(
     alias: &str,
     lightning_address: Option<&str>,

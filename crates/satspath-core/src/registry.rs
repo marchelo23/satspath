@@ -37,6 +37,7 @@ impl Registry {
         Ok(Registry { path, data })
     }
 
+    /// Atomically serialize and persist the registry to disk via a temporary file.
     fn save(&self) -> Result<()> {
         let json = serde_json::to_string_pretty(&self.data)
             .map_err(|e| SatsPathError::SerializationError(e.to_string()))?;
@@ -49,6 +50,8 @@ impl Registry {
         Ok(())
     }
 
+    /// Validate that a signed profile matches `requested_alias`, carries a valid
+    /// signature and compressed public key, is not expired, and contains no private material.
     pub fn validate_profile_write(
         requested_alias: &str,
         signed: &SignedPaymentProfile,
@@ -80,6 +83,7 @@ impl Registry {
         self.register_profile_for(&requested, signed)
     }
 
+    /// Validate and register a new signed profile under `requested_alias`.
     pub fn register_profile_for(
         &mut self,
         requested_alias: &str,
@@ -279,7 +283,10 @@ impl Registry {
         Ok(())
     }
 
+    /// Resolve an alias to its stored signed profile, stripping at most one leading `₿`.
     pub fn resolve_alias(&self, alias: &str) -> Result<&SignedPaymentProfile> {
+        let alias = alias.trim();
+        let alias = alias.strip_prefix('₿').unwrap_or(alias);
         let canonical = canonical_identifier(alias);
         let key = identifier_hash(&canonical);
         let profile = self
@@ -299,8 +306,10 @@ impl Registry {
         Ok(profile)
     }
 
-    /// Check whether an alias is already registered.
+    /// Check whether an alias is already registered, stripping at most one leading `₿`.
     pub fn is_registered(&self, alias: &str) -> bool {
+        let alias = alias.trim();
+        let alias = alias.strip_prefix('₿').unwrap_or(alias);
         let canonical = canonical_identifier(alias);
         self.data
             .profiles
@@ -319,6 +328,7 @@ use async_trait::async_trait;
 
 #[async_trait]
 impl ProfileResolver for Registry {
+    /// Resolve `alias` against the local registry and enforce profile expiry.
     async fn resolve_alias(&self, alias: &str) -> Result<SignedPaymentProfile> {
         // We clone to return an owned value, as ProfileResolver returns owned data
         let signed = self.resolve_alias(alias).cloned()?;
@@ -334,6 +344,7 @@ mod tests {
     use crate::crypto::{generate_identity_keypair, sign_profile};
     use crate::profile::{PaymentMethod, PaymentProfile};
 
+    /// Build a signed test profile for `alias`.
     fn make_signed(alias: &str) -> SignedPaymentProfile {
         let kp = generate_identity_keypair();
         let pubkey_hex = hex::encode(kp.public_key.serialize());
@@ -363,6 +374,7 @@ mod tests {
         sign_profile(profile, &kp.secret_key).unwrap()
     }
 
+    /// Verify that a registered profile can be resolved by its alias.
     #[test]
     fn register_and_resolve() {
         let dir = tempfile::tempdir().unwrap();
@@ -373,6 +385,20 @@ mod tests {
         assert_eq!(resolved.profile.alias, "alice@example.com");
     }
 
+    /// Verify that a single leading `₿` prefix matches an unprefixed local profile.
+    #[test]
+    fn prefixed_alias_matches_unprefixed_local_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = Registry::open(dir.path()).unwrap();
+        let signed = make_signed("alice@example.com");
+        reg.register_profile(signed).unwrap();
+        assert!(reg.is_registered("₿alice@example.com"));
+        assert!(!reg.is_registered("₿₿alice@example.com"));
+        let resolved = reg.resolve_alias("₿alice@example.com").unwrap();
+        assert_eq!(resolved.profile.alias, "alice@example.com");
+    }
+
+    /// Verify that registering the same alias twice fails with `AliasAlreadyRegistered`.
     #[test]
     fn duplicate_registration_fails() {
         let dir = tempfile::tempdir().unwrap();
@@ -385,6 +411,7 @@ mod tests {
         assert!(matches!(err, SatsPathError::AliasAlreadyRegistered(_)));
     }
 
+    /// Verify that resolving an unknown alias returns `AliasNotFound`.
     #[test]
     fn missing_alias_fails() {
         let dir = tempfile::tempdir().unwrap();
@@ -393,6 +420,7 @@ mod tests {
         assert!(matches!(err, SatsPathError::AliasNotFound(_)));
     }
 
+    /// Verify that `is_registered` reflects registration state.
     #[test]
     fn is_registered_check() {
         let dir = tempfile::tempdir().unwrap();
@@ -403,6 +431,7 @@ mod tests {
         assert!(reg.is_registered("carol@example.com"));
     }
 
+    /// Verify that registered profiles persist across registry reloads.
     #[test]
     fn registry_persists_across_opens() {
         let dir = tempfile::tempdir().unwrap();
@@ -415,6 +444,7 @@ mod tests {
         assert!(reg2.is_registered("persist@example.com"));
     }
 
+    /// Verify that a profile with an invalid signature is rejected before disk persistence.
     #[test]
     fn invalid_profile_never_reaches_disk() {
         let dir = tempfile::tempdir().unwrap();
@@ -428,6 +458,7 @@ mod tests {
         assert!(!reg.is_registered("invalid@example.com"));
     }
 
+    /// Verify that `requested_alias` must match the signed profile's alias.
     #[test]
     fn canonical_requested_alias_must_match() {
         let dir = tempfile::tempdir().unwrap();
@@ -438,6 +469,7 @@ mod tests {
             .is_err());
     }
 
+    /// Verify that replacing an identity key without a valid rotation proof fails closed.
     #[test]
     fn self_signed_replacement_key_is_rejected_without_rotation() {
         let dir = tempfile::tempdir().unwrap();

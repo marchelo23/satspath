@@ -22,8 +22,9 @@ async fn fetch_text(url: &str) -> Result<String> {
     Ok(resp.text().await?)
 }
 
+/// Resolves `alias`, verifies its profile signature and per-method ownership proofs, and displays the summary.
 pub async fn cmd_show(alias: &str, verify_online: bool) -> Result<()> {
-    let resolver = get_resolver()?;
+    let resolver = get_resolver(alias)?;
     let signed = resolver
         .resolve_alias(alias)
         .await
@@ -104,6 +105,7 @@ pub async fn cmd_show(alias: &str, verify_online: bool) -> Result<()> {
     Ok(())
 }
 
+/// Prints a single [`PaymentMethod`] and its verified [`MethodTrust`] badge.
 fn print_method(method: &PaymentMethod, trust: &MethodTrust) {
     match method {
         PaymentMethod::Bolt12(offer_data) => {

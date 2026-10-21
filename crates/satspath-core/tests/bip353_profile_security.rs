@@ -121,8 +121,17 @@ async fn continuity_rejects_replays_and_accepts_authorized_rotation() {
             .await
             .is_ok()
     );
+    assert!(
+        resolve_signed(&initial, dir.path(), "₿alice @ example.com", false)
+            .await
+            .is_ok()
+    );
     for sequence in [Some(3), Some(4), None] {
-        let replay = sign_profile(profile(&old, sequence), &old.secret_key).unwrap();
+        let mut candidate = profile(&old, sequence);
+        if sequence == Some(4) {
+            candidate.nonce = Some("same-sequence-fork".into());
+        }
+        let replay = sign_profile(candidate, &old.secret_key).unwrap();
         assert!(matches!(
             resolve_signed(&replay, dir.path(), "₿alice @ example.com", true).await,
             Err(SatsPathError::RegistryError(_))
@@ -348,7 +357,7 @@ async fn signed_rotation_must_bind_alias_sequence_and_history() {
         .unwrap();
 }
 
-/// A revoked identity cannot be introduced as a first-use profile and later revived.
+/// An unpinned first-contact revocation fails closed without persisting a tombstone.
 #[tokio::test]
 async fn first_seen_revocation_is_a_durable_tombstone() {
     let dir = tempfile::tempdir().unwrap();
@@ -361,10 +370,11 @@ async fn first_seen_revocation_is_a_durable_tombstone() {
         Err(SatsPathError::RegistryError(message)) if message.contains("revoked")
     ));
     let revived = sign_profile(profile(&key, Some(2)), &key.secret_key).unwrap();
-    assert!(matches!(
-        resolve_signed(&revived, dir.path(), "₿alice@example.com", true).await,
-        Err(SatsPathError::RegistryError(message)) if message.contains("revoked")
-    ));
+    assert!(
+        resolve_signed(&revived, dir.path(), "₿alice@example.com", false)
+            .await
+            .is_ok()
+    );
 }
 
 /// The profile fetch path must never follow a redirect, even to a valid profile.

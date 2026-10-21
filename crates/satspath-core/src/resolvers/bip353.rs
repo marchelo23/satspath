@@ -14,9 +14,10 @@
 //!   pointer return [`SatsPathError::Bip353Unauthenticated`] in [`ProfileResolver::resolve_alias`]
 //!   and never synthesize ephemeral `secp256k1` profile signatures.
 
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures_util::Stream;
@@ -30,6 +31,7 @@ use hickory_resolver::proto::rr::dnssec::public_key::Rsa;
 use hickory_resolver::proto::rr::dnssec::rdata::{DNSSECRData, DNSKEY, DS, RRSIG};
 use hickory_resolver::proto::rr::dnssec::{Algorithm, TrustAnchor, Verifier};
 use hickory_resolver::proto::rr::{DNSClass, Name, RData, Record, RecordType};
+use hickory_resolver::proto::xfer::dnssec_dns_handle::verify_nsec;
 use hickory_resolver::proto::xfer::{
     DnsHandle, DnsRequest, DnsRequestOptions, DnsResponse, DnssecDnsHandle, FirstAnswer,
     RetryDnsHandle,
@@ -383,6 +385,7 @@ type DnsResponseStream =
 #[derive(Clone)]
 pub struct SharedDnsHandle {
     send_fn: Arc<dyn Fn(DnsRequest) -> DnsResponseStream + Send + Sync>,
+    txt_responses: Arc<Mutex<HashMap<Name, DnsResponse>>>,
 }
 
 impl SharedDnsHandle {
@@ -392,16 +395,41 @@ impl SharedDnsHandle {
         H: DnsHandle<Error = E> + Send + Sync + Unpin + 'static,
         E: std::error::Error + Send + 'static,
     {
-        use futures_util::TryStreamExt;
+        use futures_util::{StreamExt, TryStreamExt};
+        let txt_responses: Arc<Mutex<HashMap<Name, DnsResponse>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let captured = Arc::clone(&txt_responses);
         Self {
             send_fn: Arc::new(move |req: DnsRequest| {
+                let txt_qname = req
+                    .queries()
+                    .first()
+                    .filter(|q| q.query_type() == RecordType::TXT)
+                    .map(|q| q.name().clone());
+                let captured = Arc::clone(&captured);
                 Box::pin(
                     handle
                         .send(req)
-                        .map_err(|e| ProtoError::from(e.to_string())),
+                        .map_err(|e| ProtoError::from(e.to_string()))
+                        .inspect(move |res| {
+                            if let (Some(qname), Ok(resp)) = (&txt_qname, res) {
+                                if let Ok(mut guard) = captured.lock() {
+                                    guard.insert(qname.clone(), resp.clone());
+                                }
+                            }
+                        }),
                 )
             }),
+            txt_responses,
         }
+    }
+
+    /// Take the most recent raw `TXT` response captured for `name`.
+    fn take_txt_response(&self, name: &Name) -> Option<DnsResponse> {
+        self.txt_responses
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.remove(name))
     }
 }
 
@@ -415,6 +443,288 @@ impl DnsHandle for SharedDnsHandle {
     }
 }
 
+/// Decode an RFC 4648 Section 7 (`base32hex` / `BASE32_DNSSEC`) label into raw hash bytes.
+fn decode_base32hex(input: &str) -> Option<Vec<u8>> {
+    if input.is_empty() {
+        return None;
+    }
+    let mut buffer = 0u32;
+    let mut bits = 0u8;
+    let mut out = Vec::with_capacity((input.len() * 5) / 8);
+    for byte in input.bytes() {
+        let val = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'v' => byte - b'a' + 10,
+            b'A'..=b'V' => byte - b'A' + 10,
+            _ => return None,
+        };
+        buffer = (buffer << 5) | u32::from(val);
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+            buffer &= (1 << bits) - 1;
+        }
+    }
+    if bits > 0 && buffer != 0 {
+        return None;
+    }
+    Some(out)
+}
+
+/// Check whether `hash` lies strictly inside the cyclic NSEC3 interval `(owner, next)`.
+fn nsec3_interval_covers(owner: &[u8], next: &[u8], hash: &[u8]) -> bool {
+    if owner.len() != next.len() || owner.len() != hash.len() {
+        return false;
+    }
+    if owner < next {
+        owner < hash && hash < next
+    } else {
+        hash > owner || hash < next
+    }
+}
+
+/// Verify that `records` has at least one valid `RRSIG` from `expected_signer` under `trusted_keys`.
+fn verify_rrset_with_trusted_keys(
+    owner_name: &Name,
+    expected_signer: &Name,
+    records: &[Record],
+    rrsigs: &[RRSIG],
+    trusted_keys: &[DNSKEY],
+    now: u32,
+) -> bool {
+    if records.is_empty() || rrsigs.is_empty() {
+        return false;
+    }
+    for rrsig in rrsigs {
+        if rrsig.signer_name() != expected_signer {
+            continue;
+        }
+        let inception = rrsig.sig_inception();
+        let expiration = rrsig.sig_expiration();
+        if now < inception || now > expiration {
+            continue;
+        }
+        for dnskey in trusted_keys {
+            if !dnskey.zone_key() || dnskey.revoke() || dnskey.algorithm() != rrsig.algorithm() {
+                continue;
+            }
+            let Ok(tag) = dnskey.calculate_key_tag() else {
+                continue;
+            };
+            if tag != rrsig.key_tag() {
+                continue;
+            }
+            if dnskey
+                .verify_rrsig(owner_name, DNSClass::IN, rrsig, records)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Verify that `response` carries a DNSSEC-authenticated `SOA` and `NSEC` denial of existence.
+fn verify_nsec_negative_response(query: &Query, response: &DnsResponse) -> bool {
+    if !matches!(
+        response.response_code(),
+        ResponseCode::NoError | ResponseCode::NXDomain
+    ) || !response.answers().is_empty()
+    {
+        return false;
+    }
+    let Some(soa_name) = response
+        .name_servers()
+        .iter()
+        .find(|rr| rr.record_type() == RecordType::SOA)
+        .map(Record::name)
+    else {
+        return false;
+    };
+    if !soa_name.zone_of(query.name()) {
+        return false;
+    }
+    let nsecs: Vec<&Record> = response
+        .name_servers()
+        .iter()
+        .filter(|rr| rr.record_type() == RecordType::NSEC && soa_name.zone_of(rr.name()))
+        .collect();
+    if nsecs.is_empty() {
+        return false;
+    }
+    if response.response_code() == ResponseCode::NXDomain
+        && nsecs.iter().any(|nsec| nsec.name() == query.name())
+    {
+        return false;
+    }
+    if response.response_code() == ResponseCode::NoError {
+        if let Some(exact) = nsecs.iter().find(|nsec| nsec.name() == query.name()) {
+            let Some(RData::DNSSEC(DNSSECRData::NSEC(rdata))) = exact.data() else {
+                return false;
+            };
+            if rdata.type_bit_maps().contains(&RecordType::CNAME) {
+                return false;
+            }
+        }
+    }
+    verify_nsec(query, soa_name, &nsecs)
+}
+
+/// Maximum number of NSEC3 records accepted in a single denial-of-existence proof.
+const MAX_NSEC3_RECORDS: usize = 8;
+
+/// Maximum NSEC3 hash iterations permitted per RFC 9276 to mitigate algorithmic complexity attacks.
+const MAX_NSEC3_ITERATIONS: u16 = 100;
+
+/// Verify RFC 5155 `NSEC3` denial of existence over pre-authenticated `NSEC3` records.
+fn verify_nsec3_coverage(
+    query: &Query,
+    soa_name: &Name,
+    response_code: ResponseCode,
+    nsec3_records: &[Record],
+) -> bool {
+    if nsec3_records.is_empty() || nsec3_records.len() > MAX_NSEC3_RECORDS {
+        return false;
+    }
+
+    struct ParsedNsec3<'a> {
+        owner_hash: Vec<u8>,
+        rdata: &'a hickory_resolver::proto::rr::dnssec::rdata::NSEC3,
+    }
+
+    let mut parsed = Vec::with_capacity(nsec3_records.len());
+    for record in nsec3_records {
+        if record.name().base_name() != *soa_name
+            || record.name().num_labels() != soa_name.num_labels() + 1
+        {
+            return false;
+        }
+        let Some(first_label) = record
+            .name()
+            .iter()
+            .next()
+            .and_then(|label| std::str::from_utf8(label).ok())
+        else {
+            return false;
+        };
+        let Some(owner_hash) = decode_base32hex(first_label) else {
+            return false;
+        };
+        let Some(RData::DNSSEC(DNSSECRData::NSEC3(rdata))) = record.data() else {
+            return false;
+        };
+        if rdata.iterations() > MAX_NSEC3_ITERATIONS {
+            return false;
+        }
+        if owner_hash.is_empty() || owner_hash.len() != rdata.next_hashed_owner_name().len() {
+            return false;
+        }
+        parsed.push(ParsedNsec3 { owner_hash, rdata });
+    }
+    if parsed.is_empty() {
+        return false;
+    }
+
+    let hash_name = |entry: &ParsedNsec3<'_>, target: &Name| -> Option<Vec<u8>> {
+        entry
+            .rdata
+            .hash_algorithm()
+            .hash(entry.rdata.salt(), target, entry.rdata.iterations())
+            .ok()
+            .map(|digest| digest.as_ref().to_vec())
+    };
+
+    match response_code {
+        ResponseCode::NoError => parsed.iter().any(|entry| {
+            let Some(qhash) = hash_name(entry, query.name()) else {
+                return false;
+            };
+            entry.owner_hash == qhash
+                && !entry.rdata.type_bit_maps().contains(&query.query_type())
+                && !entry.rdata.type_bit_maps().contains(&RecordType::CNAME)
+        }),
+        ResponseCode::NXDomain => {
+            // 1. QNAME must not match any NSEC3 owner hash.
+            for entry in &parsed {
+                let Some(qhash) = hash_name(entry, query.name()) else {
+                    return false;
+                };
+                if entry.owner_hash == qhash {
+                    return false;
+                }
+            }
+
+            // Helper to check if any NSEC3 record covers a target name.
+            let find_covering_entry = |target: &Name, require_no_opt_out: bool| -> bool {
+                parsed.iter().any(|entry| {
+                    if require_no_opt_out && entry.rdata.opt_out() {
+                        return false;
+                    }
+                    hash_name(entry, target).is_some_and(|h| {
+                        nsec3_interval_covers(
+                            &entry.owner_hash,
+                            entry.rdata.next_hashed_owner_name(),
+                            &h,
+                        )
+                    })
+                })
+            };
+
+            // 2. Candidate ancestor pairs (child, parent_of_child) from QNAME up to soa_name.
+            let mut candidates = Vec::new();
+            let mut curr = query.name().clone();
+            while curr != *soa_name && soa_name.zone_of(&curr) {
+                let parent = curr.base_name();
+                candidates.push((curr, parent.clone()));
+                curr = parent;
+            }
+
+            // 3. Find Closest Encloser (CE) and Next Closer (NC).
+            let mut ce_and_nc = None;
+            for (nc_cand, ce_cand) in &candidates {
+                let ce_exists = parsed
+                    .iter()
+                    .any(|entry| hash_name(entry, ce_cand).is_some_and(|h| entry.owner_hash == h));
+                if ce_exists {
+                    ce_and_nc = Some((ce_cand.clone(), nc_cand.clone()));
+                    break;
+                }
+            }
+
+            let Some((ce, nc)) = ce_and_nc else {
+                return false;
+            };
+
+            // 4. Next Closer (NC) must be covered by an NSEC3 record without Opt-Out.
+            // RFC 5155 §8.4: The NSEC3 RR covering next closer name MUST NOT have Opt-Out set for NXDOMAIN.
+            if !find_covering_entry(&nc, true) {
+                return false;
+            }
+
+            // 5. Wildcard at Closest Encloser (*.CE) must not exist and must be covered.
+            let Ok(wildcard) = Name::from_ascii(format!("*.{ce}")) else {
+                return false;
+            };
+            for entry in &parsed {
+                let Some(wchash) = hash_name(entry, &wildcard) else {
+                    return false;
+                };
+                if entry.owner_hash == wchash {
+                    return false;
+                }
+            }
+            if !find_covering_entry(&wildcard, true) {
+                return false;
+            }
+
+            true
+        }
+        _ => false,
+    }
+}
+
 /// A local DNSSEC-validating DNS TXT resolver backed by Hickory's [`DnssecDnsHandle`].
 ///
 /// Performs full cryptographic signature and trust-chain verification locally
@@ -422,6 +732,8 @@ impl DnsHandle for SharedDnsHandle {
 #[derive(Clone)]
 pub struct HickoryDnssecTxtResolver {
     handle: DnssecDnsHandle<SharedDnsHandle>,
+    raw_handle: SharedDnsHandle,
+    clock: Option<Arc<dyn Fn() -> u32 + Send + Sync>>,
 }
 
 impl Default for HickoryDnssecTxtResolver {
@@ -474,6 +786,36 @@ impl HickoryDnssecTxtResolver {
         Self::from_dns_handle(handle, anchor)
     }
 
+    /// Construct a validating resolver with a custom clock function for deterministic validation.
+    pub fn with_dns_handle_and_clock<H, E, F>(handle: H, anchor: TrustAnchor, clock: F) -> Self
+    where
+        H: DnsHandle<Error = E> + Send + Sync + Unpin + 'static,
+        E: std::error::Error + Send + 'static,
+        F: Fn() -> u32 + Send + Sync + 'static,
+    {
+        let mut resolver = Self::from_dns_handle(handle, anchor);
+        resolver.clock = Some(Arc::new(clock));
+        resolver
+    }
+
+    /// Attach a custom clock function to this resolver.
+    pub fn with_clock<F: Fn() -> u32 + Send + Sync + 'static>(mut self, clock: F) -> Self {
+        self.clock = Some(Arc::new(clock));
+        self
+    }
+
+    /// Return the current validation time in seconds since UNIX epoch.
+    pub fn now(&self) -> u32 {
+        if let Some(ref clock) = self.clock {
+            clock()
+        } else {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as u32)
+                .unwrap_or(0)
+        }
+    }
+
     /// Wrap a prevalidated network pool or an explicitly injected test transport.
     fn from_dns_handle<H, E>(handle: H, anchor: TrustAnchor) -> Self
     where
@@ -481,10 +823,134 @@ impl HickoryDnssecTxtResolver {
         E: std::error::Error + Send + 'static,
     {
         let shared = SharedDnsHandle::new(handle);
-        let dnssec_handle = DnssecDnsHandle::with_trust_anchor(shared, anchor);
+        let dnssec_handle = DnssecDnsHandle::with_trust_anchor(shared.clone(), anchor);
         Self {
             handle: dnssec_handle,
+            raw_handle: shared,
+            clock: None,
         }
+    }
+
+    /// Cryptographically validate an `NSEC3` negative response against the zone's `DNSKEY`s.
+    async fn verify_nsec3_negative_response(
+        &self,
+        query: &Query,
+        raw_response: &DnsResponse,
+    ) -> bool {
+        if !matches!(
+            raw_response.response_code(),
+            ResponseCode::NoError | ResponseCode::NXDomain
+        ) || !raw_response.answers().is_empty()
+        {
+            return false;
+        }
+        let soa_records: Vec<Record> = raw_response
+            .name_servers()
+            .iter()
+            .filter(|rr| rr.record_type() == RecordType::SOA)
+            .cloned()
+            .collect();
+        let Some(soa_first) = soa_records.first() else {
+            return false;
+        };
+        let soa_name = soa_first.name().clone();
+        if !soa_name.zone_of(query.name()) || soa_records.iter().any(|rr| rr.name() != &soa_name) {
+            return false;
+        }
+        let nsec3_records: Vec<Record> = raw_response
+            .name_servers()
+            .iter()
+            .filter(|rr| rr.record_type() == RecordType::NSEC3)
+            .cloned()
+            .collect();
+        if nsec3_records.is_empty() || nsec3_records.len() > MAX_NSEC3_RECORDS {
+            return false;
+        }
+        let rrsigs: Vec<(Name, RRSIG)> = raw_response
+            .name_servers()
+            .iter()
+            .filter_map(|rr| match rr.data() {
+                Some(RData::DNSSEC(DNSSECRData::RRSIG(sig))) => {
+                    Some((rr.name().clone(), sig.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let Ok(dnskey_resp) = self
+            .handle
+            .lookup(
+                Query::query(soa_name.clone(), RecordType::DNSKEY),
+                DnsRequestOptions::default(),
+            )
+            .first_answer()
+            .await
+        else {
+            return false;
+        };
+        let trusted_keys: Vec<DNSKEY> = dnskey_resp
+            .answers()
+            .iter()
+            .filter(|rr| rr.name() == &soa_name)
+            .filter_map(|rr| match rr.data() {
+                Some(RData::DNSSEC(DNSSECRData::DNSKEY(key)))
+                    if key.zone_key() && !key.revoke() =>
+                {
+                    Some(key.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        if trusted_keys.is_empty() {
+            return false;
+        }
+        let now = self.now();
+        let soa_rrsigs: Vec<RRSIG> = rrsigs
+            .iter()
+            .filter(|(owner, sig)| owner == &soa_name && sig.type_covered() == RecordType::SOA)
+            .map(|(_, sig)| sig.clone())
+            .collect();
+        if !verify_rrset_with_trusted_keys(
+            &soa_name,
+            &soa_name,
+            &soa_records,
+            &soa_rrsigs,
+            &trusted_keys,
+            now,
+        ) {
+            return false;
+        }
+        let mut nsec3_by_owner: HashMap<Name, Vec<Record>> = HashMap::new();
+        for record in &nsec3_records {
+            nsec3_by_owner
+                .entry(record.name().clone())
+                .or_default()
+                .push(record.clone());
+        }
+        for (owner, records) in &nsec3_by_owner {
+            let owner_rrsigs: Vec<RRSIG> = rrsigs
+                .iter()
+                .filter(|(sig_owner, sig)| {
+                    sig_owner == owner && sig.type_covered() == RecordType::NSEC3
+                })
+                .map(|(_, sig)| sig.clone())
+                .collect();
+            if !verify_rrset_with_trusted_keys(
+                owner,
+                &soa_name,
+                records,
+                &owner_rrsigs,
+                &trusted_keys,
+                now,
+            ) {
+                return false;
+            }
+        }
+        verify_nsec3_coverage(
+            query,
+            &soa_name,
+            raw_response.response_code(),
+            &nsec3_records,
+        )
     }
 }
 
@@ -494,9 +960,10 @@ impl DnsTxtResolver for HickoryDnssecTxtResolver {
     ///
     /// Treats names without a trailing dot as absolute. Returns UTF-8 TXT
     /// character-strings, TTLs in seconds, and `dnssec_validated = true`.
-    /// Invalid names or non-UTF-8 data return `Bip353`. Missing signatures or
-    /// verifiable results return `DnssecUnavailable`; other lookup or validation
-    /// failures and non-success DNS response codes return `NetworkError`.
+    /// Authenticated `NXDOMAIN` or `NODATA` responses proven by valid `NSEC` or
+    /// `NSEC3` records return `AliasNotFound`. Invalid names or non-UTF-8 data
+    /// return `Bip353`. Missing signatures or unverifiable results return
+    /// `DnssecUnavailable`; other lookup or validation failures return `NetworkError`.
     async fn query_txt(&self, fqdn: &str) -> Result<Vec<DnsTxtRecord>> {
         let name_str = if fqdn.ends_with('.') {
             fqdn.to_string()
@@ -506,47 +973,105 @@ impl DnsTxtResolver for HickoryDnssecTxtResolver {
         let name = Name::from_ascii(&name_str)
             .map_err(|e| SatsPathError::Bip353(format!("invalid DNS name `{fqdn}`: {e}")))?;
 
-        let query = Query::query(name, RecordType::TXT);
-        let stream = self.handle.lookup(query, DnsRequestOptions::default());
-        let response = stream.first_answer().await.map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("rrsigs are not present")
-                || msg.contains("rrsigs is empty")
-                || msg.contains("no results to verify")
-            {
-                SatsPathError::DnssecUnavailable
-            } else {
-                SatsPathError::NetworkError(format!("DNSSEC validation failed for `{fqdn}`: {msg}"))
+        let query = Query::query(name.clone(), RecordType::TXT);
+        let stream = self
+            .handle
+            .lookup(query.clone(), DnsRequestOptions::default());
+        let response = match stream.first_answer().await {
+            Ok(response) => {
+                let _ = self.raw_handle.take_txt_response(&name);
+                response
             }
-        })?;
+            Err(e) => {
+                let raw_response = self.raw_handle.take_txt_response(&name);
+                let msg = e.to_string();
+                if msg.contains("could not validate negative response with NSEC") {
+                    if let Some(raw) = raw_response {
+                        if self.verify_nsec3_negative_response(&query, &raw).await {
+                            return Err(SatsPathError::AliasNotFound(fqdn.to_string()));
+                        }
+                    }
+                }
+                if msg.contains("rrsigs are not present")
+                    || msg.contains("rrsigs is empty")
+                    || msg.contains("no results to verify")
+                {
+                    return Err(SatsPathError::DnssecUnavailable);
+                }
+                return Err(SatsPathError::NetworkError(format!(
+                    "DNSSEC validation failed for `{fqdn}`: {msg}"
+                )));
+            }
+        };
 
-        if response.response_code() != ResponseCode::NoError {
+        if !matches!(
+            response.response_code(),
+            ResponseCode::NoError | ResponseCode::NXDomain
+        ) {
             return Err(SatsPathError::NetworkError(format!(
                 "DNSSEC validation failed for `{fqdn}`: response code {:?}",
                 response.response_code()
             )));
         }
 
-        let mut out = Vec::new();
-        for record in response.answers() {
-            if let Some(txt) = record.data().and_then(|d| d.as_txt()) {
-                let mut strings = Vec::new();
-                for part in txt.iter() {
-                    let s = std::str::from_utf8(part)
-                        .map_err(|_| SatsPathError::Bip353("TXT record is not UTF-8".into()))?;
-                    strings.push(s.to_string());
+        let mut final_owner = name.clone();
+        let mut visited = HashSet::new();
+        visited.insert(final_owner.clone());
+        for _ in 0..16 {
+            let next_target = response.answers().iter().find_map(|record| {
+                if record.name() == &final_owner && record.record_type() == RecordType::CNAME {
+                    record
+                        .data()
+                        .and_then(|d| d.as_cname())
+                        .map(|c| c.0.clone())
+                } else {
+                    None
                 }
-                out.push(DnsTxtRecord {
-                    strings,
-                    // DnssecDnsHandle::verify_all_rrsets filters response.answers() to only
-                    // RRsets whose RRSIG + DNSKEY + DS chain passed cryptographic verification.
-                    dnssec_validated: true,
-                    ttl_seconds: Some(record.ttl()),
-                });
+            });
+            match next_target {
+                Some(target) => {
+                    if !visited.insert(target.clone()) {
+                        break;
+                    }
+                    final_owner = target;
+                }
+                None => break,
+            }
+        }
+
+        let mut out = Vec::new();
+        if response.response_code() == ResponseCode::NoError {
+            for record in response.answers() {
+                if record.name() != &final_owner || record.record_type() != RecordType::TXT {
+                    continue;
+                }
+                if let Some(txt) = record.data().and_then(|d| d.as_txt()) {
+                    let mut strings = Vec::new();
+                    for part in txt.iter() {
+                        let s = std::str::from_utf8(part)
+                            .map_err(|_| SatsPathError::Bip353("TXT record is not UTF-8".into()))?;
+                        strings.push(s.to_string());
+                    }
+                    out.push(DnsTxtRecord {
+                        strings,
+                        // DnssecDnsHandle::verify_all_rrsets filters response.answers() to only
+                        // RRsets whose RRSIG + DNSKEY + DS chain passed cryptographic verification.
+                        dnssec_validated: true,
+                        ttl_seconds: Some(record.ttl()),
+                    });
+                }
             }
         }
 
         if out.is_empty() {
+            if verify_nsec_negative_response(&query, &response) {
+                return Err(SatsPathError::AliasNotFound(fqdn.to_string()));
+            }
+            if response.response_code() == ResponseCode::NXDomain {
+                return Err(SatsPathError::NetworkError(format!(
+                    "DNSSEC validation failed for `{fqdn}`: unverified NXDomain"
+                )));
+            }
             return Err(SatsPathError::DnssecUnavailable);
         }
 
@@ -649,6 +1174,8 @@ pub async fn resolve_alias_with(
     resolve_alias_with_allow_private(resolver, alias, false).await
 }
 
+/// Resolve a `₿`-prefixed alias and fetch its DNSSEC-authenticated `sp-profile`,
+/// optionally allowing private or loopback profile URLs in test environments.
 pub async fn resolve_alias_with_allow_private(
     resolver: &(impl DnsTxtResolver + Sync + ?Sized),
     alias: &str,
@@ -660,7 +1187,13 @@ pub async fn resolve_alias_with_allow_private(
     let _name =
         parse_bip353_name(alias).map_err(|_| SatsPathError::AliasNotFound(alias.to_string()))?;
     let now = chrono::Utc::now().timestamp();
-    let resolution = resolve_bip353_with(resolver, alias, DnssecPolicy::Strict, now).await?;
+    let resolution = match resolve_bip353_with(resolver, alias, DnssecPolicy::Strict, now).await {
+        Ok(resolution) => resolution,
+        Err(SatsPathError::AliasNotFound(_)) => {
+            return Err(SatsPathError::AliasNotFound(alias.to_string()));
+        }
+        Err(err) => return Err(err),
+    };
 
     let parsed = crate::bip321::parse_bip321(&resolution.bitcoin_uri)?;
     if let Some(profile_url) = parsed.sp_profile {
@@ -711,6 +1244,23 @@ impl ProfileResolver for Bip353Resolver {
     /// A verified revocation is persisted before returning `RegistryError`.
     /// Alias, DNS, profile validation, transition, and storage errors propagate.
     async fn resolve_alias(&self, alias: &str) -> Result<SignedPaymentProfile> {
+        let signed = self.resolve_for_chain(alias).await?;
+        if signed.profile.revoked {
+            if super::continuity::has_pin(&self.continuity_dir, &signed.profile.alias)? {
+                super::continuity::accept_profile(&self.continuity_dir, &signed)?;
+            }
+            return Err(SatsPathError::RegistryError(format!(
+                "Alias {} has been revoked",
+                signed.profile.alias
+            )));
+        }
+        super::continuity::accept_profile(&self.continuity_dir, &signed)?;
+        Ok(signed)
+    }
+
+    /// Authenticate the DNS pointer and check stored revocations while deferring
+    /// pin advancement to [`crate::resolver::ChainResolver`].
+    async fn resolve_for_chain(&self, alias: &str) -> Result<SignedPaymentProfile> {
         if !alias.starts_with('₿') {
             return Err(SatsPathError::AliasNotFound(alias.to_string()));
         }
@@ -720,14 +1270,13 @@ impl ProfileResolver for Bip353Resolver {
             &self.continuity_dir,
             &format!("{}@{}", name.user, name.domain),
         )?;
-        let signed = resolve_alias_with_allow_private(
-            self.dns.as_ref(),
-            alias,
-            self.allow_private_profile_url,
-        )
-        .await?;
-        super::continuity::accept_profile(&self.continuity_dir, &signed)?;
-        Ok(signed)
+        resolve_alias_with_allow_private(self.dns.as_ref(), alias, self.allow_private_profile_url)
+            .await
+    }
+
+    /// Return the configured continuity storage directory for this resolver.
+    fn continuity_dir(&self) -> Option<&std::path::Path> {
+        Some(&self.continuity_dir)
     }
 }
 

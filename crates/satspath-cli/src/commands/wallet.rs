@@ -31,7 +31,7 @@ use satspath_core::validation::{
 use satspath_core::{BitcoinNetwork, PaymentMethod, PaymentProfile};
 use satspath_router::handoff::fmt_btc;
 
-use super::{keystore, satspath_dir};
+use super::{get_resolver, keystore, satspath_dir};
 
 /// The improved guidance shown when a local profile fails signature verification.
 const SIGNATURE_INVALID_HELP: &str =
@@ -66,20 +66,24 @@ struct WalletState {
 
 // ─── storage helpers ─────────────────────────────────────────────────────────
 
+/// Returns the path to `wallet.json` inside [`satspath_dir`].
 fn wallet_path() -> std::path::PathBuf {
     satspath_dir().join(WALLET_FILE)
 }
 
+/// Ensures [`satspath_dir`] exists on disk.
 fn ensure_dir() -> Result<()> {
     std::fs::create_dir_all(satspath_dir())?;
     Ok(())
 }
 
+/// Opens the local [`Registry`] inside [`satspath_dir`], creating the directory if needed.
 fn open_registry() -> Result<Registry> {
     ensure_dir()?;
     Ok(Registry::open(&satspath_dir())?)
 }
 
+/// Loads [`WalletState`] from `wallet.json`, returning default empty state when absent.
 fn load_wallet() -> Result<WalletState> {
     let path = wallet_path();
     if !path.exists() {
@@ -89,6 +93,7 @@ fn load_wallet() -> Result<WalletState> {
     Ok(serde_json::from_str(&raw)?)
 }
 
+/// Persists `state` to `wallet.json` after verifying it contains no private material.
 fn save_wallet(state: &WalletState) -> Result<()> {
     ensure_dir()?;
     let json = serde_json::to_string_pretty(state)?;
@@ -98,12 +103,14 @@ fn save_wallet(state: &WalletState) -> Result<()> {
     Ok(())
 }
 
+/// Returns the current Unix timestamp in seconds.
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
 // ─── profile building / signing ──────────────────────────────────────────────
 
+/// Builds the list of public [`PaymentMethod`]s configured in `state`.
 fn build_methods(state: &WalletState) -> Vec<PaymentMethod> {
     let mut methods = Vec::new();
     if let Some(addr) = &state.lightning_address {
@@ -340,6 +347,7 @@ pub fn cmd_wallet_init() -> Result<()> {
     Ok(())
 }
 
+/// Prints a reminder that the receiver-profile wallet never controls or moves funds.
 fn print_receiver_warning() {
     println!();
     println!("This is a receiver-profile wallet. It does not control or move funds.");
@@ -617,6 +625,7 @@ pub fn cmd_wallet_add_ark(server: &str, pubkey: &str) -> Result<()> {
     })
 }
 
+/// Mutates [`WalletState`] via `f`, re-signs the profile, and persists both registry and wallet files.
 fn update_one<F: FnOnce(&mut WalletState) -> Result<()>>(f: F) -> Result<()> {
     let mut state = load_wallet()?;
     if state.identity_pubkey.is_none() {
@@ -727,6 +736,7 @@ pub fn cmd_wallet_publish(alias: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Replaces non-alphanumeric ASCII characters in `alias` with `'_'` for safe filenames.
 fn sanitize(alias: &str) -> String {
     alias
         .chars()
@@ -791,7 +801,20 @@ async fn build_receive_preview(alias: &str, amount_sats: u64) -> WalletReceivePr
         warnings: warnings.clone(),
     };
 
-    match satspath_router::quote(alias, amount_sats).await {
+    // The CLI explicitly opts in to its documented local registry; the public
+    // `quote()` API intentionally does not trust a working-directory registry
+    // unless `SATSPATH_DIR` is configured.
+    let resolver = match get_resolver(alias) {
+        Ok(resolver) => resolver,
+        Err(error) => {
+            return WalletReceivePreview {
+                reason: Some(error.to_string()),
+                ..base("no_route")
+            }
+        }
+    };
+
+    match satspath_router::quote_with_resolver(&resolver, alias, amount_sats).await {
         QuoteResponse::Ok {
             recipient,
             selected_method,
@@ -838,6 +861,7 @@ async fn build_receive_preview(alias: &str, amount_sats: u64) -> WalletReceivePr
 mod tests {
     use super::*;
 
+    /// Verifies that [`WalletState`] serializes without any private key fields.
     #[test]
     fn wallet_state_serializes_without_private_fields() {
         let state = WalletState {
@@ -859,6 +883,7 @@ mod tests {
         }
     }
 
+    /// Verifies that `build_methods` preserves configured public receive pointers.
     #[test]
     fn build_methods_preserves_public_receive_pointers() {
         let state = WalletState {
@@ -881,6 +906,7 @@ mod tests {
             .any(|m| matches!(m, PaymentMethod::Ark { .. })));
     }
 
+    /// Verifies that local receive payloads are validated before display.
     #[test]
     fn local_receive_payloads_are_validated_before_display() {
         let lightning = build_methods(&WalletState {
@@ -914,6 +940,7 @@ mod tests {
         assert!(receive_payload_for(&ark, None).is_err());
     }
 
+    /// Verifies that local receive prefers on-chain when an amount is provided and Lightning otherwise.
     #[test]
     fn local_receive_prefers_onchain_with_amount_and_lightning_without() {
         let methods = build_methods(&WalletState {
@@ -936,6 +963,7 @@ mod tests {
         );
     }
 
+    /// Verifies that an Ark receive method requires both server and pubkey.
     #[test]
     fn ark_requires_both_server_and_pubkey() {
         let state = WalletState {
@@ -949,6 +977,7 @@ mod tests {
             .any(|m| matches!(m, PaymentMethod::Ark { .. })));
     }
 
+    /// Verifies that `cmd_alias_recover` rejects a nonexistent proof file.
     #[test]
     fn alias_recover_rejects_nonexistent_proof_file() {
         let err =
@@ -956,6 +985,7 @@ mod tests {
         assert!(err.to_string().contains("failed to read proof file"));
     }
 
+    /// Verifies that `cmd_alias_recover` rejects invalid JSON input.
     #[test]
     fn alias_recover_rejects_invalid_json() {
         let dir = tempfile::tempdir().unwrap();

@@ -24,23 +24,45 @@ async fn resolve_alias(&self, alias: &str) -> Result<SignedPaymentProfile>;
 
 ## Resolver Chain
 
-The default resolver chain is:
+The CLI uses its locally registered/imported, signature-checked profile as a
+single authoritative source when the alias exists locally. Otherwise the
+configured public resolver chain is:
 
 ```txt
-local registry -> BIP-353 -> HTTPS -> Nostr
+BIP-353 -> HTTPS -> Nostr
 ```
 
 Implementations MAY add other resolvers, including P2P transports, platform APIs, QR-imported profiles, or hardware-wallet-provided profile stores.
 
-The chain MUST:
+The local registry is **not** queried alongside all public sources for an
+already stored alias; public sources are not expected to publish the same
+locally imported profile. For an alias absent locally, public-source outages
+remain hard errors rather than an unsafe fallback.
 
-1. Normalize the identifier.
-2. Query each resolver in order.
-3. Continue past `NotFound`.
-4. Continue past transient `Unavailable` failures.
-5. Verify any returned signed profile before routing.
-6. Stop at the first verified profile.
-7. Return `not_registered` if no resolver returns a usable profile.
+The public router `quote()` API consults a local registry only when
+`SATSPATH_DIR` is explicitly configured; a planted `.satspath/` in the working
+directory cannot silently replace the public source chain. CLI commands use
+their documented default `.satspath/` when no directory is configured. If
+`SATSPATH_DIR` is set, a missing configured directory never falls back to a
+different working-directory registry.
+
+The strict `ChainResolver` MUST:
+
+1. Query every configured source in order with the caller's identifier (some
+   transports require a `₿` prefix); normalize identifiers when comparing
+   returned aliases. Each transport parses its own input form.
+2. Continue past explicit `NotFound` responses. Only an *authoritative* source can establish identity; a supplementary source can corroborate but never bootstrap it.
+3. Reject transport failures rather than letting blocking of a preferred transport downgrade the decision. Configure only sources expected for this identifier; a disconnected optional source should not be configured as required.
+4. Verify each returned signature, alias, revocation and expiry independently.
+5. Require byte-identical canonical signed profile payloads across successful sources, including key, sequence, capability set and order. Any divergence is a `ResolverDisagreement`; do not pick the first success or merge capabilities.
+6. If a continuity pin exists, reject a different identity key or lower sequence; if capability descriptors are pinned, reject any suppressed method. Rotation or capability updates require separately verified transparency history and explicit trusted pin updates, never a resolver's unsupported claim.
+7. Return `AliasNotFound` only if all sources explicitly returned `NotFound`. Return a `ResolutionReport` with source roles and found/absent observations on success; disagreements and outages are errors surfaced to callers.
+
+The fallback order is the registered authoritative-source order, but only after all configured sources have agreed. `NotFound` from a supplementary source is not proof of a downgrade; treat that source as absent and expose it in the report. A deployment requiring that source to be present must enforce it as an authoritative source or through its own trust policy. A locally pinned checkpoint/witness proof is not inferred from matching profiles; the wallet handoff must verify that evidence independently.
+
+Quote and send callers may offer an invite only for definitive `AliasNotFound`.
+An outage, invalid authentication or resolver disagreement returns `no_route`;
+the daemon must not persist an invite for those failures.
 
 The chain MUST NOT trust a resolver because of its transport. An HTTPS response, DNS response, Nostr event, Pear/Holepunch message, or local file all require the same signature verification.
 
@@ -188,7 +210,7 @@ Resolver outcome maps to quote behavior as follows:
 | Profile found but signature invalid                           | `invalid_signature`                                         |
 | Profile expired                                               | `no_route`                                                  |
 | Profile has no supported rail                                 | `no_route`                                                  |
-| Transient resolver failures only                              | `not_registered` unless a stricter caller wants diagnostics |
+| Transport failure or resolver disagreement                    | `no_route` with an explicit reason; never create an invite  |
 
 Implementations SHOULD expose resolver diagnostics in debug APIs, but the user-facing quote response remains the stable protocol contract.
 

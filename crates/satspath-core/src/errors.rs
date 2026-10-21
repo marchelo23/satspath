@@ -68,6 +68,9 @@ pub enum SatsPathError {
     #[error("network error: {0}")]
     NetworkError(String),
 
+    #[error("resolver disagreement: {0}")]
+    ResolverDisagreement(String),
+
     #[error("invalid route: {0}")]
     InvalidRoute(String),
 
