@@ -37,3 +37,4 @@ bitcoin = { workspace = true }
 tempfile = "3"
 reqwest = { workspace = true }
 rcgen = "0.13"
+satspath-handoff = { path = "../satspath-handoff" }

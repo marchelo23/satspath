@@ -1,0 +1,109 @@
+name: Daemon End-to-End Suite
+
+on:
+  push:
+    branches: [main, develop, "feat/**"]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      run_live_dnssec:
+        description: "Run live internet DNSSEC test"
+        type: boolean
+        default: false
+
+jobs:
+  daemon-flow:
+    name: Daemon black-box flow
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
+      - name: Cache cargo registry
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-daemon-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-daemon-e2e-
+            ${{ runner.os }}-cargo-
+      - name: Run daemon black-box e2e test suite
+        run: cargo test -p satspathd --test e2e_daemon_flow
+
+  daemon-regtest-anchor:
+    name: Daemon Catena anchor on Bitcoin Core regtest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
+      - name: Cache cargo registry
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-daemon-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-daemon-e2e-
+            ${{ runner.os }}-cargo-
+      - name: Start Bitcoin Core regtest
+        run: >-
+          docker run --detach --name satspath-bitcoind --publish 18443:18443
+          bitcoin/bitcoin:27.1
+          -regtest -server -txindex=1 -fallbackfee=0.0002
+          -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0
+          -rpcuser=satspath -rpcpassword=satspath-regtest-only
+      - name: Wait for RPC and fund test wallet
+        run: |
+          READY=0
+          for attempt in {1..30}; do
+            if curl --connect-timeout 2 --max-time 5 --silent --user satspath:satspath-regtest-only --data-binary '{"jsonrpc":"2.0","id":"ci","method":"getblockchaininfo","params":[]}' -H 'content-type:text/plain;' http://127.0.0.1:18443/ 2>/dev/null | grep -q '"chain":"regtest"'; then
+              READY=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$READY" -ne 1 ]; then
+            echo "Error: Bitcoin Core regtest node failed to become ready within 30 seconds" >&2
+            exit 1
+          fi
+          set -euo pipefail
+          curl --fail --silent --user satspath:satspath-regtest-only --data-binary '{"jsonrpc":"2.0","id":"ci","method":"createwallet","params":["satspath-anchor"]}' -H 'content-type:text/plain;' http://127.0.0.1:18443/
+          ADDRESS=$(curl --fail --silent --user satspath:satspath-regtest-only --data-binary '{"jsonrpc":"2.0","id":"ci","method":"getnewaddress","params":[]}' -H 'content-type:text/plain;' http://127.0.0.1:18443/wallet/satspath-anchor | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"])')
+          curl --fail --silent --user satspath:satspath-regtest-only --data-binary "{\"jsonrpc\":\"2.0\",\"id\":\"ci\",\"method\":\"generatetoaddress\",\"params\":[101,\"$ADDRESS\"]}" -H 'content-type:text/plain;' http://127.0.0.1:18443/wallet/satspath-anchor
+      - name: Execute daemon regtest anchor e2e test
+        env:
+          SATSPATH_BITCOIN_NETWORK: regtest
+          SATSPATH_BITCOIN_RPC_URL: http://127.0.0.1:18443/wallet/satspath-anchor
+          SATSPATH_BITCOIN_RPC_USER: satspath
+          SATSPATH_BITCOIN_RPC_PASSWORD: satspath-regtest-only
+        run: cargo test -p satspathd --test e2e_daemon_flow -- --ignored regtest_profile_checkpoint_is_anchored_on_chain
+
+  daemon-live-dnssec:
+    name: Live BIP-353 strict DNSSEC resolution
+    if: ${{ github.event.inputs.run_live_dnssec == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
+      - name: Execute live DNSSEC resolution test
+        run: cargo test -p satspathd --test e2e_daemon_flow -- --ignored live_bip353_strict_dnssec_resolution_through_daemon
