@@ -211,7 +211,6 @@ pub(crate) struct EmailInvite {
 pub(crate) struct ProfileUpdateRequest {
     pub(crate) alias: Option<String>,
     pub(crate) lightning_address: Option<String>,
-    pub(crate) bolt12_offer: Option<String>,
     pub(crate) onchain_address: Option<String>,
     pub(crate) onchain_pubkey: Option<String>,
     pub(crate) ark_server: Option<String>,
@@ -348,15 +347,6 @@ pub(crate) fn build_methods(wallet: &WalletState, network: &str) -> Vec<PaymentM
             receiver_pubkey: None,
         });
     }
-    if let Some(offer) = &wallet.bolt12_offer {
-        methods.push(PaymentMethod::Lightning {
-            label: "BOLT12 Offer".into(),
-            lightning_address: None,
-            lnurl: None,
-            bolt12: Some(offer.clone()),
-            receiver_pubkey: None,
-        });
-    }
     if let Some(addr) = &wallet.onchain_address {
         methods.push(PaymentMethod::Onchain {
             label: format!("Bitcoin ({})", network),
@@ -380,19 +370,6 @@ pub(crate) fn build_methods(wallet: &WalletState, network: &str) -> Vec<PaymentM
         });
     }
     methods
-}
-
-/// Distinguish an offer-only Lightning method from a Lightning Address in the daemon API.
-pub(crate) fn receive_rail_name(method: &PaymentMethod) -> &'static str {
-    match method {
-        PaymentMethod::Lightning {
-            lightning_address: None,
-            lnurl: None,
-            bolt12: Some(_),
-            ..
-        } => "Bolt12",
-        _ => method.method_name(),
-    }
 }
 
 pub(crate) fn bitcoin_network(network: &str) -> satspath_core::BitcoinNetwork {

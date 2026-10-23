@@ -15,9 +15,9 @@ response schemas; this page explains behavior that a schema cannot express
 Maturity labels follow the [README taxonomy](../README.md#maturity-taxonomy):
 BIP-353 and BOLT12 primitives are IMPLEMENTED; Ark payment routing is PREVIEW;
 Silent Payments, P2P, and invites are EXPERIMENTAL; the post-quantum profile
-fields are RESEARCH. The daemon also supports network-validated, amount-less
-BOLT12 receive pointers; quote, pay and send remain amount-bound on-chain
-handoffs. SatsPath has not had an independent third-party security audit.
+fields are RESEARCH. Note that the daemon's quote, pay, send, and receive
+handoff endpoints still enforce strict on-chain BIP-21 validation. SatsPath has
+not had an independent third-party security audit.
 
 ---
 
@@ -439,16 +439,12 @@ After the wallet-handoff gate in [#159](https://github.com/satspath/satspath/pul
 only on-chain BIP-21 payloads whose address, network, and exact amount pass
 final validation. A BOLT11 invoice can be validated against its payee, network,
 amount, and expiry, but these quote paths do not generate one. Lightning
-Addresses and LNURL links remain **amount-less receive pointers**. An authenticated
-`POST /v1/profile/methods` with `{"bolt12_offer":"lno1..."}` signs and persists
-a separate BOLT12 Lightning method after network and expiry checks; remove it
-with `{"remove_methods":["bolt12"]}`. `POST /v1/receive` with
-`{"rail":"bolt12"}` returns `bitcoin:?lno=<offer>` and a QR after rechecking
-network and expiry. Supplying `amount_sats` for BOLT12 returns an `error` body
-(HTTP 200): a static offer does not bind an amount. BOLT12, Ark and Silent
-Payment methods remain unavailable as amount-bound quote/pay/send handoffs;
-Ark and Silent Payments also fail closed on receive. Without a rail, receive
-prefers on-chain when `amount_sats` is set and Lightning otherwise.
+Addresses and LNURL links remain **amount-less receive pointers**; BOLT12, Ark,
+and Silent Payment handoffs return `no_route` or an explicit receive error until
+protocol-aware validation is wired into the daemon quote endpoints. On
+`/v1/receive`, an omitted rail prefers on-chain when `amount_sats` is set and
+Lightning otherwise; explicitly selecting an unsupported rail does not bypass
+validation.
 
 `POST /v1/pay` wraps an `ok` quote as `status: wallet_handoff` with
 `payment_payload`, `qr_svg`, and `handoff.daemon_executes_payment: false`.

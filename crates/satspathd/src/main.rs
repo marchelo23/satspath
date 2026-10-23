@@ -704,7 +704,6 @@ mod tests {
         let update_req = crate::types::ProfileUpdateRequest {
             alias: Some("alice@example.com".into()),
             lightning_address: None,
-            bolt12_offer: None,
             onchain_address: None,
             onchain_pubkey: None,
             ark_server: None,
