@@ -98,6 +98,36 @@ pub fn validate_payload(
             receiver_pubkey,
             ..
         } => {
+            if let (None, None, Some(offer)) = (
+                lightning_address.as_deref(),
+                lnurl.as_deref(),
+                bolt12.as_deref(),
+            ) {
+                if amount_sats.is_some() {
+                    bail!("BOLT12 receive offers cannot bind the requested amount; an invoice is required");
+                }
+                let expected = format!("bitcoin:?lno={offer}");
+                if payload != expected {
+                    bail!("BOLT12 URI does not match the selected offer");
+                }
+                let network = match expected_network {
+                    BitcoinNetwork::Mainnet => Network::Bitcoin,
+                    BitcoinNetwork::Testnet => Network::Testnet,
+                    BitcoinNetwork::Signet => Network::Signet,
+                    BitcoinNetwork::Regtest => Network::Regtest,
+                };
+                let now = chrono::Utc::now().timestamp().max(0) as u64;
+                satspath_handoff::bolt12(offer, Some(network), now)
+                    .map_err(|e| anyhow::anyhow!("invalid BOLT12 offer: {e}"))?;
+                let parsed = parse_bip321(payload)?;
+                if parsed.address.is_some()
+                    || parsed.amount_btc.is_some()
+                    || !matches!(parsed.instructions.as_slice(), [Bip321Instruction::Bolt12Offer { offer: parsed_offer }] if parsed_offer == offer)
+                {
+                    bail!("BOLT12 URI contains conflicting or unsupported instructions");
+                }
+                return Ok(());
+            }
             let pointer = match (
                 lightning_address.as_deref(),
                 lnurl.as_deref(),
@@ -110,9 +140,6 @@ pub fn validate_payload(
                 (None, Some(url), None) => {
                     validate_lnurl(url)?;
                     url
-                }
-                (None, None, Some(_)) => {
-                    bail!("BOLT12 offers are not supported as wallet handoffs")
                 }
                 _ => bail!("Lightning method must have exactly one supported pointer"),
             };
@@ -378,6 +405,77 @@ mod tests {
         assert!(
             validate_payload(&lightning, "alice@example.com", "mainnet", Some(21_000)).is_err()
         );
+    }
+
+    #[test]
+    fn bolt12_receive_handoff_checks_offer_network_expiry_amount_and_exact_uri() {
+        use satspath_core::bolt12::{
+            encode_bolt12_bech32_checksumless, encode_tlv_stream, TlvRecord,
+        };
+
+        let chain = bitcoin::blockdata::constants::ChainHash::using_genesis_block(Network::Regtest);
+        let node = secp256k1::PublicKey::from_secret_key(
+            &Secp256k1::new(),
+            &SecretKey::from_slice(&[4; 32]).unwrap(),
+        );
+        let make_offer = |expiry: Option<u8>| {
+            let mut records = vec![
+                TlvRecord {
+                    tag: 2,
+                    value: chain.as_bytes().to_vec(),
+                },
+                TlvRecord {
+                    tag: 10,
+                    value: b"receive".to_vec(),
+                },
+            ];
+            if let Some(expiry) = expiry {
+                records.push(TlvRecord {
+                    tag: 14,
+                    value: vec![expiry],
+                });
+            }
+            records.push(TlvRecord {
+                tag: 22,
+                value: node.serialize().to_vec(),
+            });
+            encode_bolt12_bech32_checksumless("lno", &encode_tlv_stream(&records)).unwrap()
+        };
+        let offer = make_offer(None);
+        let method = PaymentMethod::Lightning {
+            label: "BOLT12 Offer".into(),
+            lightning_address: None,
+            lnurl: None,
+            bolt12: Some(offer.clone()),
+            receiver_pubkey: None,
+        };
+        let payload = format!("bitcoin:?lno={offer}");
+        validate_payload(&method, &payload, "regtest", None).unwrap();
+        assert!(validate_payload(&method, &payload, "mainnet", None).is_err());
+        assert!(validate_payload(&method, &payload, "regtest", Some(21_000)).is_err());
+        for wrong in [
+            offer.clone(),
+            format!("{payload}&amount=0.00021000"),
+            format!("bitcoin:?lno={}x", offer),
+            format!("bitcoin:?lno={offer}&lightning=attacker"),
+        ] {
+            assert!(validate_payload(&method, &wrong, "regtest", None).is_err());
+        }
+        let expired = make_offer(Some(1));
+        let expired_method = PaymentMethod::Lightning {
+            label: "BOLT12 Offer".into(),
+            lightning_address: None,
+            lnurl: None,
+            bolt12: Some(expired.clone()),
+            receiver_pubkey: None,
+        };
+        assert!(validate_payload(
+            &expired_method,
+            &format!("bitcoin:?lno={expired}"),
+            "regtest",
+            None,
+        )
+        .is_err());
     }
 
     #[test]
