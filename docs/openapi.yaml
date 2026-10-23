@@ -5087,6 +5087,9 @@ components:
           type: string
         onchain_pubkey:
           type: string
+        silent_payment_address:
+          type: string
+          description: BIP-352 Silent Payment address (sp/tsp/sprt).
         ark_server:
           type: string
         ark_pubkey:
@@ -5146,6 +5149,9 @@ components:
         onchain_pubkey:
           type: string
           description: Compressed pubkey hint; requires `onchain_address`.
+        silent_payment_address:
+          type: string
+          description: BIP-352 Silent Payment address (sp/tsp/sprt) validated against the daemon network.
         ark_server:
           type: string
           description: Must be sent together with `ark_pubkey`.
@@ -5159,6 +5165,7 @@ components:
             - lightning
             - bolt12
             - onchain
+            - silent_payment
             - ark
         recovery_policy:
           $ref: '#/components/schemas/RecoveryPolicy'
