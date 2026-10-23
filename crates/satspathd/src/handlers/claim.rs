@@ -151,6 +151,7 @@ pub(crate) fn claim_invite_handler(state: &AppState, body: ClaimRequest) -> Resu
         bolt12_offer: None,
         onchain_address: body.onchain_address,
         onchain_pubkey: body.onchain_pubkey,
+        silent_payment_address: body.silent_payment_address,
         ark_server: body.ark_server,
         ark_pubkey: body.ark_pubkey,
         remove_methods: vec![],

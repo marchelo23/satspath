@@ -79,7 +79,8 @@ pub(crate) fn receive_view(state: &AppState, req: ReceiveRequest) -> Result<Rece
     // Append amount if requested
     if let Some(sats) = req.amount_sats {
         if matches!(method, PaymentMethod::Onchain { .. }) {
-            payload = format!("{}?amount={}", payload, fmt_btc(sats));
+            let sep = if payload.contains('?') { "&" } else { "?" };
+            payload = format!("{}{}amount={}", payload, sep, fmt_btc(sats));
         } else if matches!(method, PaymentMethod::Ark { .. }) {
             payload = format!("{}&amount={}", payload, sats);
         }
@@ -114,12 +115,14 @@ pub(crate) fn receive_payload_for(method: &PaymentMethod) -> Result<String> {
             address,
             silent_payment_pubkey,
             ..
-        } => {
-            let target = silent_payment_pubkey
-                .clone()
-                .unwrap_or_else(|| address.clone().unwrap_or_default());
-            format!("bitcoin:{target}")
-        }
+        } => match (silent_payment_pubkey, address) {
+            (Some(sp), Some(addr)) => format!("bitcoin:{addr}?sp={sp}"),
+            (Some(sp), None) => format!("bitcoin:?sp={sp}"),
+            (None, Some(addr)) => format!("bitcoin:{addr}"),
+            (None, None) => {
+                anyhow::bail!("on-chain method has no address or silent payment pubkey")
+            }
+        },
         PaymentMethod::Ark { server, pubkey, .. } => {
             format!("satspath:ark?server={server}&pubkey={pubkey}")
         }
@@ -579,12 +582,20 @@ pub(crate) fn send_payload_for(method: &PaymentMethod, amount_sats: u64) -> Resu
             address,
             silent_payment_pubkey,
             ..
-        } => {
-            let target = silent_payment_pubkey
-                .clone()
-                .unwrap_or_else(|| address.clone().unwrap_or_default());
-            format!("bitcoin:{target}?amount={}", fmt_btc(amount_sats))
-        }
+        } => match (silent_payment_pubkey, address) {
+            (Some(sp), Some(addr)) => {
+                format!("bitcoin:{addr}?sp={sp}&amount={}", fmt_btc(amount_sats))
+            }
+            (Some(sp), None) => {
+                format!("bitcoin:?sp={sp}&amount={}", fmt_btc(amount_sats))
+            }
+            (None, Some(addr)) => {
+                format!("bitcoin:{addr}?amount={}", fmt_btc(amount_sats))
+            }
+            (None, None) => {
+                anyhow::bail!("on-chain method has no address or silent payment pubkey")
+            }
+        },
         PaymentMethod::Ark { server, pubkey, .. } => {
             format!("satspath:ark?server={server}&pubkey={pubkey}&amount={amount_sats}")
         }
@@ -732,6 +743,7 @@ mod tests {
                 bolt12_offer: None,
                 onchain_address: None,
                 onchain_pubkey: None,
+                silent_payment_address: None,
                 ark_server: None,
                 ark_pubkey: None,
                 remove_methods: vec![],
@@ -800,6 +812,7 @@ mod tests {
                 lightning_address: Some("carol@example.com".into()),
                 onchain_address: None,
                 onchain_pubkey: None,
+                silent_payment_address: None,
                 ark_server: None,
                 ark_pubkey: None,
             },

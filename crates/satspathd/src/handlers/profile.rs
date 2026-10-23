@@ -144,6 +144,7 @@ pub(crate) fn apply_method_updates(
         || body.bolt12_offer.is_some()
         || body.onchain_address.is_some()
         || body.onchain_pubkey.is_some()
+        || body.silent_payment_address.is_some()
         || body.ark_server.is_some()
         || body.ark_pubkey.is_some()
         || !body.remove_methods.is_empty()
@@ -164,7 +165,9 @@ pub(crate) fn apply_method_updates(
             "onchain" => {
                 wallet.onchain_address = None;
                 wallet.onchain_pubkey = None;
+                wallet.silent_payment_address = None;
             }
+            "silent_payment" => wallet.silent_payment_address = None,
             "ark" => {
                 wallet.ark_server = None;
                 wallet.ark_pubkey = None;
@@ -190,6 +193,18 @@ pub(crate) fn apply_method_updates(
     if let Some(pubkey) = body.onchain_pubkey {
         validate_compressed_pubkey(&pubkey)?;
         wallet.onchain_pubkey = Some(pubkey);
+    }
+    if let Some(sp) = body.silent_payment_address {
+        if sp.trim() != sp {
+            anyhow::bail!("Silent Payment address must not contain surrounding whitespace");
+        }
+        let net = match crate::types::bitcoin_network(network) {
+            satspath_core::BitcoinNetwork::Mainnet => bitcoin::Network::Bitcoin,
+            satspath_core::BitcoinNetwork::Regtest => bitcoin::Network::Regtest,
+            _ => bitcoin::Network::Testnet,
+        };
+        satspath_handoff::silent(&sp, net).map_err(|e| anyhow::anyhow!(e))?;
+        wallet.silent_payment_address = Some(sp);
     }
     if wallet.onchain_pubkey.is_some() && wallet.onchain_address.is_none() {
         anyhow::bail!("onchain_pubkey is a hint; provide onchain_address too");

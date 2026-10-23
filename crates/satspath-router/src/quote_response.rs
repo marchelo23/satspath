@@ -217,24 +217,29 @@ pub fn build_qr_payload(method: &PaymentMethod, amount_sats: u64) -> satspath_co
             silent_payment_pubkey,
             ..
         } => {
-            if silent_payment_pubkey.is_some() {
-                return Err(SatsPathError::InvalidPaymentPointer(
-                    "silent payment handoffs require wallet-side validation".into(),
-                ));
-            }
-            let address = address.as_deref().ok_or_else(|| {
-                SatsPathError::InvalidPaymentPointer("on-chain method has no address".into())
-            })?;
             let network = match network {
                 BitcoinNetwork::Mainnet => "mainnet",
                 BitcoinNetwork::Testnet => "testnet",
                 BitcoinNetwork::Signet => "signet",
                 BitcoinNetwork::Regtest => "regtest",
             };
-            (
-                format!("bitcoin:{address}?amount={}", fmt_btc(amount_sats)),
-                network,
-            )
+            let payload = match (silent_payment_pubkey, address) {
+                (Some(sp), Some(addr)) => {
+                    format!("bitcoin:{addr}?sp={sp}&amount={}", fmt_btc(amount_sats))
+                }
+                (Some(sp), None) => {
+                    format!("bitcoin:?sp={sp}&amount={}", fmt_btc(amount_sats))
+                }
+                (None, Some(addr)) => {
+                    format!("bitcoin:{addr}?amount={}", fmt_btc(amount_sats))
+                }
+                (None, None) => {
+                    return Err(SatsPathError::InvalidPaymentPointer(
+                        "on-chain method has no address or silent payment pubkey".into(),
+                    ));
+                }
+            };
+            (payload, network)
         }
         PaymentMethod::Ark { .. } | PaymentMethod::Bolt12(_) => {
             return Err(SatsPathError::InvalidPaymentPointer(
