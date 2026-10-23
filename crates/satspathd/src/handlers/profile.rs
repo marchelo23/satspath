@@ -106,6 +106,7 @@ pub(crate) fn verify_challenge(state: &AppState, body: VerifyRequest) -> Result<
 
     // Only sign and store if there are methods already. Otherwise just save the wallet state.
     if wallet.lightning_address.is_some()
+        || wallet.bolt12_offer.is_some()
         || wallet.onchain_address.is_some()
         || wallet.ark_server.is_some()
     {
@@ -136,9 +137,11 @@ pub(crate) fn apply_method_updates(
     allow_empty: bool,
 ) -> Result<()> {
     use satspath_core::validation::{
-        validate_bitcoin_address, validate_compressed_pubkey, validate_lightning_address,
+        validate_bitcoin_address, validate_bolt12_offer_for_network, validate_compressed_pubkey,
+        validate_lightning_address,
     };
     let has_method = body.lightning_address.is_some()
+        || body.bolt12_offer.is_some()
         || body.onchain_address.is_some()
         || body.onchain_pubkey.is_some()
         || body.ark_server.is_some()
@@ -157,6 +160,7 @@ pub(crate) fn apply_method_updates(
     for method in &body.remove_methods {
         match method.as_str() {
             "lightning" => wallet.lightning_address = None,
+            "bolt12" => wallet.bolt12_offer = None,
             "onchain" => {
                 wallet.onchain_address = None;
                 wallet.onchain_pubkey = None;
@@ -171,6 +175,13 @@ pub(crate) fn apply_method_updates(
     if let Some(addr) = body.lightning_address {
         validate_lightning_address(&addr)?;
         wallet.lightning_address = Some(addr);
+    }
+    if let Some(offer) = body.bolt12_offer {
+        if offer.trim() != offer {
+            anyhow::bail!("BOLT12 offer must not contain surrounding whitespace");
+        }
+        validate_bolt12_offer_for_network(&offer, crate::types::bitcoin_network(network))?;
+        wallet.bolt12_offer = Some(offer);
     }
     if let Some(addr) = body.onchain_address {
         validate_bitcoin_address(&addr, crate::types::bitcoin_network(network))?;

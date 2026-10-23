@@ -6,7 +6,7 @@ use satspath_core::{crypto::fingerprint_pubkey, TransactionalTransparencyStore};
 use crate::config::AppState;
 use crate::handlers::profile::profile_response;
 use crate::handlers::wallet::load_wallet;
-use crate::types::{safety_status, NodeResponse, StatusResponse};
+use crate::types::{receive_rail_name, safety_status, NodeResponse, StatusResponse};
 
 pub(crate) fn node_response(state: &AppState) -> Result<NodeResponse> {
     Ok(NodeResponse {
@@ -26,7 +26,7 @@ pub(crate) fn status_response(state: &AppState) -> Result<StatusResponse> {
                     .methods
                     .clone()
                     .into_iter()
-                    .map(|m| m.method_name().to_string())
+                    .map(|m| receive_rail_name(&m).to_string())
                     .collect();
             }
         }
