@@ -66,15 +66,16 @@ jobs:
             ${{ runner.os }}-cargo-
       - name: Start Bitcoin Core regtest
         run: >-
-          docker run --detach --name satspath-bitcoind --publish 18443:18443
-          bitcoin/bitcoin:27.1
+          docker run --detach --name satspath-bitcoind --publish 127.0.0.1:18443:18443
+          bitcoin/bitcoin@sha256:6406da15572512534d5f13762828b87978db0810703847fecda5f17d6fa73aff
           -regtest -server -txindex=1 -fallbackfee=0.0002
           -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0
           -rpcuser=satspath -rpcpassword=satspath-regtest-only
       - name: Wait for RPC and fund test wallet
         run: |
+          set -euo pipefail
           READY=0
-          for attempt in {1..30}; do
+          for _ in {1..30}; do
             if curl --connect-timeout 2 --max-time 5 --silent --user satspath:satspath-regtest-only --data-binary '{"jsonrpc":"2.0","id":"ci","method":"getblockchaininfo","params":[]}' -H 'content-type:text/plain;' http://127.0.0.1:18443/ 2>/dev/null | grep -q '"chain":"regtest"'; then
               READY=1
               break
@@ -85,7 +86,6 @@ jobs:
             echo "Error: Bitcoin Core regtest node failed to become ready within 30 seconds" >&2
             exit 1
           fi
-          set -euo pipefail
           curl --fail --silent --user satspath:satspath-regtest-only --data-binary '{"jsonrpc":"2.0","id":"ci","method":"createwallet","params":["satspath-anchor"]}' -H 'content-type:text/plain;' http://127.0.0.1:18443/
           ADDRESS=$(curl --fail --silent --user satspath:satspath-regtest-only --data-binary '{"jsonrpc":"2.0","id":"ci","method":"getnewaddress","params":[]}' -H 'content-type:text/plain;' http://127.0.0.1:18443/wallet/satspath-anchor | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"])')
           curl --fail --silent --user satspath:satspath-regtest-only --data-binary "{\"jsonrpc\":\"2.0\",\"id\":\"ci\",\"method\":\"generatetoaddress\",\"params\":[101,\"$ADDRESS\"]}" -H 'content-type:text/plain;' http://127.0.0.1:18443/wallet/satspath-anchor

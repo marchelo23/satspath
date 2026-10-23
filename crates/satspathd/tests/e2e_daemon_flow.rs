@@ -24,7 +24,7 @@ use bitcoin::{
     secp256k1::{PublicKey, Secp256k1, SecretKey},
     Address, CompressedPublicKey, Network,
 };
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, Method, StatusCode};
 use serde_json::{json, Value};
 
 const TOKEN: &str = "5a7b5a7b5a7b5a7b5a7b5a7b5a7b5a7b5a7b5a7b5a7b5a7b5a7b5a7b5a7b5a7b";
@@ -164,12 +164,20 @@ impl TestDaemon {
         decode(resp).await
     }
 
-    async fn put_with_token(&self, path: &str, token: Option<&str>, body: Value) -> StatusCode {
-        let mut req = self.http.put(format!("{}{path}", self.base)).json(&body);
+    async fn request_with_token(
+        &self,
+        method: Method,
+        path: &str,
+        token: Option<&str>,
+    ) -> StatusCode {
+        let mut req = self
+            .http
+            .request(method, format!("{}{path}", self.base))
+            .json(&json!({}));
         if let Some(token) = token {
             req = req.bearer_auth(token);
         }
-        req.send().await.expect("PUT").status()
+        req.send().await.expect("mutating request").status()
     }
 
     /// Verify `alias` via the dev mock verifier (token == alias).
@@ -243,17 +251,56 @@ async fn daemon_boots_and_reports_non_custodial_safety() {
 #[tokio::test]
 async fn mutating_routes_require_bearer_token() {
     let d = TestDaemon::spawn("regtest");
-    let body = json!({ "onchain_address": regtest_address(1) });
-
-    assert_eq!(
-        d.put_with_token("/v1/profile", None, body.clone()).await,
-        StatusCode::UNAUTHORIZED
-    );
     let wrong = "0".repeat(64);
+    for (method, path) in [
+        (Method::PUT, "/v1/profile"),
+        (Method::POST, "/v1/profile/challenge"),
+        (Method::POST, "/v1/profile/verify"),
+        (Method::POST, "/v1/profile/methods"),
+        (Method::POST, "/v1/profile/rotate-key"),
+        (Method::POST, "/v1/transparency/anchors"),
+    ] {
+        for token in [None, Some(wrong.as_str())] {
+            assert_eq!(
+                d.request_with_token(method.clone(), path, token).await,
+                StatusCode::UNAUTHORIZED,
+                "{method} {path} accepted {token:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn foreign_host_and_non_json_mutations_are_rejected() {
+    let d = TestDaemon::spawn("regtest");
+    let wallet_before = std::fs::read(d.home().join("wallet.json")).expect("startup wallet");
+    let foreign_host = d
+        .http
+        .post(format!("{}/v1/profile/challenge", d.base))
+        .header("Host", "evil.example")
+        .bearer_auth(TOKEN)
+        .json(&json!({ "alias": ALIAS }))
+        .send()
+        .await
+        .expect("foreign Host request");
+    assert_eq!(foreign_host.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
-        d.put_with_token("/v1/profile", Some(&wrong), body).await,
-        StatusCode::UNAUTHORIZED
+        std::fs::read(d.home().join("wallet.json")).expect("wallet unchanged"),
+        wallet_before
     );
+
+    let non_json = d
+        .http
+        .post(format!("{}/v1/send", d.base))
+        .header("Content-Type", "text/plain")
+        .body(r#"{"recipient":"nobody@unknown.invalid","amount_sats":10000}"#)
+        .send()
+        .await
+        .expect("non-JSON request");
+    assert_eq!(non_json.status(), StatusCode::BAD_REQUEST);
+    let (status, invites) = d.get("/v1/invites").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(invites, json!([]), "non-JSON send created an invite");
 }
 
 #[tokio::test]
@@ -356,9 +403,10 @@ async fn send_to_unknown_alias_never_returns_payable_route() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_ne!(
-        body["status"], "ok",
-        "unknown alias must not be payable: {body}"
+    assert_eq!(body["status"], "invite", "unknown alias: {body}");
+    assert!(
+        body.get("payload").is_none() && body.get("route").is_none(),
+        "unknown alias must not yield a payable route: {body}"
     );
 }
 
