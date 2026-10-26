@@ -1,27 +1,42 @@
-# SatsPath SDK Quickstart Guide
+# SatsPath SDK Quickstart
 
-Quickstart guide for sovereign Bitcoin wallet developers, PWAs, and native Rust/TypeScript applications integrating `@satspath/wasm` and `satspath-router`.
+This guide describes the APIs present in the checkout, not a promise of a
+published package or a completed wallet integration. See the
+[capability matrix](README.md) and [tracked SDK work](../ROADMAP.md).
 
----
+## 1. Build from source
 
-## 1. Installation
+### Browser WASM — preview
 
-### Web / PWA / React Native (`pnpm`)
+From the repository root, install `wasm-pack` and the Rust wasm32 target, then:
 
 ```bash
-pnpm add @satspath/wasm bip39 react-qr-code
-# or modular TypeScript packages:
-pnpm add @satspath/resolvers @satspath/router
+rustup target add wasm32-unknown-unknown
+wasm-pack build crates/satspath-wasm --target web --release --out-dir ../../pkg/satspath-wasm
 ```
 
-> **Building `@satspath/wasm` locally from source:**
->
-> ```bash
-> cd crates/satspath-wasm
-> wasm-pack build --target web --release --out-dir ../../pkg/satspath-wasm
-> ```
+Serve the generated JS and `.wasm` files through your application bundler or an
+HTTP server; do not load them from `file://`. Examples below assume the app serves
+the generated module at `/satspath-wasm/satspath_wasm.js`.
 
-### Native Rust (`Cargo.toml`)
+Registry publication is tracked in [#189](https://github.com/satspath/satspath/issues/189).
+Do not assume `@satspath/wasm` is available from npm based on this checkout.
+There are no source packages here for the previously documented
+`@satspath/resolvers` or `@satspath/router` installs.
+
+**Current limitations:** WASM is a separate implementation, not native core
+compiled for the browser. `LocalRegistry.add_profile` returns an error, Nostr
+relay querying is unimplemented, and the resolver chain has JSON serialization
+and BIP-353 parity gaps. It does not provide native local DNSSEC guarantees.
+High-level `quote` is an experimental preview that can reject before returning
+a quote; it is not a production-ready resolve→pay integration.
+See [resolver source](../crates/satspath-wasm/src/resolver.rs) and
+[#187](https://github.com/satspath/satspath/issues/187)/
+[#188](https://github.com/satspath/satspath/issues/188).
+
+### Native Rust
+
+Use workspace source dependencies, adjusting paths for your application's location:
 
 ```toml
 [dependencies]
@@ -29,67 +44,70 @@ satspath-core = { path = "crates/satspath-core" }
 satspath-router = { path = "crates/satspath-router" }
 ```
 
----
+Reference adapters are `BdkOnchainBridge`, `LdkLightningBridge`,
+`BoltzTestnetSwapBridge` and `HostWalletSdkBridge` in
+[`satspath_router::wallet_executor`](../crates/satspath-router/src/wallet_executor.rs).
+They require host callbacks; naming an adapter is not a completed BDK/LDK integration.
 
-## 2. Non-Custodial 3-Step Flow
+## 2. Browser identity example — disposable test vector only
 
-```text
-┌─────────────────────────┐     ┌─────────────────────────┐     ┌─────────────────────────┐
-│ 1. DERIVE IDENTITY      │ ──> │ 2. RESOLVE & QUOTE      │ ──> │ 3. WALLET HANDOFF       │
-│ Seed (in host wallet)   │     │ "user@domain" + sats    │     │ BIP-21 / BOLT11 / Ark   │
-│ m/9737'/0' (identity)   │     │ Signature + Route Score │     │ Host wallet signs & pays│
-└─────────────────────────┘     └─────────────────────────┘     └─────────────────────────┘
-```
+Install `bip39` in the example application. This illustrates the exported
+identity-derivation API inside a trusted host-wallet boundary. Never pass a real
+wallet seed to a website, daemon, or remote service. The returned identity secret
+is not a spending key, but must still be protected and must never be logged.
 
----
-
-## 3. Browser / TypeScript Integration (`@satspath/wasm`)
-
-### Step 1: Initialize WASM & Derive Identity Keypair
-
-Deterministically derive an identity keypair inside the trusted wallet boundary without exposing Bitcoin spending keys (`xprv`/`tprv`):
+The implementation uses a dedicated HMAC domain label containing `m/9737'/0'`;
+that string is **not** evidence of BIP-32 child-key derivation.
 
 ```typescript
 import init, {
   derive_identity_keypair_from_seed,
-  sign_profile_json,
-  verify_signed_profile,
-} from "@satspath/wasm";
+} from "/satspath-wasm/satspath_wasm.js";
 import * as bip39 from "bip39";
 
 await init();
 
-// TEST ONLY: This public BIP-39 test vector is not a real identity seed.
-// Never register an identity derived from this phrase.
-// Production: use the host wallet seed source inside its trusted boundary.
+// TEST ONLY: public BIP-39 vector. Never register this identity or fund its wallet.
 const mnemonic =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 const seed = bip39.mnemonicToSeedSync(mnemonic);
-
 const identity = derive_identity_keypair_from_seed(seed, 0);
 if (!identity) {
   throw new Error("Failed to derive SatsPath identity keypair");
 }
-
 console.log("SatsPath Identity Pubkey:", identity.pubkey_hex);
 ```
 
-### Step 2: Resolve, Verify & Quote (`quote`)
+## 3. Browser quote wrapper — preview, never payment approval
+
+The JS export currently accepts **`number`, not `bigint`**: a positive whole
+number of sats, no greater than Bitcoin's supply (`2_100_000_000_000_000`).
+All such satoshi values fit within JavaScript's safe integer range.
+
+The wrapper below handles the response contract and errors. Its checks are not
+a replacement for authenticated identity continuity, ownership, transparency,
+or host-wallet validation. A quote flag is not proof of alias control. Current
+WASM payable payload construction supports on-chain only; other rails are gated.
 
 ```typescript
-import { quote, verify_signed_profile } from "@satspath/wasm";
+import { quote } from "/satspath-wasm/satspath_wasm.js";
 
-export async function resolveAndQuote(recipientAlias: string, amountSats: bigint) {
+export async function resolveAndQuote(recipientAlias: string, amountSats: number) {
+  if (!Number.isSafeInteger(amountSats) || amountSats < 1 || amountSats > 2_100_000_000_000_000) {
+    throw new Error("Amount must be a positive whole number of sats within Bitcoin supply");
+  }
   const quoteResult = await quote(recipientAlias, amountSats);
-
   switch (quoteResult.status) {
     case "ok": {
-      if (!quoteResult.recipient.profile_signature_verified) {
+      if (quoteResult.recipient.profile_signature_verified !== true) {
         throw new Error("Recipient profile signature failed verification");
+      }
+      if (quoteResult.selected_method.type !== "Onchain") {
+        throw new Error("Unsupported preview rail");
       }
       console.log("Selected Method:", quoteResult.selected_method.type);
       console.log("Estimated Fee (sats):", quoteResult.fee_sats);
-      console.log("Validated Handoff Payload:", quoteResult.qr);
+      console.log("Preview Payload:", quoteResult.qr);
       return quoteResult;
     }
     case "invalid_signature":
@@ -99,86 +117,60 @@ export async function resolveAndQuote(recipientAlias: string, amountSats: bigint
     case "not_registered":
       console.log("Recipient not registered; invite token:", quoteResult.invite.invite_id);
       return null;
+    default:
+      throw new Error("Unknown quote status");
   }
 }
 ```
 
----
+`not_registered` is part of the shared response type, but resolution failures can
+reject the promise instead of returning that status. An invite is not escrow or
+a production claim service. Wrapper tests inject mock responses; they do not
+prove that browser resolution currently completes successfully.
 
-## 4. Native Rust Integration (`satspath-router` + `satspath-core`)
+## 4. Native wallet approval and dispatch
 
-Host wallets written in Rust (such as BDK or LDK mobile/desktop wallets) can resolve aliases, verify cryptographic signatures, and consume `QuoteResponse` handoffs directly. This example returns `Some(payload)` for BIP-21 and Ark handoffs; the caller must pass that payload to its wallet flow. `None` means Lightning was paid or an invite was returned:
+Obtain the quote with `quote_with_resolver` or the appropriate verified-profile
+API. Native `ChainResolver` policy and daemon local-state resolution are distinct;
+do not assume every transport supplies the same evidence.
 
-```rust
-use satspath_core::crypto::verify_signed_profile;
-use satspath_core::execution::{ExecutionGatePolicy, WalletExecutor};
-use satspath_core::resolver::ChainResolver;
-use satspath_router::quote_response::{quote_with_resolver, QuoteResponse};
+For execution, use this sequence from
+[`wallet_executor.rs`](../crates/satspath-router/src/wallet_executor.rs):
 
-pub async fn prepare_wallet_handoff(
-    resolver: &ChainResolver,
-    recipient_alias: &str,
-    amount_sats: u64,
-    wallet: &dyn WalletExecutor,
-) -> satspath_core::Result<Option<String>> {
-    // 1. Resolve alias, verify Schnorr signature + expiry, and select optimal rail
-    let response = quote_with_resolver(resolver, recipient_alias, amount_sats).await;
+1. Populate a `TransactionalTransparencyStore` and obtain verified `HandoffTrust`
+   and `HandoffTransparencyEvidence` for the current profile/checkpoint.
+2. Call `prepare_payment_intent` with that evidence, quote, wallet network, exact
+   amount, positive maximum fee, and the actual `Vec<ResolverSource>` observed.
+3. Show the returned `PaymentIntent` fields to the payer. Only after genuine UI
+   confirmation call `intent.approve(user_confirmed)` to obtain a single-use token.
+4. Pass the token, current store/trust/evidence, quote, `WalletExecutor` and
+   `ExecutionGatePolicy` to `execute_quote_handoff`. It reconstructs the intent
+   and rejects changed payment terms or identity state before invoking the host.
 
-    match response {
-        QuoteResponse::Ok {
-            recipient,
-            selected_method,
-            qr,
-            fee_sats,
-            ..
-        } => {
-            assert!(recipient.profile_signature_verified);
-            println!(
-                "Verified {} ({}) -> {:?} (est. fee: {:?} sats)",
-                recipient.alias, recipient.pubkey_fingerprint, selected_method, fee_sats
-            );
+Do not synthesize witness evidence or provenance to make an example execute.
+The current daemon does not supply a completed witness-quorum integration.
+Missing evidence must fail, not be bypassed.
 
-            // 2. Enforce ExecutionGatePolicy before invoking host wallet signing
-            let policy = ExecutionGatePolicy::testnet_default();
-            policy.check_execution_safety(wallet.network(), amount_sats, true)?;
+**Never dispatch SatsPath quotes directly through legacy `wallet.pay_bolt11` or
+`send_onchain` calls.** Those bypass the approval contract. The host implements
+fee-bound adapter methods, retains spending keys, and performs signing/broadcast.
+For the exact contract and limitations, see [PaymentIntent](payment_intent.md)
+and [native adapter/dispatch tests](../crates/satspath-router/tests/wallet_executor_integration.rs).
 
-            if qr.starts_with("lnbc") || qr.starts_with("lntb") || qr.starts_with("lnbcrt") {
-                let _receipt = wallet.pay_bolt11(&qr, Some(amount_sats * 1_000)).await?;
-                Ok(None)
-            } else if qr.starts_with("bitcoin:") || qr.starts_with("ark:") || qr.starts_with("ark1") {
-                // Return BIP-21 / Ark payloads to the caller's host wallet flow.
-                Ok(Some(qr))
-            } else {
-                Err(satspath_core::SatsPathError::ValidationError(
-                    "Unsupported payment payload".into(),
-                ))
-            }
-        }
-        QuoteResponse::InvalidSignature { recipient } => Err(
-            satspath_core::SatsPathError::ValidationError(format!(
-                "Invalid signature for {}",
-                recipient.alias
-            )),
-        ),
-        QuoteResponse::NoRoute { reason } => {
-            Err(satspath_core::SatsPathError::NoRouteFound(reason))
-        }
-        QuoteResponse::NotRegistered { invite } => {
-            println!("Recipient not registered; share invite URL: {}", invite.claim_url);
-            Ok(None)
-        }
-    }
-}
-```
+BOLT12, Ark, Silent Payments and swap approval paths remain capability-gated.
+An amountless receive pointer is not an approved amount-bound payment.
 
----
+## 5. API source references
 
-## 5. Main SDK Functions Reference
+| API | Actual surface | Notes |
+| --- | --- | --- |
+| `derive_identity_keypair_from_seed` | WASM `(Uint8Array, number)` | Returns identity keypair or `undefined`; host-local only |
+| `verify_signed_profile` | WASM `(string) -> boolean` | Input is serialized signed-profile JSON; no alias attestation implied |
+| `quote` | JS `(string, number) -> Promise` | Prototype high-level resolver; errors may reject |
+| `quote_with_resolver` | Native router | Returns `QuoteResponse`; inspect status before preparing intent |
+| `prepare_payment_intent` | Native router | Requires current evidence, source provenance and fee cap |
+| `execute_quote_handoff` | Native router | Requires single-use host approval; revalidates before dispatch |
 
-| Function | Layer | Parameters | Return Type | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `derive_identity_keypair_from_seed` | `@satspath/wasm` | `seed: Uint8Array, index: number` | `IdentityKeypair \| undefined` | Derives `secp256k1` identity keypair under `m/9737'/0'`. |
-| `quote` | `@satspath/wasm` | `recipient: string, amount_sats: bigint` | `QuoteResponse` | Resolves alias, verifies signature, and selects best rail. |
-| `verify_signed_profile` | `@satspath/wasm` | `profile_json: string` | `boolean` | Verifies RFC 8785 canonical JSON + BIP-340 Schnorr signature. |
-| `quote_with_resolver` | `satspath-router` | `resolver, recipient, amount_sats` | `QuoteResponse` | Native Rust end-to-end resolution, verification, and routing. |
-| `select_route_with_fees` | `satspath-router` | `&RouteRequest, &FeeEstimate` | `Result<RouteQuote>` | Deterministic rail selection (Lightning → On-chain → Ark). |
+The generated `.d.ts` and actual Rust signatures are authoritative for the
+checkout. Run `node --test docs/tests/*.test.mjs` for documentation checks; this
+does not compile WASM or certify a TypeScript application against generated types.

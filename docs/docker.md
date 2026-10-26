@@ -1,252 +1,144 @@
-# SatsPath -- Docker Guide
+# Docker development guide
 
-> **Status:** Ready for development and CI builds.
-> Mainnet execution of payments is intentionally disabled by design.
+**Status:** source-build development configuration, not a hardened production
+deployment or a real-funds recommendation. See [current limits](README.md),
+[authority deployment notes](../deploy/README.md), and [mainnet safety](mainnet_safety.md).
 
----
+## What the repository actually provides
 
-## Architecture
+| Component | Source | Behavior |
+| --- | --- | --- |
+| CLI image | Dockerfile target `runtime` | `/usr/local/bin/satspath`, UID/GID 10001, `/data` working directory |
+| Daemon image | Dockerfile target `runtime-daemon` | `/usr/local/bin/satspathd`, UID/GID 10002, `--home /data --no-open`, container bind `0.0.0.0:9737` |
+| Root Compose | `docker-compose.yml` | Builds both targets; daemon host port bound to `127.0.0.1:9737`; optional Caddy, Prometheus and Grafana services |
+| Caddy | `docker/Caddyfile` | HTTP redirect and TLS with **`tls internal`**, not default public ACME; blocks public `/metrics` |
+| Docker CI | `.github/workflows/docker.yml` | Builds/scans/publishes CLI image; does not establish publication of a daemon image |
 
-```
-+-----------------------------------------------------------------+
-|  docker-compose services                                        |
-|                                                                 |
-|  +----------------------+     +----------------------------+   |
-|  |  satspath-cli        |     |  satspathd (port 9737)     |   |
-|  |  Rust / Debian Slim  |     |  Rust / Debian Slim        |   |
-|  |  non-root uid:10001  |     |  non-root uid:10002        |   |
-|  |  read-only rootfs    |     |  read-only rootfs          |   |
-|  |  cap_drop: ALL       |     |  cap_drop: ALL             |   |
-|  +----------------------+     +----------------------------+   |
-|          |                                 |                    |
-|          |                    +------------+                    |
-|          |                    | (internal network)              |
-|          |            +-------------------+                     |
-|          |            |  caddy (TLS proxy)|                     |
-|          |            |  ports 80 & 443   |                     |
-|          |            +-------------------+                     |
-|          |                                                      |
-|          v                                                      |
-|  +--------------------------------------------------------+     |
-|  |  satspath_data (Docker volume)                         |     |
-|  |  Named volume: .satspath/ registry survives containers |     |
-|  +--------------------------------------------------------+     |
-+-----------------------------------------------------------------+
-```
+Both images run as non-root. The checked-in Compose files do **not** set
+`read_only`, `cap_drop`, or `no-new-privileges`; those were previously documented
+as existing guarantees, incorrectly. Image size and rebuild time depend on the
+build and are not measured guarantees. Cargo-chef supplies dependency caching.
 
-## Images & Services
+## 1. Build and inspect the CLI
 
-| Service / Image       | Base                    | Size target | Binary / Role             |
-| --------------------- | ----------------------- | ----------- | ------------------------- |
-| `satspath-cli`        | `debian:bookworm-slim`  | ~25 MB      | `/usr/local/bin/satspath` |
-| `satspathd`           | `debian:bookworm-slim`  | ~30 MB      | `/usr/local/bin/satspathd`|
-| `caddy`               | `caddy:2-alpine`        | ~45 MB      | TLS reverse proxy sidecar |
-
-Both SatsPath images use:
-
-- **Non-root user** (UID 10001 for CLI, UID 10002 for daemon)
-- **Read-only root filesystem** (`read_only: true`)
-- **All capabilities dropped** (`cap_drop: ALL`)
-- **`no-new-privileges`** security option
-- **OCI image labels** for provenance
-
----
-
-## Quick Start
-
-### Prerequisites
-
-- Docker >= 24 (or Podman >= 4) with BuildKit enabled
-- `docker compose` v2 plugin (or `docker-compose` v1)
-
-### 1. Build the image
+Run from the repository root with Docker/BuildKit and Compose v2 installed:
 
 ```bash
-make build
-# or manually:
-docker build -t satspath-cli:latest .
+docker build --target runtime -t satspath-cli:local .
+docker run --rm satspath-cli:local --help
+docker run --rm -v satspath_cli_demo:/data satspath-cli:local init
+docker run --rm -v satspath_cli_demo:/data satspath-cli:local register alice@example.com
+docker run --rm -v satspath_cli_demo:/data satspath-cli:local show alice@example.com
 ```
 
-### 2. Initialize the registry
+The registration command attempts Nostr publication and makes network calls.
+Use disposable data. A default signed Lightning pointer has neither method
+ownership proof nor a fetched, amount-bound invoice; a payable quote is not
+promised by this example. See the [CLI demo](../examples/demo_flow.md).
+
+The separate `satspath_cli_demo` volume avoids sharing ownership-sensitive state
+with the daemon. The root Compose mounts `satspath_data` into **both** CLI and
+daemon despite their different UIDs. Do not alternate recursive `chown` commands
+between users: that can break the other process. Use separate state or explicitly
+design permissions before sharing; never loosen private key/token permissions.
+
+The CLI reads `SATSPATH_DIR` or defaults to `.satspath` relative to its working
+directory (thus `/data/.satspath` in this image). The Dockerfile's
+`SATSPATH_DATA_DIR` variable is not read by that native CLI path. The daemon is
+different: its container command explicitly selects `--home /data`.
+
+## 2. Start only the daemon
+
+The root Compose defaults to `mainnet`, while the native daemon defaults to
+`devnet`. Select the intended network explicitly; this example uses regtest:
 
 ```bash
-make init
-# equivalent to:
-docker compose run --rm satspath-cli init
+SATSPATH_NETWORK=regtest docker compose up --build -d satspathd
+docker compose logs -f satspathd
 ```
 
-This creates `.satspath/` inside the `satspath_data` named volume.
-
-### 3. Register a profile
+From another terminal:
 
 ```bash
-# With Lightning Address only:
-docker compose run --rm satspath-cli register user@example.com \
-  --lightning-address user@example.com
-
-# With Arkade receive pointer (public-only, manual wallet):
-docker compose run --rm satspath-cli register user@example.com \
-  --arkade-uri "ark:ark1q..."
-
-# With full Ark server + pubkey:
-docker compose run --rm satspath-cli register user@example.com \
-  --ark-server "https://ark.server.example" \
-  --ark-pubkey "02..."
+curl --fail http://127.0.0.1:9737/health
+curl --fail http://127.0.0.1:9737/v1/health
+curl http://127.0.0.1:9737/v2/health
 ```
 
-### 4. Get a routing quote
+`/health` is liveness. `/v1/health` probes dependencies and can be degraded while
+returning 200. `/v2/health` currently returns 503 because witness quorum is not
+integrated; this is not fixed by starting more containers. See [telemetry](telemetry.md).
+
+The default claim/challenge gates remain closed. The explicit development alias
+mock is allowed only on devnet/regtest and is not real alias ownership.
+Admin/mutating routes require the token in `/data/admin.macaroon`, unless supplied
+through `SATSPATHD_AUTH_TOKEN`. Do not log or publish it. See [API auth](API_REFERENCE.md).
+
+## 3. Optional proxy and monitoring
+
+Start selected services rather than `docker compose up` without arguments:
 
 ```bash
-docker compose run --rm satspath-cli quote user@example.com 21000
+docker compose up -d caddy prometheus
 ```
 
-### 5. Start the SatsPath Daemon & Reverse Proxy
+The default Caddy configuration uses an internal CA; clients must trust that CA
+for local TLS. For a public hostname, replace the development site configuration
+with an appropriate public-certificate setup and set `SATSPATH_AUTHORITY_DOMAIN`
+to the same hostname in the daemon. The proxy preserves the Host header, and an
+unconfigured hostname is rejected. `--behind-proxy` alone does not allow it.
 
-To start `satspathd` alongside the Caddy TLS reverse proxy:
+Grafana requires `GRAFANA_PASSWORD` set to a secure non-default value. The checked-in
+Prometheus rules are not a configured notification service: alert delivery must
+be arranged and tested separately.
+
+## TLS and exposure
+
+Never expose public cleartext daemon HTTP. Native TLS is also available:
 
 ```bash
-docker compose up -d
-docker compose logs -f satspathd caddy
+SATSPATH_AUTHORITY_DOMAIN=node.example.com satspathd --bind 0.0.0.0:9737 \
+  --tls-cert /path/to/fullchain.pem --tls-key /path/to/privkey.pem \
+  --require-tls-or-proxy --no-open
 ```
 
----
+| Setting | Actual behavior |
+| --- | --- |
+| `--behind-proxy` / `SATSPATHD_BEHIND_PROXY=1` | Trusts forwarded client IP headers; only safe behind a proxy clients cannot bypass |
+| `--require-tls-or-proxy` / `SATSPATHD_REQUIRE_TLS_OR_PROXY=1` | Refuses non-loopback cleartext startup without TLS/proxy; otherwise startup only warns |
+| `SATSPATH_AUTHORITY_DOMAIN` / `SATSPATH_AUTHORITY_URL` | Configures trusted DNS Host names; see API Host rules |
+| `SATSPATHD_AUTH_TOKEN` | Optional 64-hex-character admin token; otherwise created in the daemon home |
+| `SATSPATH_LOG_FORMAT=json` | Structured logs; `RUST_LOG` controls verbosity |
 
-## TLS Termination & Reverse Proxy
+Metrics have no Bearer authentication at the daemon; restrict network/proxy
+access. Do not rely on a Host-header convention as an access-control boundary.
 
-In production environments, `satspathd` must NEVER be exposed as cleartext HTTP to the public internet. SatsPath provides two supported options for TLS:
+## State, backup and upgrade
 
-### Option 1: Reverse Proxy Sidecar (Recommended)
+`satspath_data` contains daemon state, including protocol identity material and
+the admin token, not just public profiles. It contains no user spending seed by
+design. Stop **all writers** before copying the complete state, or use a separately
+validated consistent SQLite backup procedure. Protect the backup and rehearse
+restore on a new volume; do not assume live `tar` provides a consistent WAL snapshot.
 
-Run `satspathd` behind an industry-standard reverse proxy such as Caddy, Nginx, or Cloudflare.
+The `deploy/docker-compose.yml` file is an incomplete authority sketch with a
+different image/exposure configuration; it is not interchangeable with the root
+development Compose. See [its limitations](../deploy/README.md).
 
-The provided `docker-compose.yml` configures a Caddy sidecar:
-- `satspathd` binds to `127.0.0.1:9737` on the host and exposes `9737` internally to Docker.
-- The `caddy` service listens on ports `80` (redirecting to HTTPS) and `443` (terminating TLS).
-- Caddy automatically requests and renews certificates from Let's Encrypt or ZeroSSL.
-- To configure for your public domain, update `docker/Caddyfile` with your domain (e.g. `node.example.com`).
-
-Set `SATSPATHD_BEHIND_PROXY=1` (or pass `--behind-proxy`) so `satspathd` properly trusts and extracts client IPs from `X-Forwarded-For` / `X-Real-IP`.
-
-When preserving the public `Host` header, also set
-`SATSPATH_AUTHORITY_DOMAIN=node.example.com` in the daemon environment, or set
-`SATSPATH_AUTHORITY_URL=https://node.example.com/v2`. The daemon rejects
-unconfigured DNS hosts even behind a proxy to prevent DNS rebinding. Native TLS
-deployments using a DNS hostname need the same explicit hostname configuration.
-
-### Option 2: Native TLS in satspathd
-
-`satspathd` can also terminate TLS natively using Rustls:
+## Useful commands and limitations
 
 ```bash
-satspathd --bind 0.0.0.0:9737 \
-  --tls-cert /path/to/fullchain.pem \
-  --tls-key /path/to/privkey.pem
+make help
+make build-cli     # CLI image only
+make smoke         # CLI --help smoke test only
+docker build --target runtime-daemon -t satspathd:latest .
+make scan          # Requires Trivy and both expected :latest image tags
+docker compose stop satspathd
 ```
 
-Or via environment variables:
-- `SATSPATHD_TLS_CERT=/path/to/fullchain.pem`
-- `SATSPATHD_TLS_KEY=/path/to/privkey.pem`
+`make up` starts all default services, including Grafana; it is not the minimal
+daemon startup shown above. Some wallet-related Make targets refer to a `wallet/`
+directory not shipped in this checkout and are not supported setup instructions.
 
-### Cleartext Binding Security Audit & Enforcement
-
-When `satspathd` binds to a non-loopback interface (such as `0.0.0.0`, `::`, or an external IP) without `--tls-cert`/`--tls-key` or `--behind-proxy`:
-- By default, it logs a prominent warning warning of insecure cleartext exposure.
-- When `--require-tls-or-proxy` is set (or `SATSPATHD_REQUIRE_TLS_OR_PROXY=1`), `satspathd` **fails fast** on startup with an error, preventing accidental deployment of cleartext HTTP endpoints.
-
-Localhost / loopback bindings (`127.0.0.1`, `::1`) remain allowed for zero-friction local development.
-
-### Production Configuration Flags & Environment Variables
-
-| Flag / Environment Variable | Default | Production Requirement |
-| :--- | :--- | :--- |
-| `--behind-proxy` / `SATSPATHD_BEHIND_PROXY=1` | `false` | Enable when running behind Caddy/Nginx so `satspathd` trusts `X-Forwarded-For` / `X-Real-IP`. |
-| `--require-tls-or-proxy` / `SATSPATHD_REQUIRE_TLS_OR_PROXY=1` | `false` | **Recommended in production.** Fails closed on startup if bound to a non-loopback address without TLS or `--behind-proxy`. |
-| `SATSPATH_AUTHORITY_DOMAIN` | *(none)* | Set to your public domain (e.g. `node.example.com`) to allow incoming `Host` headers and prevent DNS rebinding. |
-| `SATSPATHD_AUTH_TOKEN` | `<home>/admin.macaroon` | 64-character hex Bearer token for admin/mutating `/v1/*` endpoints (auto-generated in `<home>/admin.macaroon` if unset). |
-| `--log-format` / `SATSPATH_LOG_FORMAT` | `text` | Set to `json` for structured JSON logs in Docker/Kubernetes (`text` or `pretty` for human-readable output). |
-| `GET /health` & `GET /metrics` | Enabled | Liveness probe (`/health`), deep dependency health probe (`/v1/health`), and Prometheus scrape endpoint (`/metrics`). |
-
----
-
-## Make targets
-
-```bash
-make help          # Show all targets
-make build         # Build CLI image
-make build-cli     # Build CLI image
-make run CMD="--help"  # Run any CLI command
-make shell         # Open a debug shell in the CLI container
-make up            # Start daemon service in background
-make down          # Stop all services
-make logs          # Tail all service logs
-make scan          # Run Trivy vulnerability scan on CLI & daemon
-make clean         # Remove built images and dangling layers
-make smoke         # Build + verify --help output
-```
-
----
-
-## Security design
-
-### What is protected
-
-| Concern                 | Mitigation                                                 |
-| ----------------------- | ---------------------------------------------------------- |
-| Insecure Cleartext HTTP | Native TLS (rustls) or Caddy reverse proxy; audit check    |
-| Private keys in image   | `.dockerignore` blocks `*.key`, `.satspath/`, `.env`       |
-| Root escalation         | `no-new-privileges`, `cap_drop: ALL`, non-root users       |
-| Container escape        | Read-only root filesystem + tmpfs for `/tmp` only          |
-| Dependency supply chain | `npm ci --ignore-scripts` (no postinstall scripts)         |
-| Secret injection        | `.env` is gitignored; use Docker secrets or env at runtime |
-| Vulnerability tracking  | Trivy scan in CI via `.github/workflows/docker.yml`        |
-
-### What is intentionally not in Docker
-
-- No wallet seed phrases
-- No private spending keys
-- No Arkade session tokens
-- No mainnet payment execution
-
-### Layer caching strategy (Rust)
-
-The Rust build uses [`cargo-chef`](https://github.com/LukeMathWalker/cargo-chef):
-
-```
-Layer 1: cargo-chef planner  -> only re-runs when Cargo.toml/Cargo.lock change
-Layer 2: cargo-chef cacher   -> pre-builds all deps (very slow, cached)
-Layer 3: builder             -> compiles src/ (fast, re-runs on src change)
-Layer 4: runtime             -> copies single binary (~25 MB)
-```
-
-This means typical CI rebuilds take **~30 seconds** instead of 10+ minutes.
-
----
-
-## Production checklist
-
-- [ ] Ensure TLS is configured (either Caddy sidecar or native `--tls-cert` / `--tls-key`)
-- [ ] Set `SATSPATHD_REQUIRE_TLS_OR_PROXY=1` in production container environment
-- [ ] Push to a private registry (GHCR, ECR, etc.) -- see `docker.yml` CI workflow
-- [ ] Pin base image digests (replace `bookworm-slim` tags with `sha256:...`)
-- [ ] Set `RUST_LOG` to `warn` in production
-- [ ] Configure backup for `satspath_data` volume (e.g. `docker run --rm -v satspath_data:/data -v $(pwd):/backup debian:bookworm-slim tar czf /backup/satspath_data_$(date +%F).tar.gz -C /data .`)
-- [ ] Run `make scan` before each release to check for CVEs
-- [ ] Review CI SARIF reports in GitHub Security tab
-
----
-
-## Troubleshooting
-
-**`cargo: command not found` in CI**
--> The build runs inside the container; you do not need Cargo on the host.
-
-**`Permission denied: /data`**
--> The `satspath_data` volume ownership may be wrong. Run an entrypoint override as root:
-
-```bash
-# For CLI container (UID 10001):
-docker compose run --rm --entrypoint /bin/sh --user root satspath-cli -c "chown -R 10001:10001 /data && chmod -R 770 /data"
-
-# For Daemon container (UID 10002):
-docker compose run --rm --entrypoint /bin/sh --user root satspathd -c "chown -R 10002:10002 /data && chmod -R 770 /data"
-```
+Remaining packaging, deployment hardening, recovery and release verification are
+tracked in [roadmap H3/H7](../ROADMAP.md), not claimed complete by this guide.

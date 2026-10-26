@@ -5,6 +5,12 @@
 **Issue:** [#48](https://github.com/satspath/satspath/issues/48)  
 **Depends On:** [trust-model-v2.md](./trust-model-v2.md)
 
+> Normative requirements and illustrative schema excerpts below are not an
+> implementation-completion claim. Use [server status](server-v2.md), the
+> [HTTP API](../API_REFERENCE.md), and Rust types for current wire behavior.
+> In particular, daemon envelopes currently have no consistency proof or witness
+> cosignatures; the latest-checkpoint v2 route is not implemented.
+
 ---
 
 ## 1. Overview & Protocol Philosophy

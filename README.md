@@ -59,10 +59,15 @@ A Lightning Address (`user@domain.com`) exclusively targets a Lightning receivin
 **Host wallets hold user private spending keys.** SatsPath does not have, generate, or request user spending keys or seed phrases. It holds a non-custodial `secp256k1` identity keypair for public metadata profiles and rotation records. The separate opt-in **regtest checkpoint anchoring** feature uses loopback RPC credentials to instruct an operator-controlled Bitcoin Core wallet to fund, sign, broadcast and mine its own anchor transactions; the daemon does not receive that wallet's spending keys. Never use a wallet with real funds for this feature.
 
 ### What Works Today, What is Experimental, and What Has Not Been Audited?
-* **Implemented Today:** Signed profiles, key rotation, guardian key recovery, HTTPS/Nostr resolvers, BIP-353 DNS resolution with embedded local DNSSEC validation (`HickoryDnssecTxtResolver`), standards-conformant BOLT12 offers/blinded paths/invoice requests, multi-source fee consensus, append-only Merkle transparency log, sparse Merkle state map, Catena Bitcoin `OP_RETURN` anchoring, checkpoint gossip monitoring, and witness quorum cosigning.
+* **Implemented Components:** Signed profiles, key rotation, guardian recovery primitives, native HTTPS/Nostr resolvers, native BIP-353 with local DNSSEC validation, BOLT12 parsing/blinded-path/invoice-request primitives, fee consensus, transparency log/state map, regtest Catena anchoring, gossip monitoring, and a witness cosigning library. Component availability is not proof of an integrated wallet flow or deployed witness federation.
 * **Preview / Experimental:** Ark routing (Preview; live ASP client `/v1/info`, VTXO DAG verification, and Boarding/Forfeit/OOR handoff builders), Silent Payments (Experimental; public operations checked against projections of all 28 official BIP-352 vector groups; host wallet retains private keys and ECDH), Submarine/Reverse Swaps (Experimental; testnet/regtest only).
 * **Wallet handoffs:** Daemon, router, and WASM quotes emit payable QRs only for verified on-chain addresses with a matching network and exact amount. The CLI `quote` and `preview --fetch-lnurl-invoice` commands can also emit BOLT11 invoices after shared payee-key, network, amount, and expiry validation. Amount-less Lightning pointers remain receive-only; BOLT12, Ark, and Silent Payment handoffs fail closed until protocol-aware validation is available.
 * **Audit Status:** SatsPath has completed internal test suites and automated adversarial simulations, but has **NOT yet undergone an independent third-party cryptographic or security audit**.
+
+See the [documentation index and capability matrix](docs/README.md) for interface-specific
+limits. In particular, production alias attestation is missing, browser WASM is a
+separate incomplete preview implementation, and the daemon's v2 envelope currently
+contains no witness cosignatures. Its `/v2/health` therefore reports quorum not satisfied.
 
 Website: <https://satspath.com>
 
@@ -208,12 +213,12 @@ A resolver acts only as an untrusted transport. It returns signed profile payloa
 ### 2. What happens if the namespace provider is malicious?
 If the operator of `example.com` attempts to hijack `alice@example.com` by generating a new key and signing a fake profile:
 * **Existing Contacts:** Any client that previously resolved Alice holds a local pin of her identity key or predecessor checkpoint. The client detects the unauthorized key swap (missing a dual-signed `KeyRotation`) and aborts with an unauthorized key replacement failure.
-* **New Contacts (First Contact):** S2S v2 requires checkpoints to be cosigned by an independent witness quorum ($K$-of-$N$). If the operator creates a split view for new contacts, witnesses refusing to cosign inconsistent roots prevent un-witnessed profiles from passing.
+* **New Contacts (First Contact):** The S2S v2 specification requires independent witness evidence under its quorum policy. That is not the current daemon's integrated behavior: its v2 envelope serves no cosignatures. Even an enforced quorum establishes consistency, not that the first alias-to-key binding belongs to the intended person.
 
 ### 3. What are the limits of Trust-On-First-Use (TOFU)?
 When a client contacts an identifier for the very first time without prior key pinning or out-of-band verification:
 * **Protected:** Once pinned, all future updates require monotonic append-only continuity.
-* **Unprotected:** If an active adversary controls resolution during the *very first lookup*, the client may pin the attacker's initial state unless validated against an independent witness quorum or out-of-band fingerprint. TOFU guarantees subsequent continuity, not absolute first-contact authentication.
+* **Unprotected:** If an active adversary controls resolution during the *very first lookup*, the client may pin the attacker's initial state unless the binding is authenticated by an out-of-band fingerprint or another trusted identity anchor. A witness quorum alone does not authenticate that binding. TOFU guarantees subsequent continuity, not absolute first-contact authentication.
 * **Gossip & Witness Boundaries:** Independent witness quorums ($K$-of-$N$) and future cross-witness gossip can reduce first-contact consistency risk and improve split-view detection, but do not by themselves authenticate the initial namespace-to-key binding without out-of-band verification or trusted anchors.
 
 ### 4. Is hashing identifiers with SHA-256 private?
@@ -240,8 +245,8 @@ The witness protocol requires a $K$-of-$N$ threshold (e.g. 2-of-3 or 3-of-5). If
 | **`crates/satspath-router`** | Routing engine, fee consensus, BOLT12 handling, BIP-352 Silent Payments, Ark | **IMPLEMENTED** |
 | **`crates/satspath-cli`** | Reference command-line client for development and preview flows | **IMPLEMENTED** |
 | **`crates/satspathd`** | Server daemon, REST API, transparency endpoint, token-bucket rate limiting | **IMPLEMENTED** |
-| **`crates/satspath-witness`** | Independent witness node, $K$-of-$N$ checkpoint cosigning, split-view detector | **IMPLEMENTED** |
-| **`crates/satspath-gossip`** | Checkpoint gossip monitor and split-view detector | **IMPLEMENTED** |
+| **`crates/satspath-witness`** | Witness/cosigning library and `satspath-gossip` monitor binary; daemon quorum integration pending | **COMPONENTS IMPLEMENTED** |
+| **`crates/satspath-conformance`** | Incremental protocol conformance runner and vectors; see its coverage limits | **INCREMENTAL** |
 | **`crates/satspath-wasm`** | WebAssembly bindings for web browsers and wallet integration | **PREVIEW** |
 | **`crates/satspath-swaps`** | Experimental Boltz v2 swap scaffolding (testnet/regtest only) | **EXPERIMENTAL** |
 | **`crates/satspath-pqc`** | Hybrid classical + post-quantum signature research module (ML-DSA-65) | **RESEARCH** |
@@ -259,7 +264,7 @@ cd satspath
 # Build entire workspace
 cargo build --workspace
 
-# Run all test suites across all crates
+# Run non-ignored Rust tests (external regtest/live tests have separate workflows)
 cargo test --workspace --all-targets
 
 # Check formatting and clippy
@@ -276,15 +281,25 @@ it does not modify staged files. Node.js 18+ and Rust with `rustfmt` are require
 ### CLI Preview Usage
 
 ```bash
-# Register a local test profile
-satspath register alice@example.com
+# Build and initialize disposable local state
+cargo build -p satspath-cli
+export SATSPATH_DIR="$(mktemp -d)"
+./target/debug/satspath init
+
+# Register locally; also attempts Nostr publication (network access)
+./target/debug/satspath register alice@example.com
 
 # Query a payment quote with live multi-source fee evaluation
-satspath quote alice@example.com 50000 --json
+./target/debug/satspath quote alice@example.com 50000 --json
 
-# Preview mainnet wallet handoff (touches public data only; returns BIP-21 / BOLT11 / BOLT12 payload)
-satspath preview alice@example.com 21000 --mainnet
+# Preview only: the default unproven Lightning method does not produce a payable QR
+./target/debug/satspath preview alice@example.com 21000 --mainnet
 ```
+
+This fixture does not prove alias or payment-method ownership. For proof tooling
+and expected limitations, see the [CLI demonstration](examples/demo_flow.md).
+BOLT11 fetching requires explicit `--fetch-lnurl-invoice` and successful validation;
+BOLT12, Ark, and Silent Payments payable handoffs remain gated.
 
 ---
 
@@ -302,6 +317,8 @@ SatsPath is developed as **free and open-source public infrastructure** for the 
 
 ## Documentation Navigation
 
+* **Start Here / Current Capability Matrix:** [`docs/README.md`](docs/README.md)
+* **Maintained Project Roadmap & Issues:** [`ROADMAP.md`](ROADMAP.md)
 * **Architecture:** [`docs/architecture.md`](docs/architecture.md)
 * **Threat Model & Security:** [`docs/threat_model.md`](docs/threat_model.md)
 * **Key Transparency & Gossip:** [`docs/key_transparency.md`](docs/key_transparency.md) and [`docs/checkpoint_gossip.md`](docs/checkpoint_gossip.md)
@@ -315,4 +332,4 @@ SatsPath is developed as **free and open-source public infrastructure** for the 
 * **Docker, Telemetry & Proxy Hardening:** [`docs/docker.md`](docs/docker.md), [`docs/telemetry.md`](docs/telemetry.md), and [`docs/security/REVERSE_PROXY_RATE_LIMITING.md`](docs/security/REVERSE_PROXY_RATE_LIMITING.md)
 * **SDK Quickstart:** [`docs/SDK_QUICKSTART.md`](docs/SDK_QUICKSTART.md)
 * **Daemon HTTP API Reference:** [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) and OpenAPI spec [`docs/openapi.yaml`](docs/openapi.yaml)
-* **v0.2 Roadmap:** [`docs/v02_roadmap.md`](docs/v02_roadmap.md)
+* **Earlier v0.2 Planning / Current References:** [`docs/v02_roadmap.md`](docs/v02_roadmap.md)

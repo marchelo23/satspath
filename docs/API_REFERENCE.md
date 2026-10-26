@@ -492,8 +492,8 @@ names differ:
 These appear in code or older docs but have no working handler. GET requests
 return `404`; protected mutation requests pass through authentication first:
 
-* `GET /v2/checkpoint/latest` is listed in [`s2s/server-v2.md`](s2s/server-v2.md)
-  and defined as a route constant, but the router does not dispatch it. Use
+* `GET /v2/checkpoint/latest` is defined as a route constant, but the router does
+  not dispatch it; [`s2s/server-v2.md`](s2s/server-v2.md) documents that gap. Use
   `GET /v1/transparency/checkpoints?limit=1` or the `checkpoint` field of
   `/v2/resolve`.
 * `/v1/transparency/catena/anchor` is recognized for metrics labelling only.

@@ -1,5 +1,11 @@
 # SatsPath Security Simulation Tests & Validation Log
 
+> **Historical test log, not current CI evidence.** Outputs and conclusions below
+> reflect the recorded exercise, not a fresh run of this checkout. Routing
+> simulations do not demonstrate payable Ark/BOLT12 integrations. Current
+> capabilities and recovery limits are listed in the [documentation index](docs/README.md)
+> and [guardian recovery guide](docs/key_recovery.md).
+
 This document records the execution logs, results, verified security properties, and explicit boundary limitations of automated attack simulations run against SatsPath components.
 
 > **Evaluation Methodology:**
@@ -38,7 +44,7 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 * **EXPECTED:** The key rotation validator rejects the transition and preserves the existing identity key.
 * **RESULT:** `is_rotation_valid` rejected the transition. The protocol requires an `AuthorizationV1` statement signed by the active predecessor key (`K1`) alongside an `AcceptanceV1` statement signed by the successor key (`K2`).
 * **SECURITY PROPERTY VALIDATED:** Successor keys cannot unilaterally replace an active identity key without cryptographic authorization signed by the predecessor key.
-* **LIMITATIONS:** Does not protect against an attacker who has compromised the predecessor private key itself. Key recovery without the active private key is deliberately unsupported.
+* **LIMITATIONS:** Does not protect against compromise of the predecessor key itself. The historical test did not establish recovery behavior. Current code has precommitted guardian recovery primitives; ordinary CLI registration does not commit a guardian policy. See the recovery guide above.
 
 ---
 

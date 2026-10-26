@@ -12,8 +12,8 @@ crates/satspath-handoff   strict payment handoff payload validation (BIP-21, BOL
 crates/satspath-router    quote response contract, fee consensus, BOLT12, Silent Payments, Ark, route selection
 crates/satspath-cli       command-line reference client
 crates/satspathd          local / authoritative daemon and HTTP API
-crates/satspath-witness   independent witness node and K-of-N checkpoint cosigner
-crates/satspath-gossip    checkpoint gossip monitor and split-view detector
+crates/satspath-witness   witness/cosigning library; src/bin/satspath-gossip.rs monitor
+crates/satspath-conformance incremental conformance runner and vectors
 crates/satspath-wasm      WebAssembly bindings for browser / wallet integrations
 crates/satspath-swaps     experimental testnet/regtest swap scaffolding (Boltz v2)
 crates/satspath-pqc       experimental post-quantum hybrid signature research module (ML-DSA-65)
@@ -173,7 +173,8 @@ Important commands:
 | `prove` / `attach-proof` | Generate challenge and attach method ownership proofs |
 | `encode` / `decode` | Universal SatsPath URI encoding and decoding |
 | `invite` / `claim` | Invitation generation and claim flows |
-| `server` | Sovereign server and DNS operator onboarding (`init`, `check`) |
+| `server` | `init` and `check` are output-only stubs, not operator provisioning or verification |
+| `dns check`, `identity request-challenge/sign-mutation/submit-mutation`, `migration export/verify` | CLI scaffolds that print “Feature coming soon!”, not operational DNS, offline mutation, or server migration workflows |
 | `web` | Minimal local receive web UI on localhost |
 | `demo` | Run full local protocol demonstration flow |
 
@@ -203,10 +204,13 @@ Wire behavior is documented in [wire_p2p.md](./wire_p2p.md).
 Known v1/v2 implementation gaps:
 
 - **External Security Audit:** Independent third-party cryptographic and security audit is required before recommending real-funds production usage.
-- **Alias Inbox Attestation:** `satspathd` ships no production email/inbox verifier yet; `/v1/profile/challenge` and `/v1/profile/verify` fail closed unless started with `--dev-mock-alias-verification` on a non-mainnet network.
+- **Alias Inbox Attestation:** `satspathd` ships no production email/inbox verifier yet; challenge/verify and invite claiming fail closed unless the development mock is explicitly enabled on **devnet/regtest only** (not testnet or mainnet).
 - **Daemon Payable Handoff Gate:** While BOLT12 (`crates/satspath-router/src/bolt12.rs`), Ark (`crates/satspath-router/src/ark.rs`), and Silent Payments (`crates/satspath-router/src/silent_payments.rs`) primitives are implemented in `satspath-router`, `satspathd`'s `/v1/quote`, `/v1/preview`, `/v1/pay`, and `/v1/send` handoff gate (`satspath-handoff`) currently emits only validated, amount-bound on-chain BIP-21 payloads.
 - **Silent Payments Host Wallet ECDH:** SatsPath validates BIP-352 public keys, input eligibility, and expected outputs against public projections of all 28 official vector groups, while private-key ECDH shared-secret derivation and transaction construction remain in the host wallet.
 - **Mainnet Payment Execution:** Mainnet payment execution and transaction signing are deliberately unsupported (delegated to host wallets).
+- **Witness Integration:** The cosigning library exists, but daemon v2 envelopes have empty witness signatures and no envelope consistency proof; v2 health reports quorum not satisfied. See [server status](s2s/server-v2.md).
+- **Browser SDK:** WASM is a separate preview with unresolved local insertion, Nostr, serialization and DNSSEC parity work; see [SDK quickstart](SDK_QUICKSTART.md).
+- **Operational Tooling:** `server init/check` do not perform the operations their output describes; deployment, packaging and recovery work is tracked in [ROADMAP.md](../ROADMAP.md).
 
 ## Conformance Checklist
 

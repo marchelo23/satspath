@@ -27,6 +27,7 @@ jobs:
       - run: npm ci --prefix sdk/satspath-p2p
       - run: npm test --prefix sdk/satspath-p2p
       - run: node --test crates/satspathd/tests/dashboard-auth.test.mjs
+      - run: node --test docs/tests/*.test.mjs
       - run: npm ci --prefix proxy-workers/bolt12
       - run: npm run typecheck --prefix proxy-workers/bolt12
       - run: npm test --prefix proxy-workers/bolt12

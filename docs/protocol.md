@@ -1,5 +1,11 @@
 # SatsPath Protocol v1
 
+> **Protocol specification, not a capability checklist.** The native schema has
+> evolved beyond the original v1 examples, including a `Bolt12` method variant.
+> Use [implementation mapping](implementations.md), the [capability matrix](README.md),
+> and [profile types](../crates/satspath-core/src/profile.rs) for the checkout's
+> current structures and interface-specific handoff gates.
+
 SatsPath is a payment discovery and routing protocol for Bitcoin rails. It defines signed payment profiles, verification rules, resolver semantics, and quote responses for Lightning, on-chain, and Ark receive pointers.
 
 SatsPath is not a wallet, not a Bitcoin node, and not a transport-specific peer-to-peer system. Pear/Holepunch is one possible transport for moving SatsPath protocol objects between machines; it is not the protocol itself.
@@ -39,7 +45,7 @@ Payment execution belongs to the underlying wallet or rail. SatsPath discovers a
 : A `PaymentProfile` plus a secp256k1 Schnorr signature made by the profile identity key.
 
 `PaymentMethod`
-: One public receive pointer. v1 methods are `Lightning`, `Onchain`, and `Ark`.
+: One public receive pointer. Original v1 methods are `Lightning`, `Onchain`, and `Ark`; the current Rust enum also has `Bolt12`. An advertised pointer is not automatically a payable handoff.
 
 `Resolver`
 : A component that maps an identifier to a `SignedPaymentProfile`.

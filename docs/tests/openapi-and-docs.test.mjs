@@ -211,6 +211,11 @@ test('obsolete docs are removed and all markdown relative links resolve', () => 
 
   const mdFiles = [
     path.join(repoRoot, 'README.md'),
+    path.join(repoRoot, 'ROADMAP.md'),
+    path.join(repoRoot, 'walktrough.md'),
+    path.join(repoRoot, 'security_tests.md'),
+    ...walkMarkdownFiles(path.join(repoRoot, 'deploy')),
+    ...walkMarkdownFiles(path.join(repoRoot, 'examples')),
     ...walkMarkdownFiles(path.join(repoRoot, 'docs')),
   ];
 
@@ -227,5 +232,29 @@ test('obsolete docs are removed and all markdown relative links resolve', () => 
         `Broken markdown link in ${path.relative(repoRoot, file)} -> ${target}`,
       );
     }
+  }
+});
+
+test('README workspace table matches actual Cargo workspace members', () => {
+  const manifest = fs.readFileSync(path.join(repoRoot, 'Cargo.toml'), 'utf8');
+  const readme = fs.readFileSync(path.join(repoRoot, 'README.md'), 'utf8');
+  const membersBlock = manifest.match(/members\s*=\s*\[([\s\S]*?)\]/);
+  assert.ok(membersBlock, 'Expected a workspace member list');
+  const members = [...membersBlock[1].matchAll(/"(crates\/[^"\s]+)"/g)].map(match => match[1]);
+  const documented = [...readme.matchAll(/^\| \*\*`(crates\/[^`]+)`\*\* \|/gm)].map(match => match[1]);
+  assert.deepEqual(documented.sort(), members.sort(), 'Update workspace docs when adding/removing crates');
+  assert.ok(fs.existsSync(path.join(repoRoot, 'crates/satspath-witness/src/bin/satspath-gossip.rs')));
+});
+
+test('CLI setup examples configure the state variable read by the native implementation', () => {
+  const source = fs.readFileSync(path.join(repoRoot, 'crates/satspath-core/src/lib.rs'), 'utf8');
+  const stateFunction = source.match(/pub fn default_data_dir\(\)[\s\S]*?\n\}/);
+  assert.ok(stateFunction, 'Expected native CLI directory selection');
+  const variable = stateFunction[0].match(/std::env::var\("([^"]+)"\)/)?.[1];
+  assert.ok(variable, 'Expected an environment override in default_data_dir');
+  for (const file of ['README.md', 'examples/demo_flow.md']) {
+    const text = fs.readFileSync(path.join(repoRoot, file), 'utf8');
+    assert.ok(text.includes(`export ${variable}=`), `${file} must use the real CLI state override`);
+    assert.doesNotMatch(text, /export SATSPATH_DATA_DIR=/);
   }
 });

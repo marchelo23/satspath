@@ -1,101 +1,56 @@
-# BOLT12 Offer Handling and Blinded Paths in SatsPath
+# BOLT12 handling: primitives, receive pointers, and remaining integration
 
-## Overview
+## Current native implementation
 
-BOLT12 (Lightning Offers) provides reusable, static payment codes that support:
-- Amount negotiation and tip/quantity specifications.
-- Onion message-based invoice request negotiation.
-- Recipient and payer privacy via **blinded paths**.
-- Native integration with BIP-353 (`user@domain` TXT record resolution to `lno1...`).
+[`satspath-router/src/bolt12.rs`](../crates/satspath-router/src/bolt12.rs) contains
+checksumless Bech32 decoding with continuation handling, TLV parsing and Merkle
+signature helpers, BOLT #4 blinded-path structures, invoice-request construction,
+and invoice validation. These are component APIs, not evidence of a live wallet
+payment or completed Core Lightning/LDK integration.
 
-BOLT12 — IMPLEMENTED. Standards-conformant checksumless BOLT12 string decoding (`NoChecksum` with `+` continuation), all-TLV Merkle tree root hashing (`LnLeaf`, `LnNonce` + `all-tlvs`, `LnBranch`), BIP-340 Schnorr signature verification, BOLT #4 wire-format blinded paths (`pubkey` and `sciddir`), and `invoice_request` Onion Message dispatch (`OnionMessageTransport` / CLN / LDK interoperability) are implemented in `crates/satspath-router/src/bolt12.rs`.
+The native interfaces include:
 
----
+- `Bolt12Signer`: host-provided signing; spending keys stay in the host boundary.
+- `OnionMessageTransport`: host/gateway transport abstraction.
+- `fetch_bolt12_invoice_via_transport`: constructs the request, dispatches through
+  the supplied transport, and validates the returned invoice.
+- `ReferenceNodeOnionTransport`: in-process reference responder for testing;
+  its name does not mean it connects to an actual CLN/LDK node.
 
-## Protocol Lifecycle: Offer to Invoice
+The offer→invoice-request→transport→invoice→wallet lifecycle is the intended
+integration sequence. Route scoring or parsing an offer alone does not complete it.
 
-The payment flow proceeds through the following stages:
+## Receive is not payment execution
 
-```text
-Recipient Profile / BIP-353
-         |
-         v
-    Bolt12Offer (lno1... / lnot1...)
-         |
-         v
-    Validation & Blinded Path Extraction
-         |
-         v
-    Bolt12InvoiceRequest (lnr1... / lnrt1...)
-    (Payer signs request_id with ephemeral or identity key)
-         |
-         v
-    Transport Gateway / Onion Message Proxy
-    (HTTP Proxy via SATSPATH_BOLT12_PROXY or direct node RPC)
-         |
-         v
-    Bolt12Invoice (lni1... / lnit1...)
-    (Validated against offer parameters, amount, and expiry)
-         |
-         v
-    Host Wallet Handoff / Execution
-```
+The daemon can persist a network-validated BOLT12 offer and return an **amountless**
+`bitcoin:?lno=...` receive pointer. The active
+[acceptance test](../crates/satspathd/tests/e2e_daemon_flow.rs) covers that behavior.
+Do not describe BOLT12 receive support as wholly absent.
 
----
+Daemon/router/WASM payable quote generation still rejects BOLT12 until
+protocol-aware validation and wallet approval integration are complete. An offer
+is not an amount-bound invoice. See [PaymentIntent gates](payment_intent.md).
 
-## Data Structures and TLV Encoding
+## HTTP proxy is a scaffold, not a working backend
 
-BOLT12 encodes records using Type-Length-Value (TLV) streams inside bech32-style payloads (note: official BOLT12 uses its own bech32 format without the standard BIP-350 Bech32m checksum).
+The native HTTP helper reads `SATSPATH_BOLT12_PROXY` and requests
+`/invoice?offer=...&amount_msats=...`. The optional
+[WASM helper](../crates/satspath-wasm/src/bolt12.rs) builds a similar URL.
 
-### 1. Bolt12Offer
-- **HRP:** `lno` (Mainnet), `lnot` (Testnet), `lnob` (Regtest).
-- **TLV Types:**
-  - Type 2 (`offer_chains`): Genesis chain hashes.
-  - Type 6 (`offer_currency`): Currency code (default: `btc`).
-  - Type 8 (`offer_amount`): Truncated `u64` (tu64) amount in millisatoshis.
-  - Type 10 (`offer_description`): UTF-8 description.
-  - Type 14 (`offer_absolute_expiry`): Epoch timestamp.
-  - Type 16 (`offer_paths`): Blinded routing paths.
-  - Type 18 (`offer_issuer`): Domain or merchant identity string.
-  - Type 20 (`offer_quantity_max`): Maximum item quantity.
-  - Type 22 (`offer_node_id`): 33-byte compressed secp256k1 public key.
-  - Type 240 (`signature`): 64-byte BIP-340 Schnorr signature.
+The checked-in [worker](../proxy-workers/bolt12/src/index.ts), however, exposes
+`/resolve/:offer?amount=...` and returns `lnbc1dummy_invoice_resolved_from_bolt12_offer`.
+Its backend CLN/LDK communication is TODO. The client/worker contracts do not
+currently match; setting a proxy URL does not create a usable invoice service.
+Do not use that response as a payable invoice or claim deployment of an example
+URL from source constants.
 
-### 2. Blinded Paths (Privacy-Preserving Routing)
-A blinded path allows an offer creator to receive payments without revealing their real node public key or channel topology:
-- **`introduction_node_id`**: Public entry node to the blinded route.
-- **`blinding_point`**: 33-byte ephemeral public key used by hops to derive blinding factors.
-- **`blinded_hops`**: Sequence of hops with encrypted onion payloads and blinded node IDs.
+## Completion criteria
 
-In SatsPath's routing engine, offers containing valid blinded paths receive an increased **privacy score** (9/10 vs 7/10 for standard Lightning), signaling enhanced sender/receiver unlinkability.
+Tracked in [roadmap H8 / #208](https://github.com/satspath/satspath/issues/208):
 
-### 3. Bolt12InvoiceRequest
-- **HRP:** `lnr` / `lnrt`.
-- Created by the payer when initiating payment.
-- Contains `offer_id` (computed as the BOLT12 all-TLV Merkle tree root over the offer's TLV stream via `tlv_merkle_root`), `invreq_amount`, `payer_node_id`, optional `payer_note`, and a BIP-340 Schnorr signature.
-
-### 4. Bolt12Invoice
-- **HRP:** `lni` / `lnit` / `lnib` / `lnis` (mainnet/testnet/regtest/signet).
-- Issued by the offer recipient's Lightning node.
-- Validated before handoff:
-  - Exact match of requested vs invoice millisatoshis.
-  - Confirmation of non-expired validity window.
-  - Verification of 32-byte cryptographic payment hash.
-
----
-
-## Configuration and Gateway Transport
-
-SatsPath delegates Lightning peer-to-peer onion message transmission to an external gateway or node RPC:
-- **Environment Variable:** `SATSPATH_BOLT12_PROXY`
-  - URL pointing to a BOLT12-capable proxy endpoint (e.g. `https://bolt12-proxy.satspath.dev`).
-- **Host signing:** implement `Bolt12Signer` in the host wallet or node. SatsPath supplies public TLVs and verifies the returned signature; private keys and credentials stay in the host.
-- Test signing implementations live in `tests/support`; production mock key generation is unavailable.
-
----
-
-## Safety and Security Bounds
-
-1. **No Spending Authority:** SatsPath never holds node credentials, channel funds, or private keys used for fund transfers.
-2. **Strict Amount Bounds:** Invoices exceeding offer bounds (`min_amount_msats`, `max_amount_msats`, or fixed amounts) are rejected immediately.
-3. **No Private Material:** Payment pointers and invoice requests are audited before return to guarantee zero leakage of secret keys or seed material.
+1. Unify the client/proxy contract, including amount units and error responses.
+2. Replace dummy responses with an explicitly configured real node transport.
+3. Validate the invoice against offer, payee, amount, chain, expiry and signatures.
+4. Integrate explicit host approval and retain wallet-controlled signing/execution.
+5. Record versions and reproducible external wallet evidence before removing the
+   corresponding handoff gate. Keep test-network evidence distinct from mainnet.

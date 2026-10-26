@@ -32,6 +32,10 @@ fails closed for execution.
 
 ## Current Status
 
+- Daemon receive currently builds a private `satspath:ark?...` pointer that is
+  rejected by the final handoff gate. Standard `bitcoin:?ark=...` reception has
+  a pending ignored acceptance test; see [#186](https://github.com/satspath/satspath/issues/186).
+  General payable quotes remain gated, regardless of the component APIs below.
 - Ark route planning and scoring are implemented.
 - Live Ark ASP client connector (`LiveArkAspClient`) queries ASP signer public keys, unilateral exit delays, and dust limits (`/v1/info`).
 - VTXO covenant tree DAG verification (`verify_ark_vtxo_dag`) and non-custodial host-wallet settlement handoff structures (`ArkBoardingHandoff`, `ArkForfeitHandoff`, `ArkOorPaymentRequest`) are implemented in `crates/satspath-router/src/ark.rs`.

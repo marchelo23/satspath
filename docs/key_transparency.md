@@ -138,6 +138,10 @@ Read APIs cover status, paginated events/checkpoints, identifier/event/checkpoin
 
 ## Threats and limitations
 
+- Witness/quorum primitives are not yet integrated into daemon cosignature
+  collection/verification. Its v2 envelope has no witness signatures; references
+  to quorum below describe defenses only when a consumer actually enforces them.
+  See [current S2S server status](s2s/server-v2.md).
 - Initial registration still needs a verifiable binding to the human-readable namespace.
 - First contact is TOFU unless the namespace-to-key binding is independently verified out-of-band or confirmed through a trusted identity anchor. Witness quorums improve consistency and split-view detection but do not by themselves authenticate the initial binding.
 - A compromised verifier can attest a false binding.

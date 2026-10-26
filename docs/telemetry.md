@@ -3,7 +3,7 @@
 `satspathd` includes built-in observability across three pillars (`crates/satspathd/src/telemetry/`):
 
 1. **Prometheus Metrics (`GET /metrics`)**
-2. **Deep Dependency Health Probes (`GET /health`, `GET /v1/health`, `GET /v2/health`)**
+2. **Separate liveness, dependency health, and S2S readiness endpoints**
 3. **Structured Request Tracing (`X-Request-ID`)**
 
 ---
@@ -20,22 +20,38 @@
 | `satspathd_http_request_duration_seconds` | Histogram | `method`, `endpoint` | HTTP request latency in seconds (`0.005` to `10.0`s buckets). |
 | `satspathd_profile_resolution_total` | Counter | `status`, `cache_hit` | Total count of receiver profile resolutions. |
 | `satspathd_profile_resolution_duration_seconds` | Histogram | `status` | Duration of receiver profile resolution in seconds. |
-| `satspathd_fee_api_requests_total` | Counter | `source`, `status` | Total count of external fee API requests (`mempool`, `esplora`, `bitcoind`). |
-| `satspathd_fee_api_latency_seconds` | Histogram | `source`, `status` | Latency of external fee API requests in seconds. |
+| `satspathd_fee_api_requests_total` | Counter | `source`, `status` | Instrumented aggregate fee probes (`source="combined"`), not a complete per-provider request count. |
+| `satspathd_fee_api_latency_seconds` | Histogram | `source`, `status` | Aggregate probe latency; do not infer individual provider latency from this series. |
 | `satspathd_transparency_checkpoint_age_seconds` | Gauge | *(none)* | Age of the latest transparency log checkpoint in seconds. |
 | `satspathd_rate_limit_dropped_total` | Counter | `reason` | Total requests dropped due to rate limiting (`rate_limited`) or payload cap (`payload_too_large`). |
 
 ---
 
-## 2. Deep Health Endpoints (`GET /health`, `/v1/health`, `/v2/health`)
+## 2. Health endpoints have different contracts
 
-Health endpoints evaluate three live subsystem dependencies and return `HTTP 200 OK` when healthy or `HTTP 503 Service Unavailable` when a critical dependency (`sqlite` or `transparency_log`) is unhealthy:
+| Endpoint | Current checks | HTTP status |
+| --- | --- | --- |
+| `GET /health` | Static liveness response `{"ok":true,"status":"healthy"}` | 200; not dependency health or quorum readiness |
+| `GET /v1/health` | SQLite, fees and transparency dependency probes below | 200 for `healthy` **or `degraded`**, 503 for `unhealthy` |
+| `GET /v2/health` | S2S readiness fields including checkpoint age and quorum status | Currently 503: the daemon passes quorum-not-satisfied and does not verify witness signatures or serve replicas |
+
+Source: [router](../crates/satspathd/src/router.rs),
+[dependency checks](../crates/satspathd/src/telemetry/health.rs).
+Do not use `/health` to claim a ready authority or describe the three routes as aliases.
+
+`/v1/health` evaluates:
 
 - **`sqlite`**: Verifies that `satspath-transparency-v1.sqlite3` exists, opens cleanly, and is writable.
 - **`fee_api`**: Checks freshness of the multi-source fee cache or executes a bounded `500ms` probe.
-- **`transparency_log`**: Verifies checkpoint integrity, tree size, and updates `satspathd_transparency_checkpoint_age_seconds`.
+- **`transparency_log`**: Loads local transactional log state and checks checkpoint age. Older than 24 hours is degraded; an empty readable log has age zero and is not proof of a witnessed checkpoint.
 
-### Example Response
+Deep health responses are cached for five seconds per home/network. The daemon
+also starts a background refresher every 30 seconds for checkpoint-age and fee
+metrics; scraping `/metrics` itself does not perform the dependency probes.
+Fee fallback can produce `degraded` while `ok` remains true. Check the JSON
+dependency states, not only the HTTP status.
+
+### Illustrative `/v1/health` response
 
 ```json
 {
@@ -61,12 +77,17 @@ Health endpoints evaluate three live subsystem dependencies and return `HTTP 200
     "transparency_log": {
       "status": "healthy",
       "latency_ms": 0.81,
-      "log_size": 128,
-      "consistency_status": "valid"
+      "checkpoint_count": 3,
+      "latest_checkpoint_age_secs": 60,
+      "is_stale": false
     }
   }
 }
 ```
+
+The example is not an observed current run; fields depend on cache/probe results.
+Prometheus rules and Grafana assets in `monitoring/` are configuration examples,
+not evidence of working alert delivery. Configure and test notification routing separately.
 
 ---
 

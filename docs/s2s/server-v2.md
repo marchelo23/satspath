@@ -1,58 +1,55 @@
-# SatsPath v2 Authoritative Server
+# SatsPath v2 server: implementation status and target contract
 
-## Overview
+This page separates the current `satspathd` routes from the broader
+[S2S v2 specification](protocol-v2.md). It is not evidence of a deployed,
+witnessed authority or complete replication/migration support.
 
-The SatsPath v2 server is an authoritative, network-facing identity resolution service that hosts one or more namespaces and returns proof-carrying resolution envelopes. It is strictly a discovery layer: it does not sign or broadcast payments and accepts no wallet spending secrets. Every `ResolutionEnvelope` delivers mandatory cryptographic evidence (`signed_profile`, `name_events`, `inclusion_proof`, and `checkpoint`), while optional extended proofs (`consistency_proof`, `current_state_proof`, and `witness_cosignatures`) are populated when requested by the client or configured by the namespace operator.
+## Implemented daemon routes
 
-## V2 API Endpoints
+| Route | Current behavior |
+| --- | --- |
+| `GET /.well-known/satspath-authority` and `GET /v2/namespace` | Builds the local namespace descriptor, including configured witness policy |
+| `GET /v2/resolve?identifier=...` and `POST /v2/resolve` | Builds an envelope from the local transactional store; POST avoids putting the identifier in the URL |
+| `GET /v2/health` | Reports checkpoint age, quorum health and replica count; currently degraded/503 because quorum is false and replica count is zero |
 
-### `GET /.well-known/satspath-authority`
+The current envelope contains the stored signed profile, name-event history,
+inclusion proof and checkpoint. It attempts a current-state proof and checks its
+binding when the checkpoint contains `map_root`. However:
 
-Returns the signed `NamespaceDescriptor` for the hosted domain, including the operator public key, witness quorum policy, and endpoint list.
+- `consistency_proof` is currently `None` in this envelope builder.
+- `witness_cosignatures` is currently an empty list.
+- A witness policy in the descriptor does not collect or verify cosignatures.
+- Daemon quote/pay/send use the local verified-state path, not an integrated
+  remote-authority discovery/replication pipeline.
 
-### `GET /v2/resolve` / `POST /v2/resolve`
+Sources: [router](../../crates/satspathd/src/router.rs),
+[resolve builder](../../crates/satspathd/src/handlers/resolve.rs),
+[descriptor construction](../../crates/satspathd/src/handlers/transparency.rs),
+[health response](../../crates/satspathd/src/v2_api.rs).
 
-Accepts `identifier` query parameter (or POST body `{"identifier": "..."}` to avoid placing sub-identifiers directly into URL query parameters) and returns a `ResolutionEnvelope` containing:
+## Not implemented as a daemon route
 
-- The signed payment profile (`signed_profile`).
-- All name events for the identifier (`name_events`).
-- Merkle inclusion proof binding the event to the log (`inclusion_proof`).
-- The latest signed checkpoint (`checkpoint`).
-- Consistency proof (if requested or pinned) (`consistency_proof`).
-- Current-state map proof (when configured) (`current_state_proof`).
-- Witness cosignatures (when witness quorum is configured) (`witness_cosignatures`).
+`GET /v2/checkpoint/latest` is a constant in `v2_api.rs`, but has no router handler
+and returns 404. Do not call it as an available API. Existing v1 checkpoint routes
+are listed in the [HTTP API reference](../API_REFERENCE.md); they do not substitute
+for a witness-cosigned v2 checkpoint service.
 
-### `GET /v2/checkpoint/latest`
+## Target verified resolution pipeline
 
-Returns the latest signed `TransparencyCheckpoint` with its attached witness cosignatures.
+The specification requires clients to compose namespace binding, owner/profile
+validation, current-state evidence, append-only continuity, operator/witness
+policy, and payment-method ownership before routing. Those requirements must
+not be read as a claim that every step is integrated into the current server.
 
-### `GET /v2/health`
+Quorum integration and independent operation are tracked in
+[roadmap H6](../../ROADMAP.md#h6--p1--integrated-quorum-and-multi-operator-operations).
+Replication and migration documents describe target contracts, not runnable
+daemon provisioning instructions.
 
-Returns readiness status, version, checkpoint age, witness quorum health, and replica lag metrics.
+## Deployment boundary
 
-## Resolution Pipeline
-
-```text
-canonical identifier
--> discover authoritative namespace
--> fetch proof envelope
--> verify namespace binding
--> verify owner event/profile
--> verify current-state proof
--> verify append-only inclusion + consistency
--> verify operator continuity + witness policy
--> verify method ownership
--> route
-```
-
-Every quote/pay/preview path must consume the same verified result. Legacy data or transport responses must not bypass this composition.
-
-## Security Requirements
-
-- HTTPS required in deployment; strict origin/redirect rules in the client.
-- Atomic SQLite persistence remains fail-closed under crashes.
-- Bounded request/response bodies, proof depths, histories, concurrency, and timeouts.
-- Rate limits per namespace/IP without changing cryptographic truth.
-- SSRF prevention through descriptors, payment-method metadata, redirects, and replica URLs.
-- No logging of auth tokens, challenges, full sensitive request metadata, or any private keys.
-- Multi-tenant namespace separation prevents cross-namespace reads, writes, proof reuse, and key confusion.
+Keep spending secrets out of the API. The local daemon may persist a separate
+identity key and admin token; its storage is not exclusively public data.
+Configure TLS/proxy, hostname allow-list, access controls, consistent backups and
+resource limits explicitly. See [deployment limits](../../deploy/README.md),
+[telemetry](../telemetry.md), and [mainnet safety](../mainnet_safety.md).

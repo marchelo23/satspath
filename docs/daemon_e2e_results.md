@@ -1,5 +1,10 @@
 # Daemon end-to-end results (regtest)
 
+> **Recorded local exercise, not a fresh test run.** Use
+> [automated daemon E2E tests](../crates/satspathd/tests/e2e_daemon_flow.rs) and
+> [their workflow](../.github/workflows/daemon-e2e.yml) for reproducible coverage.
+> The observations below do not prove a positive quote→external-wallet payment.
+
 These results come from a local end-to-end exercise against Bitcoin Core 29.4.
 The external Core wallets signed every Bitcoin transaction; the daemon's
 payment endpoints only produced handoff previews. The throwaway test harness,

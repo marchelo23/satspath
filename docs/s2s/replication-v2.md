@@ -1,5 +1,9 @@
 # SatsPath v2 Verified Replication & Failover
 
+> **Target protocol design, not a deployment guide.** The current daemon does not
+> serve replicas or integrate witness cosignature verification; no runnable pull
+> replication service is claimed here. See [server implementation status](server-v2.md).
+
 ## Overview
 
 Cryptography prevents a server from forging identity state, but cannot prevent censorship or downtime. Server-to-server replication ensures availability, monitoring, and sovereign operation without reintroducing trust in whichever mirror responds fastest.

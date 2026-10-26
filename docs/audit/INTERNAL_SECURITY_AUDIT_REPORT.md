@@ -1,5 +1,10 @@
 # 🛡️ SatsPath — Internal Security Penetration & Vulnerability Audit Report
 
+> **Historical internal report (September 2026).** Preserve the results below as
+> recorded, not as a current-checkout test certification or independent external
+> audit. For current integration limits, see the [capability matrix](../README.md)
+> and [required external review scope](EXTERNAL_CRYPTO_REVIEW_SPEC.md).
+
 > **Target Repository:** `satspath/satspath`  
 > **Auditor Role:** Ethical Hacker / Internal Security Reviewer  
 > **Reference Issue:** [#84 (B1)](https://github.com/satspath/satspath/issues/84)  

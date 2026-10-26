@@ -23,11 +23,11 @@
 | :--- | :--- | :--- |
 | **Mainnet Profile Resolution** | **Supported** | SatsPath (Core / Resolvers) |
 | **Mainnet Lightning Discovery (LNURL/LN Address)** | **Supported** | SatsPath (Router) |
-| **BOLT12 Handling & Blinded Paths** | **Supported** (Checksumless BOLT12 decoding, all-TLV Merkle signing, BOLT #4 blinded paths, and CLN/LDK onion message `invoice_request` interoperability) | SatsPath (Router) |
+| **BOLT12 Handling & Blinded Paths** | **Component APIs implemented** (decoding, Merkle signing, blinded paths and `invoice_request` transport abstraction; live CLN/LDK interoperability not established) | SatsPath (Router), host transport integration pending |
 | **Mainnet On-Chain Address Discovery (BIP-21)** | **Supported** | SatsPath (Router) |
 | **Silent Payments (BIP-352) Primitives** | **Experimental** (Public operations checked against projections of 28 official vector groups; wallet interoperability unverified) | SatsPath (public routing/detection); host wallet (ECDH, private derivation, signing) |
 | **Mainnet Ark Receive Pointer Discovery** | **Supported (Preview)** (Live ASP `/v1/info` client, VTXO DAG verification, and Boarding/Forfeit/OOR handoff builders) | SatsPath (Router) |
-| **Wallet Handoff Generation (URIs, QR codes)** | **Supported** | SatsPath (Router / CLI) |
+| **Wallet Handoff Generation (URIs, QR codes)** | **On-chain payable quotes; CLI BOLT11 with explicit fetching and validation.** BOLT12/Ark/Silent Payments payable paths remain gated; amountless receive is distinct | SatsPath (Router / CLI) |
 | **Non-Custodial Host-Wallet SDK Bridges (`WalletExecutor`)** | **Supported** for BDK/LDK; quote execution requires current local state, SMT and log proofs, a pinned checkpoint, a nonzero witness quorum, and independent gossip evidence. Legacy Boltz P2WSH claims/refunds support **Testnet/Regtest only** with authenticated host-provided swap terms and confirmed unspent lockup evidence; Mainnet, Taproot and cross-chain execution remain disabled (`crates/satspath-router/src/wallet_executor.rs`) | Host Wallet Signs & Broadcasts |
 | **Mainnet Payment Execution by SatsPath** | **Unsupported / Out of Scope** | **Host Wallet Only** |
 | **User Payment Transaction Signing (PSBT / Schnorr / ECDSA)** | **Unsupported / Out of Scope** | **Host Wallet Only** |
@@ -45,7 +45,7 @@ SatsPath operates strictly on **public payment data** to generate wallet handoff
 1. **Resolve:** Fetches the signed profile for the given identifier.
 2. **Verify:** Validates cryptographic signatures, sequence freshness, and expiration.
 3. **Route:** Evaluates fees and policies across available receiving methods.
-4. **Handoff:** Formats the selected method into a wallet handoff payload (`bitcoin:` URI, BOLT11 invoice, experimental BOLT12 structure, Ark pointer, or QR code), subject to the capability-specific maturity and interoperability limits documented above.
+4. **Handoff:** Emits a validated on-chain `bitcoin:` URI, or CLI BOLT11 after explicit fetching and validation. Experimental route structures and amountless receive pointers are not payable quotes. See the [capability matrix](README.md).
 5. **Execution:** The host wallet scans or receives the handoff payload (or integrates via `WalletExecutor` / `HostWalletSdkBridge`), prompts the user for confirmation, signs with the user's spending key, and broadcasts to the Bitcoin or Lightning network.
 
 Safe CLI preview commands:
@@ -69,7 +69,7 @@ BIP-353 resolution is a preview layer: SatsPath resolves and displays DNSSEC-bac
 * **Ambiguity is Invalid:** More than one `bitcoin:` TXT record at a single name, or an unknown `req-*` parameter, causes resolution to fail closed.
 * **Zero Private Material:** No private material may ever appear in a published or resolved DNS payload (`seed`, `xprv`, `mnemonic`, `macaroon`, `cert`, `api_key`, `claim_key`, `refund_key`, `preimage`) — screened on both publish and resolve.
 * **Cryptographic Authorization:** DNSSEC cryptographically authorizes the DNS record, while the signed profile (including its `secp256k1` identity-key signature) remains strictly required for profile-based payments. Email inbox access alone never authorizes a payment-instruction change.
-* **Consumer Domains:** Consumer email domains (e.g. `gmail.com`) cannot use direct BIP-353 DNS; they fall back to platform verification or the invite flow.
+* **Consumer Domains:** Users cannot publish direct BIP-353 records under consumer email domains (e.g. `gmail.com`) without provider cooperation. Platform verification is a scaffold and daemon production claiming is disabled without real attestation; do not present either as a working automatic fallback.
 
 ---
 

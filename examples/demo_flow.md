@@ -1,192 +1,79 @@
-# SatsPath Demo Flow
+# SatsPath CLI demonstration
 
-This document shows a complete example session using the SatsPath CLI.
+Run from the repository root. This demonstrates local public-profile handling,
+not a funded payment or production alias attestation. No fabricated success logs
+are provided: inspect the actual output of your checkout.
 
-## Setup
-
-```bash
-cd ~/Desktop/satspath
-cargo build --release
-```
-
-## Step-by-step
-
-### 1. Initialize
+## 1. Build and isolate local state
 
 ```bash
-satspath init
+cargo build -p satspath-cli
+export SATSPATH_DIR="$(mktemp -d)"
+./target/debug/satspath init
 ```
 
-Output:
+`init` creates the local registry. The directory selected by `SATSPATH_DIR`
+will also hold protocol identity keys as later commands create them. Those are
+not spending keys; protect them and do not publish this directory.
 
-```
-Created .satspath/registry.json
-Created .satspath/keys.json
-
-SatsPath initialized at .satspath/
-NOTE: .satspath/ is git-ignored and stays local to this machine.
-```
-
-### 2. Register
+## 2. Create and inspect a local identity profile
 
 ```bash
-satspath register rodrigo@satspath.dev
+./target/debug/satspath register alice@example.com
+./target/debug/satspath show alice@example.com
+./target/debug/satspath export alice@example.com
 ```
 
-Output:
+`register` uses the alias as its default Lightning Address, creates a random
+identity key, stores the signed profile and identity key locally, and attempts
+publication to configured/default Nostr relays. **This step makes network calls**;
+relay publication may fail while local registration succeeds. Use a disposable
+alias and do not treat publication as proof of control of `example.com`.
 
-```
-Registered: rodrigo@satspath.dev
-Identity pubkey: 02a1b2c3...
-Fingerprint:     a1b2c3d4
+The default profile has no method ownership proofs and no guardian recovery
+policy. Its signature is not evidence that a payable method is available.
 
-Payment methods registered:
-  - Lightning Address
-  - Bitcoin on-chain (primary)
-  - Bitcoin on-chain (secondary, privacy address)
-  - Ark
-
-Profile signed and stored in .satspath/registry.json
-DEMO secret key stored in .satspath/keys.json (git-ignored)
-```
-
-### 3. Show
+## 3. Encode a request
 
 ```bash
-satspath show rodrigo@satspath.dev
+./target/debug/satspath encode alice@example.com 21000 --memo coffee
 ```
 
-Output:
+Copy the generated `satspath:v1:...` value and pass it to:
 
-```
-Alias:           rodrigo@satspath.dev
-Identity pubkey: 02a1b2c3...
-Fingerprint:     a1b2c3d4
-Signature valid: yes
-Updated at:      1735000000
-
-Methods:
-  - Lightning Address [Lightning]
-      Lightning Address: rodrigo@satspath.dev
-  - Bitcoin (primary) [On-chain]
-      Address: bc1qa1b2...
-  - Bitcoin (secondary) [On-chain]
-      Address: bc1qb3c4...
-  - Ark [Ark]
-      Server: ark.satspath.dev
+```text
+./target/debug/satspath decode '<generated URI>'
 ```
 
-### 4. Encode a payment request
+Encoding a request does not reserve or transfer funds.
+
+## 4. Inspect routing and ownership requirements
 
 ```bash
-satspath encode rodrigo@satspath.dev 21000 --memo "coffee"
+./target/debug/satspath quote alice@example.com 21000 --json
+./target/debug/satspath prove alice@example.com --method-index 0
+./target/debug/satspath attach-proof --help
 ```
 
-Output:
+The default Lightning pointer is not an amount-bound invoice, and the method is
+not ownership-verified. Do not expect a payable QR or a successful payment from
+this fixture. `prove` displays a challenge, not a completed proof. Use proof
+material from the wallet or domain you actually control, following the command's
+supported proof type; never attach synthetic signatures to bypass verification.
 
-```
-Encoded SatsPath URI:
-satspath:v1:eyJ2ZXJzaW9uIjoxLCJhbGlhcyI6InJvZHJpZ29Ac2F0c3BhdGguZGV2IiwiYW1vdW50X3NhdHMiOjIxMDAwLCJtZW1vIjoiY29mZmVlIiwicHJvZmlsZV9oaW50IjpudWxsfQ
-```
+The CLI's explicit `--fetch-lnurl-invoice` preview option can fetch a BOLT11 only
+when its payee, network, amount and expiry checks succeed. See
+[mainnet preview limits](../docs/mainnet_safety.md). BOLT12/Ark/Silent Payments
+payable handoffs remain gated.
 
-### 5. Decode
+## 5. Understand invite and daemon limits
 
-```bash
-satspath decode "satspath:v1:eyJ2ZXJzaW9uIjoxLCJhbGlhcyI6InJvZHJpZ29Ac2F0c3BhdGguZGV2IiwiYW1vdW50X3NhdHMiOjIxMDAwLCJtZW1vIjoiY29mZmVlIiwicHJvZmlsZV9oaW50IjpudWxsfQ"
-```
+Invites do not escrow money. The default claim URL is a placeholder, and daemon
+claiming is disabled without real alias attestation; the mock is devnet/regtest
+only. See [invite flow](../docs/invite_flow.md).
 
-Output:
-
-```
-Decoded payment request:
-  Version:     1
-  Alias:       rodrigo@satspath.dev
-  Amount:      21000 sats
-  Memo:        coffee
-  Profile hint:(none)
-```
-
-### 6. Get a quote
-
-```bash
-satspath quote rodrigo@satspath.dev 21000
-```
-
-Output:
-
-```
-Resolving alias 'rodrigo@satspath.dev'...
-Verifying signature...
-Signature valid.
-Checking payment rails for 21000 sats...
-
-Route Quote:
-  Selected rail:   Lightning
-  Label:           Lightning Address
-  Reason:          Amount (21000 sats) is below 100000 sats threshold and Lightning is available.
-  Estimated fee:   2 sats
-  Confirmation:    instant
-```
-
-### 7. Simulate payment
-
-```bash
-satspath pay rodrigo@satspath.dev 21000
-```
-
-Output:
-
-```
-─────────────────────────────────────────
-SatsPath Payment Simulation
-─────────────────────────────────────────
-Resolving alias 'rodrigo@satspath.dev'...
-  Found profile.
-Verifying signed profile...
-  Signature valid.
-Checking available payment rails...
-  Route selected: Lightning
-
-Selected route: Lightning
-Reason:         Amount (21000 sats) is below 100000 sats threshold and Lightning is available.
-Estimated fee:  2 sats
-
-Executing simulated payment of 21000 sats to rodrigo@satspath.dev...
-  [Lightning] Generating invoice from rodrigo@satspath.dev...
-  [Lightning] Invoice received.
-  [Lightning] Sending payment...
-
-Payment status: simulated_success
-
-DISCLAIMER: This is a simulation. No real Bitcoin was moved.
-```
-
-### 8. Invite flow for unknown user
-
-```bash
-satspath invite julian@example.com 21000
-```
-
-Output:
-
-```
-'julian@example.com' is not registered on SatsPath.
-
-Invite link:
-https://satspath.local/claim?alias_hash=a1b2c3d4e5f6g7h8&amount=21000
-
-Alias hash:  sha256(julian@example.com)
-Amount:      21000 sats
-Created at:  1735000000
-
-WARNING: The receiver must claim this payment by generating their own keys locally.
-         SatsPath never holds or generates keys on behalf of users.
-```
-
-### 9. Run full demo automatically
-
-```bash
-satspath demo
-```
-
-Runs all of the above steps in sequence.
+For actual recorded regtest observations, read
+[daemon E2E results](../docs/daemon_e2e_results.md). For automated coverage, inspect
+[the black-box tests](../crates/satspathd/tests/e2e_daemon_flow.rs).
+A positive ownership-verified external-wallet journey is tracked in
+[roadmap H2](../ROADMAP.md#h2--p0--positive-end-to-end-on-chain-journey).

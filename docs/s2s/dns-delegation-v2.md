@@ -1,5 +1,10 @@
 # SatsPath v2: DNSSEC Delegation
 
+> **Namespace delegation specification.** This is distinct from native BIP-353
+> payment-record resolution. The CLI `dns check` and `server init/check` commands
+> are stubs, not provisioning/validation tools for this design. See
+> [server status](server-v2.md) and [deployment limits](../../deploy/README.md).
+
 ## Overview
 
 To provide strong, cryptographic binding between a domain-based identifier (e.g., `alice@example.com`) and its authoritative resolving server, SatsPath uses DNSSEC. This document specifies how a namespace owner configures their DNS to prove authority to SatsPath resolvers.

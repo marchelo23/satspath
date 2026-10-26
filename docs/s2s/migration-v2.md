@@ -1,5 +1,11 @@
 # SatsPath v2 Server Migration & Identifier Portability
 
+> **Target protocol design.** The CLI `migration export/verify` commands currently
+> print “Feature coming soon!”; they do not produce or verify a server-state
+> export. Profile-level `export/import` is a different feature. Do not use this
+> document as an executable migration runbook. See [server status](server-v2.md)
+> and [CLI dispatch](../../crates/satspath-cli/src/main.rs).
+
 ## Overview
 
 A domain owner must be able to move from one SatsPath server to another while keeping `user@domain`, owner keys, histories, and verifier trust intact. Endpoint ownership and identity ownership are strictly decoupled.

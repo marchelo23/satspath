@@ -2,6 +2,13 @@
 
 > **Security Notice:** SatsPath is experimental, non-custodial software designed for Bitcoin payment discovery, profile verification, and route selection. SatsPath does not hold user funds, does not manage private spending keys or seed phrases, and does not execute mainnet payments. All transaction signing and fund execution are delegated to host wallets. Independent external cryptographic and security audits remain a prerequisite before production deployment with real funds.
 
+> **Implementation scope:** This threat model includes required/target defenses,
+> not just completed runtime integrations. The daemon currently has no integrated
+> witness cosignature verification or replicas; WASM lacks native resolver parity.
+> See the [capability matrix](README.md). Local identity keys may be persisted,
+> and the separate opt-in regtest anchor path uses operator Core RPC credentials;
+> these are not user spending keys or production payment execution.
+
 ---
 
 ## 1. Scope & Core Architectural Invariants
@@ -12,7 +19,7 @@ This document establishes the threat model for the SatsPath protocol prototype, 
 
 1. **Non-Custodial Separation:** SatsPath never generates, stores, or transmits Bitcoin spending keys, wallet seeds, BIP-39 mnemonics, or Lightning macaroons. Identity keypairs (`secp256k1`) sign public payment profiles and rotation records; they carry zero spending authority.
 2. **Custody Risk vs. Payment Redirection Risk:** Compromising SatsPath does not directly expose wallet spending keys or authorize Bitcoin transactions. However, a compromised discovery or handoff component may attempt payment redirection, which is why authenticated profiles, key continuity, resolver verification, and wallet-side confirmation of amounts and destinations remain security-critical.
-3. **Payment Execution Sovereignty:** SatsPath discovers and validates payment capabilities, then hands off public instructions (BOLT11/12 invoices, BIP-21 URIs, Ark pointers) to the user's host wallet. The host wallet signs and executes the transaction.
+3. **Payment Execution Sovereignty:** The host wallet signs and executes user payments. Current payable quotes are on-chain, with explicit BOLT11 fetching available in CLI preview paths. BOLT12, Ark and Silent Payments have separate incomplete/gated wallet integration paths.
 4. **No Unauthenticated State:** A resolver or network transport is untrusted. Unverified, malformed, expired, or conflicting profile data fails closed.
 5. **Attributable Operator State:** Servers and log operators must commit to an append-only event history and sign public checkpoints. Signed equivocation can produce attributable cryptographic evidence. Rollback attempts are detected against pinned monotonic state and rejected.
 
@@ -30,7 +37,7 @@ SatsPath avoids collapsing security guarantees into an ambiguous `verified: true
 | **Consistency** | All verifiers observe identical, append-only history without forks. | RFC 6962-style Merkle log, signed checkpoints, witness quorum ($K$-of-$N$) | At least $(N - K + 1)$ honest, non-colluding witnesses | Local pinning detects local forks; global split-views require gossip monitors. |
 | **Namespace Authority** | The human-readable name is published by the legitimate controller. | DNSSEC delegation, HTTPS well-known, Nostr NIP-05 pubkey binding | Integrity of DNS root KSK/ZSK or WebPKI root store | Provider can censor or de-list, but cannot forge identity signatures. |
 | **Payment Method Ownership** | Advertised addresses/nodes belong to the profile owner. | Method ownership proofs (e.g. signed address/pubkey attestations) | Verification of proof parameters against identity key | Unproved methods represent self-asserted receive pointers. |
-| **Availability** | Verifiers can locate and download signed profiles on demand. | Redundant multi-transport resolvers (HTTPS, Nostr relays, local cache) | At least one configured transport endpoint remains reachable | Adversary can deny service or withhold responses; fails to `Unavailable`. |
+| **Availability** | Verifiers can locate and download signed profiles. | Native multi-transport resolvers with disagreement/downgrade policy | Required configured sources agree or explicitly report not found | An outage is not silently downgraded; one reachable source does not guarantee resolution. See [resolver policy](resolvers.md). |
 
 ---
 
@@ -40,7 +47,7 @@ When a client queries an identifier for the very first time without prior out-of
 
 * **What TOFU Protects Against:** Once a client observes and pins an initial checkpoint (`log_id`, operator key, sequence, root hash), subsequent attacks attempting to roll back history, present a lower tree size, or substitute an unauthorized operator key are detected immediately and rejected.
 * **What TOFU Does NOT Protect Against:** If an active man-in-the-middle attacker or rogue namespace operator controls resolution during the *initial first contact*, the client may pin the attacker's fraudulent state, provided the attacker can satisfy transport proofs.
-* **Mitigation via Witness Quorum & Gossip:** S2S v2 requires checkpoints to be cosigned by an independent witness quorum ($K$-of-$N$). A single rogue operator cannot serve an un-witnessed root without failing quorum checks. Future cross-witness gossip can reduce first-contact consistency risk and improve split-view detection, but does not by itself authenticate the initial namespace-to-key binding without out-of-band verification.
+* **Mitigation via Witness Quorum & Gossip:** The S2S v2 specification requires independent quorum evidence. Its guarantees apply only where that policy is actually enforced; the current daemon serves no witness cosignatures. Gossip can improve split-view detection, but neither quorum nor gossip independently authenticates the initial namespace-to-key binding.
 
 ---
 
@@ -108,5 +115,5 @@ Before SatsPath can be recommended for mainnet real-funds settlement:
 
 1. **Independent Cryptographic Audit:** Formal third-party review of canonical serialization, Merkle proof verifiers, key rotation, and domain-separated signing schemes.
 2. **Decentralized Witness Quorum Deployment:** Production deployment of heterogeneous, multi-operator witnesses and gossip monitors with public alert mechanisms.
-3. **Production Alias Attestation:** Replacement of the development-only mock alias verifier (`--dev-mock-alias-verification`, disabled by default and refused on mainnet) with cryptographic domain/inbox attestations.
+3. **Production Alias Attestation:** Replacement of the development-only mock alias verifier (`--dev-mock-alias-verification`, disabled by default and allowed only on devnet/regtest) with real domain/inbox attestation.
 4. **Live Multi-Rail Node & Wallet Interoperability:** End-to-end validation against live Core Lightning / LDK BOLT12 nodes, BIP-352 Silent Payment wallets, and `arkd` servers before enabling non-BIP-21 rails in `satspathd` payable handoff endpoints.

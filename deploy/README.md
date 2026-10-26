@@ -1,61 +1,75 @@
-# Deploying a Sovereign SatsPath Authority
+# Authority deployment: current implementation and limits
 
-This guide explains how to deploy `satspathd` as a **sovereign single-domain authority** or a **multi-tenant hosted provider**.
+`satspathd` can serve local profiles and transparency data, but this checkout is
+not a turnkey production authority. Read the [capability matrix](../docs/README.md),
+[HTTP API](../docs/API_REFERENCE.md), and [release roadmap](../ROADMAP.md) first.
 
-SatsPath allows `name@yourdomain.com` to be realistically deployable without hiding the underlying security model.
+## What is not implemented by the operator commands
 
-## Onboarding Workflow
+`satspath server init <domain>` and `satspath server check <domain>` are
+**output-only stubs** in
+[server.rs](../crates/satspath-cli/src/commands/server.rs). They print example
+records/status text and “Feature coming soon!”, then return success. They do not
+generate an operator identity, provision DNS, validate DNSSEC, or check quorum.
+Do not publish the placeholder key or treat exit code zero as validation.
 
-### 1. Initialize Operator and DNS Records
+## Use the source-built development setup
 
-Run the CLI operator tool to generate your operator keys and output the required DNS records:
+Follow the [Docker guide](../docs/docker.md), which uses the root
+[`docker-compose.yml`](../docker-compose.yml) and local Dockerfile targets.
+
+The adjacent [`deploy/docker-compose.yml`](docker-compose.yml) is an **incomplete
+deployment sketch**, not the verified release path:
+
+- It references `satspath/satspathd:0.1.0`; the repository Docker workflow publishes
+  the CLI image, not that daemon image. Availability of that external tag is not
+  established by the workflow.
+- It publishes `9737` on all host interfaces without configuring native TLS or
+  a reverse proxy. Do not expose it directly to the internet.
+- Its `/health` probe checks liveness only, not dependencies or witness quorum.
+- Setting `SATSPATH_WITNESS_QUORUM` advertises policy; it does not implement
+  cosignature collection or make `/v2/health` ready.
+
+## TLS and hostname configuration
+
+For a native process behind a local TLS proxy, configure the actual authority
+hostname and trust proxy headers only when clients cannot bypass that proxy:
 
 ```bash
-satspath server init yourdomain.com
+SATSPATH_AUTHORITY_DOMAIN=node.example.com \
+  cargo run -p satspathd -- --bind 127.0.0.1:9737 --network regtest \
+  --behind-proxy --require-tls-or-proxy --no-open
 ```
 
-Add the printed `TXT` records to your DNS provider (e.g., Cloudflare, Route53, Bind).
-
-### 2. Verify DNS and Trust Quorum
-
-Once DNS records propagate, verify the DNSSEC chain, operator key, and transparency log:
-
-```bash
-satspath server check yourdomain.com
-```
-
-### 3. Deploy with Docker Compose
-
-We provide a reproducible deployment via Docker Compose. Private user keys **never** reside on the server and are generated locally by users.
-
-Edit `deploy/docker-compose.yml` to set `SATSPATH_AUTHORITY_DOMAIN` and deploy:
-
-```bash
-docker compose -f deploy/docker-compose.yml up -d
-```
-
-### 4. Reverse Proxy TLS Example (Caddy)
-
-We strongly recommend placing `satspathd` behind a TLS-terminating reverse proxy.
-
-**Caddyfile example**:
+Example host-installed Caddy configuration (replace the domain and arrange
+certificate issuance/DNS yourself):
 
 ```caddyfile
-yourdomain.com {
-    reverse_proxy localhost:9737
+node.example.com {
+    @metrics path /metrics
+    respond @metrics "Forbidden" 403
+    reverse_proxy 127.0.0.1:9737
 }
 ```
 
-## Backup & Restore
+This is a transport example, not a production-readiness claim. The root Docker
+Caddyfile instead uses an internal CA for development. Configure public TLS,
+access controls, backups, independent witnesses, and the remaining release gates
+before describing a service as production-ready.
 
-- **Backup**: Backup the `satspath-data` docker volume. Backups exclude user identity private keys because those keys never reside on the server.
-- **Restore**: Restoring a backup preserves the transparency `log_id`, pins, histories, and witness continuity.
+## Identity keys, backups and upgrades
 
-## Upgrade Guidance
+The daemon's local-wallet mode **does** generate and persist a protocol identity
+key in its home. It is not a spending key. Backups may contain identity keys,
+the admin token, databases and trust state; protect them as secrets. Do not claim
+that all deployments keep user identity keys off-server.
 
-Upgrading `satspathd` involves updating the pinned image tag in `deploy/docker-compose.yml` to the desired release and restarting:
+For a consistent development backup, stop writers before copying the complete
+state volume (including any SQLite sidecar files). Keep all writers stopped
+until the copy completes, then restart. A live `tar` of a changing SQLite/WAL
+directory is not a documented consistent snapshot procedure.
 
-```bash
-docker compose -f deploy/docker-compose.yml pull
-docker compose -f deploy/docker-compose.yml up -d
-```
+Restoration must be rehearsed on a fresh volume and checked for log identity,
+profiles, sequences, checkpoints and pins. Updating an image tag alone does not
+prove schema compatibility, witness continuity, or safe downgrade. Recovery and
+upgrade acceptance criteria are tracked in roadmap H7.

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-// Exercise the published examples so edits to the guide change the code tested.
+// Exercise the source-build examples so edits to the guide change the code tested.
 // WASM and BIP-39 are injected: this tests the integration flow, not cryptography.
 const guide = await readFile(new URL('../SDK_QUICKSTART.md', import.meta.url), 'utf8');
 const examples = [...guide.matchAll(/^```typescript\r?\n([\s\S]*?)^```/gm)]
@@ -39,9 +39,9 @@ function successfulQuote(overrides = {}) {
   return {
     status: 'ok',
     recipient: { alias, profile_signature_verified: true },
-    selected_method: { type: 'Lightning' },
+    selected_method: { type: 'Onchain' },
     fee_sats: 1,
-    qr: 'lntb1example',
+    qr: 'bitcoin:tb1qexample?amount=0.00021',
     ...overrides,
   };
 }
@@ -116,9 +116,7 @@ test('identity example propagates seed conversion errors without deriving a key'
 });
 
 for (const [type, qr] of [
-  ['Lightning', 'lntb1example'],
   ['Onchain', 'bitcoin:tb1qexample?amount=0.00021'],
-  ['Ark', 'ark:example?amount=21000'],
 ]) {
   test(`quote example returns the original verified ${type} handoff`, async () => {
     const response = successfulQuote({ selected_method: { type }, qr });
@@ -129,18 +127,18 @@ for (const [type, qr] of [
       return response;
     }, output);
 
-    assert.strictEqual(await resolveAndQuote(alias, 21_000n), response);
-    assert.deepEqual(calls, [[alias, 21_000n]]);
+    assert.strictEqual(await resolveAndQuote(alias, 21_000), response);
+    assert.deepEqual(calls, [[alias, 21_000]]);
     assert.deepEqual(output.logs, [
       ['Selected Method:', type],
       ['Estimated Fee (sats):', 1],
-      ['Validated Handoff Payload:', qr],
+      ['Preview Payload:', qr],
     ]);
   });
 }
 
-for (const amount of [1n, 21_000_000n * 100_000_000n, 2n ** 64n - 1n]) {
-  test(`quote example preserves bigint amount ${amount} without rounding`, async () => {
+for (const amount of [1, 21_000, 21_000_000 * 100_000_000]) {
+  test(`quote example preserves supported number amount ${amount} without rounding`, async () => {
     const calls = [];
     const response = successfulQuote();
     const resolveAndQuote = createResolveAndQuote(async (...args) => {
@@ -157,7 +155,7 @@ for (const fee of [0, null]) {
     const response = successfulQuote({ fee_sats: fee });
     const output = captureConsole();
     const resolveAndQuote = createResolveAndQuote(async () => response, output);
-    assert.strictEqual(await resolveAndQuote(alias, 1n), response);
+    assert.strictEqual(await resolveAndQuote(alias, 1), response);
     assert.deepEqual(output.logs[1], ['Estimated Fee (sats):', fee]);
   });
 }
@@ -173,7 +171,7 @@ for (const verified of [false, undefined]) {
     });
     const output = captureConsole();
     const resolveAndQuote = createResolveAndQuote(async () => response, output);
-    await assert.rejects(resolveAndQuote(alias, 21_000n), {
+    await assert.rejects(resolveAndQuote(alias, 21_000), {
       message: 'Recipient profile signature failed verification',
     });
     assert.deepEqual(output.logs, []);
@@ -184,7 +182,7 @@ test('quote example rejects invalid_signature with the recipient alias', async (
   const output = captureConsole();
   const response = { status: 'invalid_signature', recipient: { alias } };
   const resolveAndQuote = createResolveAndQuote(async () => response, output);
-  await assert.rejects(resolveAndQuote(alias, 21_000n), {
+  await assert.rejects(resolveAndQuote(alias, 21_000), {
     message: `Invalid profile signature for ${alias}`,
   });
   assert.deepEqual(output.logs, []);
@@ -194,7 +192,7 @@ test('quote example rejects no_route and preserves the diagnostic reason', async
   const reason = 'No available rail for this amount';
   const output = captureConsole();
   const resolveAndQuote = createResolveAndQuote(async () => ({ status: 'no_route', reason }), output);
-  await assert.rejects(resolveAndQuote(alias, 21_000n), {
+  await assert.rejects(resolveAndQuote(alias, 21_000), {
     message: `No viable payment rail: ${reason}`,
   });
   assert.deepEqual(output.logs, []);
@@ -204,7 +202,7 @@ test('quote example returns null and displays an invite for an unregistered reci
   const response = { status: 'not_registered', invite: { invite_id: 'example-invite' } };
   const output = captureConsole();
   const resolveAndQuote = createResolveAndQuote(async () => response, output);
-  assert.strictEqual(await resolveAndQuote(alias, 21_000n), null);
+  assert.strictEqual(await resolveAndQuote(alias, 21_000), null);
   assert.deepEqual(output.logs, [['Recipient not registered; invite token:', 'example-invite']]);
 });
 
@@ -212,7 +210,7 @@ test('quote example propagates resolver failures without displaying a payment pa
   const failure = new Error('Resolver unavailable');
   const output = captureConsole();
   const resolveAndQuote = createResolveAndQuote(async () => { throw failure; }, output);
-  await assert.rejects(resolveAndQuote(alias, 21_000n), error => error === failure);
+  await assert.rejects(resolveAndQuote(alias, 21_000), error => error === failure);
   assert.deepEqual(output.logs, []);
 });
 
@@ -221,10 +219,53 @@ test('quote example waits for the resolver before returning or displaying the ha
   const pending = new Promise(resolve => { complete = resolve; });
   const output = captureConsole();
   const resolveAndQuote = createResolveAndQuote(() => pending, output);
-  const running = resolveAndQuote(alias, 21_000n);
+  const running = resolveAndQuote(alias, 21_000);
   assert.deepEqual(output.logs, []);
   const response = successfulQuote();
   complete(response);
   assert.strictEqual(await running, response);
   assert.equal(output.logs.length, 3);
+});
+
+for (const amount of [0, -1, 1.5, NaN, Infinity, 2_100_000_000_000_001, Number.MAX_SAFE_INTEGER, 21_000n]) {
+  test(`quote wrapper rejects unsupported amount ${String(amount)} before calling WASM`, async () => {
+    const resolveAndQuote = createResolveAndQuote(
+      () => assert.fail('Invalid amount must not reach WASM'), captureConsole(),
+    );
+    await assert.rejects(resolveAndQuote(alias, amount), {
+      message: 'Amount must be a positive whole number of sats within Bitcoin supply',
+    });
+  });
+}
+
+for (const type of ['Lightning', 'Bolt12', 'Ark']) {
+  test(`quote wrapper does not advertise ${type} as a supported WASM payable rail`, async () => {
+    const response = successfulQuote({ selected_method: { type } });
+    const output = captureConsole();
+    const resolveAndQuote = createResolveAndQuote(async () => response, output);
+    await assert.rejects(resolveAndQuote(alias, 21_000), { message: 'Unsupported preview rail' });
+    assert.deepEqual(output.logs, []);
+  });
+}
+
+test('quote wrapper rejects unknown statuses', async () => {
+  const resolveAndQuote = createResolveAndQuote(async () => ({ status: 'future_status' }), captureConsole());
+  await assert.rejects(resolveAndQuote(alias, 21_000), { message: 'Unknown quote status' });
+});
+
+test('documented JS amount type agrees with the actual WASM export', async () => {
+  const source = await readFile(new URL('../../crates/satspath-wasm/src/router.rs', import.meta.url), 'utf8');
+  assert.match(source, /pub async fn quote_js\(recipient: &str, amount_sats: f64\)/);
+  assert.match(examples.join('\n'), /amountSats: number/);
+  assert.doesNotMatch(examples.join('\n'), /amountSats: bigint/);
+});
+
+test('native guide uses the current approval API and does not offer a legacy dispatch example', async () => {
+  const source = await readFile(new URL('../../crates/satspath-router/src/wallet_executor.rs', import.meta.url), 'utf8');
+  for (const name of ['prepare_payment_intent', 'execute_quote_handoff']) {
+    assert.ok(guide.includes(name));
+    assert.match(source, new RegExp(`pub (?:async )?fn ${name}\\(`));
+  }
+  const rustExamples = [...guide.matchAll(/^```rust\r?\n([\s\S]*?)^```/gm)].map(match => match[1]);
+  assert.doesNotMatch(rustExamples.join('\n'), /wallet\.(?:pay_bolt11|send_onchain)\(/);
 });
