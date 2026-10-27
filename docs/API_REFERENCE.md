@@ -449,6 +449,14 @@ validated against the daemon network); remove it independently with
 when an amount is requested. Without a rail, receive
 prefers on-chain when `amount_sats` is set and Lightning otherwise.
 
+**Silent Payments compatibility note:** receive, quote, pay, and send responses
+can now contain `sp` URIs, including SP-only methods without a static address.
+This adds response variants; address-only BIP-21 payloads remain unchanged.
+Strict generated clients that accept only `PayableBip21Payload` must be updated
+to handle `PayableOnchainPayload` and `SilentPaymentReceivePointer` where applicable.
+Clients and wallets without Silent Payment support must reject these payloads
+explicitly rather than dropping the `sp` instruction.
+
 `POST /v1/pay` wraps an `ok` quote as `status: wallet_handoff` with
 `payment_payload`, `qr_svg`, and `handoff.daemon_executes_payment: false`.
 
