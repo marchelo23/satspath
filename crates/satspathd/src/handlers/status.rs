@@ -1,10 +1,10 @@
 //! Status, node, and profile response handlers.
 
 use anyhow::Result;
-use satspath_core::{crypto::fingerprint_pubkey, TransactionalTransparencyStore};
+use satspath_core::crypto::fingerprint_pubkey;
 
 use crate::config::AppState;
-use crate::handlers::profile::profile_response;
+use crate::handlers::profile::{profile_response, stored_profile};
 use crate::handlers::wallet::load_wallet;
 use crate::types::{safety_status, NodeResponse, StatusResponse};
 
@@ -17,20 +17,16 @@ pub(crate) fn node_response(state: &AppState) -> Result<NodeResponse> {
 
 pub(crate) fn status_response(state: &AppState) -> Result<StatusResponse> {
     let wallet = load_wallet(&state.home)?;
-    let mut methods = Vec::new();
-    if let Some(alias) = wallet.alias.as_deref() {
-        if let Ok(store) = TransactionalTransparencyStore::open(&state.home) {
-            if let Ok(Some(signed)) = store.profile(alias) {
-                methods = signed
-                    .profile
-                    .methods
-                    .clone()
-                    .into_iter()
-                    .map(|m| m.method_name().to_string())
-                    .collect();
-            }
-        }
-    }
+    let methods = stored_profile(state, &wallet)?
+        .map(|signed| {
+            signed
+                .profile
+                .methods
+                .iter()
+                .map(|m| m.method_name().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
 
     let identity_fingerprint = wallet
         .identity_pubkey

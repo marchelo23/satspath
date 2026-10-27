@@ -580,6 +580,7 @@ async fn acceptance_bolt12_offer_receive_method() {
         .post_auth("/v1/profile/methods", json!({ "bolt12_offer": offer }))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["signature_valid"], true, "{body}");
     assert!(
         body["signed_profile"].to_string().contains(&offer),
         "{body}"

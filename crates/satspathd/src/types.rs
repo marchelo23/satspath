@@ -208,6 +208,7 @@ pub(crate) struct EmailInvite {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ProfileUpdateRequest {
     pub(crate) alias: Option<String>,
     pub(crate) lightning_address: Option<String>,
