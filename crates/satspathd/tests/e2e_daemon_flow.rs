@@ -251,6 +251,7 @@ async fn daemon_boots_and_reports_non_custodial_safety() {
     );
 }
 
+/// Owner mutations, including claims, reject missing and incorrect admin tokens.
 #[tokio::test]
 async fn mutating_routes_require_bearer_token() {
     let d = TestDaemon::spawn("regtest");
@@ -261,6 +262,7 @@ async fn mutating_routes_require_bearer_token() {
         (Method::POST, "/v1/profile/verify"),
         (Method::POST, "/v1/profile/methods"),
         (Method::POST, "/v1/profile/rotate-key"),
+        (Method::POST, "/v1/claim"),
         (Method::POST, "/v1/transparency/anchors"),
     ] {
         for token in [None, Some(wrong.as_str())] {
@@ -497,8 +499,6 @@ async fn live_bip353_strict_dnssec_resolution_through_daemon() {
 
 /// Spec — Silent Payments (BIP-352) as a first-class daemon receive method.
 ///
-/// Spec — Silent Payments (BIP-352) as a first-class daemon receive method.
-///
 /// An SP-configured profile must persist the network-checked pointer in the signed
 /// profile and emit a BIP-321 `bitcoin:?sp=` URI.
 #[tokio::test]
@@ -536,7 +536,11 @@ async fn acceptance_silent_payment_receive_method() {
             json!({ "silent_payment_address": mainnet_sp }),
         )
         .await;
-    assert_ne!(status, StatusCode::OK, "cross-network SP address accepted");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "cross-network SP address accepted"
+    );
 
     let (status, body) = d.post("/v1/receive", json!({ "rail": "onchain" })).await;
     assert_eq!(status, StatusCode::OK, "{body}");

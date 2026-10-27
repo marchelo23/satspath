@@ -75,6 +75,7 @@ fn ensure_invite_claim_enabled(state: &AppState) -> Result<()> {
     Ok(())
 }
 
+/// Claim an invite only in explicit development mock mode after the router's auth gate.
 pub(crate) fn claim_invite_handler(state: &AppState, body: ClaimRequest) -> Result<ClaimResponse> {
     ensure_invite_claim_enabled(state)?;
     // A signature over the profile proves possession of its identity key, not

@@ -340,6 +340,7 @@ pub(crate) struct InspectInviteResponse {
 // Helper to build PaymentMethod list from wallet state
 // ---------------------------------------------------------------------------
 
+/// Build public payment methods from the configured wallet receive pointers.
 pub(crate) fn build_methods(wallet: &WalletState, network: &str) -> Vec<PaymentMethod> {
     let mut methods = Vec::new();
     if let Some(addr) = &wallet.lightning_address {

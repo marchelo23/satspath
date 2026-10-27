@@ -206,7 +206,6 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
     let is_mutation = !matches!(method, Method::Get | Method::Head | Method::Options);
     let is_public_mutation = path == "/v1/receive"
         || path == "/v1/send"
-        || path == "/v1/claim"
         || path == "/v1/dns/resolve"
         || path == "/v1/transparency/verify/inclusion"
         || path == "/v1/transparency/verify/catena"

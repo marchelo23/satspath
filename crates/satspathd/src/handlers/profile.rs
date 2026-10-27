@@ -159,6 +159,7 @@ pub(crate) fn update_profile_methods(
     profile_response(state)
 }
 
+/// Validate receive-method updates against the daemon network before storing them.
 pub(crate) fn apply_method_updates(
     wallet: &mut WalletState,
     network: &str,

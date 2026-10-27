@@ -519,6 +519,7 @@ mod tests {
         .is_err());
     }
 
+    /// Bind SP-only and combined URIs to the exact configured keys, network, and amount.
     #[test]
     fn silent_payment_handoff_validates_bip321_uri() {
         let secp = secp256k1::Secp256k1::new();
@@ -557,5 +558,58 @@ mod tests {
         assert!(validate_payload(&method, &payable, "regtest", Some(50_000)).is_err());
         // Mismatched network
         assert!(validate_payload(&method, &payable, "mainnet", Some(21_000)).is_err());
+
+        let address = segwit_address(Network::Regtest);
+        let mut combined = method.clone();
+        if let PaymentMethod::Onchain { address: addr, .. } = &mut combined {
+            *addr = Some(address.clone());
+        }
+        let combined_receive = format!("bitcoin:{address}?sp={sp}");
+        validate_payload(&combined, &combined_receive, "regtest", None).unwrap();
+        validate_payload(
+            &combined,
+            &format!("{combined_receive}&amount=0.00021000"),
+            "regtest",
+            Some(21_000),
+        )
+        .unwrap();
+
+        let other_sp = crate::silent_payments::create_silent_payment_address_for_network(
+            &spend,
+            &scan,
+            Network::Regtest,
+        )
+        .unwrap();
+        assert_ne!(sp, other_sp);
+        for (selected, uri) in [(&method, &receive), (&combined, &combined_receive)] {
+            assert!(
+                validate_payload(selected, &uri.replace(&sp, &other_sp), "regtest", None,).is_err()
+            );
+            assert!(validate_payload(
+                selected,
+                &format!("{uri}&lightning=attacker"),
+                "regtest",
+                None,
+            )
+            .is_err());
+        }
+
+        let mainnet_sp =
+            crate::silent_payments::create_silent_payment_address(&scan, &spend).unwrap();
+        let mut mismatched = method;
+        if let PaymentMethod::Onchain {
+            silent_payment_pubkey,
+            ..
+        } = &mut mismatched
+        {
+            *silent_payment_pubkey = Some(mainnet_sp.clone());
+        }
+        assert!(validate_payload(
+            &mismatched,
+            &format!("bitcoin:?sp={mainnet_sp}"),
+            "regtest",
+            None,
+        )
+        .is_err());
     }
 }

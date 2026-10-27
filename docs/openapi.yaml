@@ -2461,7 +2461,7 @@ paths:
       tags:
       - Invites
       summary: Claim an invite (explicit insecure devnet/regtest mock only)
-      description: '**Public.** Disabled by default and on mainnet/testnet/signet (HTTP 400 without mutating wallet, invite or log): there is no production email/domain alias-control verifier. Only explicit `--dev-mock-alias-verification` on devnet/regtest allows an insecure local daemon-identity claim with receive methods; it does not establish alias ownership or authorize a trusted payment. An externally supplied `signed_profile` is rejected even in mock mode. In enabled mock mode, 404 unknown invite, 409 already claimed, 400 other validation errors.'
+      description: '**Admin authentication required.** Disabled by default and on mainnet/testnet/signet (HTTP 400 without mutating wallet, invite or log): there is no production email/domain alias-control verifier. Only explicit `--dev-mock-alias-verification` on devnet/regtest allows an insecure local daemon-identity claim with receive methods; it does not establish alias ownership or authorize a trusted payment. An externally supplied `signed_profile` is rejected even in mock mode. In enabled mock mode, 404 unknown invite, 409 already claimed, 400 other validation errors.'
       operationId: claimInvite
       requestBody:
         required: true
@@ -2469,7 +2469,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/ClaimRequest'
-      security: []
+      security:
+      - bearerAuth: []
       responses:
         '200':
           description: Success.
@@ -2485,6 +2486,8 @@ paths:
                 profile_pubkey: 03e0fa79bc28965724d3eee52d58cf0cd11f712462582f42e79a545d13d85aac0b
                 claimed_at: 1782810000
                 message: 'DEVELOPMENT ONLY: insecure mock claim; receiver profile published without email/domain alias-control attestation. Do not treat its signature as proof of alias ownership'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -2927,7 +2930,7 @@ components:
           Testnet: '#/components/schemas/TestnetPayableMethod'
           Signet: '#/components/schemas/SignetPayableMethod'
           Regtest: '#/components/schemas/RegtestPayableMethod'
-      description: Only an on-chain method with a decoded address on the configured network can yield a payable quote.
+      description: An on-chain method needs a validated address and/or BIP-352 Silent Payment key on the configured network to yield a payable quote.
     MainnetPayableMethod:
       allOf:
       - $ref: '#/components/schemas/OnchainMethod'
@@ -2938,11 +2941,13 @@ components:
             enum: [Mainnet]
           address:
             $ref: '#/components/schemas/MainnetAddress'
-        required: [network, address]
-        not:
-          properties:
-            silent_payment_pubkey: {}
-          required: [silent_payment_pubkey]
+          silent_payment_pubkey:
+            type: string
+            pattern: '^(?:sp1|SP1)[A-Za-z0-9]+$'
+        required: [network]
+        anyOf:
+        - required: [address]
+        - required: [silent_payment_pubkey]
     TestnetPayableMethod:
       allOf:
       - $ref: '#/components/schemas/OnchainMethod'
@@ -2953,11 +2958,13 @@ components:
             enum: [Testnet]
           address:
             $ref: '#/components/schemas/TestnetAddress'
-        required: [network, address]
-        not:
-          properties:
-            silent_payment_pubkey: {}
-          required: [silent_payment_pubkey]
+          silent_payment_pubkey:
+            type: string
+            pattern: '^(?:tsp1|TSP1)[A-Za-z0-9]+$'
+        required: [network]
+        anyOf:
+        - required: [address]
+        - required: [silent_payment_pubkey]
     SignetPayableMethod:
       allOf:
       - $ref: '#/components/schemas/OnchainMethod'
@@ -2968,11 +2975,13 @@ components:
             enum: [Signet]
           address:
             $ref: '#/components/schemas/TestnetAddress'
-        required: [network, address]
-        not:
-          properties:
-            silent_payment_pubkey: {}
-          required: [silent_payment_pubkey]
+          silent_payment_pubkey:
+            type: string
+            pattern: '^(?:tsp1|TSP1)[A-Za-z0-9]+$'
+        required: [network]
+        anyOf:
+        - required: [address]
+        - required: [silent_payment_pubkey]
     RegtestPayableMethod:
       allOf:
       - $ref: '#/components/schemas/OnchainMethod'
@@ -2983,11 +2992,13 @@ components:
             enum: [Regtest]
           address:
             $ref: '#/components/schemas/RegtestAddress'
-        required: [network, address]
-        not:
-          properties:
-            silent_payment_pubkey: {}
-          required: [silent_payment_pubkey]
+          silent_payment_pubkey:
+            type: string
+            pattern: '^(?:sprt1|SPRT1)[A-Za-z0-9]+$'
+        required: [network]
+        anyOf:
+        - required: [address]
+        - required: [silent_payment_pubkey]
     MainnetAddress:
       type: string
       minLength: 26
@@ -3031,11 +3042,40 @@ components:
       pattern: '^bitcoin:(?:bcrt1|BCRT1)[A-Za-z0-9]{8,87}\?amount=(?:0|[1-9][0-9]{0,7})\.[0-9]{8}$'
     ReceivePayload:
       oneOf:
-      - $ref: '#/components/schemas/PayableBip21Payload'
+      - $ref: '#/components/schemas/PayableOnchainPayload'
       - $ref: '#/components/schemas/OnchainReceivePointer'
+      - $ref: '#/components/schemas/SilentPaymentReceivePointer'
       - $ref: '#/components/schemas/LightningReceivePointer'
       - $ref: '#/components/schemas/LnurlReceivePointer'
-      description: Amount-less Lightning pointers are receive-only, not payable handoffs. Ark, BOLT12 and Silent Payments fail closed.
+      description: Amount-less Lightning and Silent Payment pointers are receive-only, not amount-bound payable handoffs. Ark and BOLT12 fail closed.
+    SilentPaymentReceivePointer:
+      type: string
+      maxLength: 4096
+      pattern: '^bitcoin:(?:[13][a-km-zA-HJ-NP-Z1-9]{25,34}|(?:bc1|BC1|tb1|TB1|bcrt1|BCRT1)[A-Za-z0-9]{8,87})?\?sp=(?:sp1|tsp1|sprt1|SP1|TSP1|SPRT1)[A-Za-z0-9]+$'
+      description: Amount-less BIP-352 Silent Payment receive pointer, optionally including an on-chain address. The runtime validates the key, checksums, and both networks against the daemon network; the pattern checks shape only.
+    PayableOnchainPayload:
+      oneOf:
+      - $ref: '#/components/schemas/PayableBip21Payload'
+      - $ref: '#/components/schemas/SilentPaymentPayablePayload'
+      description: Canonical amount-bound on-chain URI with an address and/or Silent Payment key. Runtime validation binds the exact method, network, and satoshi amount.
+    SilentPaymentPayablePayload:
+      oneOf:
+      - $ref: '#/components/schemas/MainnetSilentPaymentPayableUri'
+      - $ref: '#/components/schemas/TestnetSilentPaymentPayableUri'
+      - $ref: '#/components/schemas/RegtestSilentPaymentPayableUri'
+    MainnetSilentPaymentPayableUri:
+      type: string
+      maxLength: 4096
+      pattern: '^bitcoin:(?:[13][a-km-zA-HJ-NP-Z1-9]{25,34}|(?:bc1|BC1)[A-Za-z0-9]{8,87})?\?sp=(?:sp1|SP1)[A-Za-z0-9]+&amount=(?:0|[1-9][0-9]{0,7})\.[0-9]{8}$'
+    TestnetSilentPaymentPayableUri:
+      type: string
+      maxLength: 4096
+      pattern: '^bitcoin:(?:(?:tb1|TB1)[A-Za-z0-9]{8,87})?\?sp=(?:tsp1|TSP1)[A-Za-z0-9]+&amount=(?:0|[1-9][0-9]{0,7})\.[0-9]{8}$'
+      description: Testnet and signet use the same address and Silent Payment key prefixes.
+    RegtestSilentPaymentPayableUri:
+      type: string
+      maxLength: 4096
+      pattern: '^bitcoin:(?:(?:bcrt1|BCRT1)[A-Za-z0-9]{8,87})?\?sp=(?:sprt1|SPRT1)[A-Za-z0-9]+&amount=(?:0|[1-9][0-9]{0,7})\.[0-9]{8}$'
     OnchainReceivePointer:
       type: string
       maxLength: 100
@@ -4307,7 +4347,7 @@ components:
         reason:
           type: string
         qr:
-          $ref: '#/components/schemas/PayableBip21Payload'
+          $ref: '#/components/schemas/PayableOnchainPayload'
         execution:
           $ref: '#/components/schemas/ExecutionMode'
         wallet_hint:
@@ -4457,7 +4497,7 @@ components:
           minimum: 1
           maximum: 2100000000000000
         payment_payload:
-          $ref: '#/components/schemas/PayableBip21Payload'
+          $ref: '#/components/schemas/PayableOnchainPayload'
         qr_svg:
           type: string
           description: Self-contained SVG QR.
@@ -4619,7 +4659,7 @@ components:
       description: |
         Inert parser output, NOT a validated wallet handoff. The parser intentionally preserves
         untrusted BIP-321 instructions, even malformed or unsupported rails; do not render these
-        fields as a payment QR. Payable outputs use `PayableBip21Payload` after strict validation.
+        fields as a payment QR. Payable outputs use `PayableOnchainPayload` after strict validation.
     Bip321Onchain:
       type: object
       properties:
@@ -4879,7 +4919,7 @@ components:
           minimum: 1
           maximum: 2100000000000000
         payload:
-          $ref: '#/components/schemas/PayableBip21Payload'
+          $ref: '#/components/schemas/PayableOnchainPayload'
         qr_svg:
           type: string
         safety:
@@ -5359,6 +5399,9 @@ components:
           type: string
         onchain_address:
           type: string
+        silent_payment_address:
+          type: string
+          description: BIP-352 Silent Payment address validated against the daemon network.
         onchain_pubkey:
           type: string
         ark_server:

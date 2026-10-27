@@ -98,6 +98,7 @@ pub(crate) fn receive_view(state: &AppState, req: ReceiveRequest) -> Result<Rece
 }
 
 /// A public, amount-less receive pointer for a method.
+/// Encode an amount-less receive pointer; the caller validates the final payload.
 pub(crate) fn receive_payload_for(method: &PaymentMethod) -> Result<String> {
     let payload = match method {
         PaymentMethod::Lightning {
@@ -567,6 +568,7 @@ SatsPath does not move funds or sign Bitcoin transactions for you."
 
 /// A payable pointer for a method, including the amount where the URI supports it.
 #[cfg(test)]
+/// Encode an amount-bound payment pointer for subsequent handoff validation.
 pub(crate) fn send_payload_for(method: &PaymentMethod, amount_sats: u64) -> Result<String> {
     let payload = match method {
         PaymentMethod::Lightning {
@@ -724,6 +726,7 @@ mod tests {
         .is_empty());
     }
 
+    /// Persisted profiles remain resolvable after restart but require method ownership proofs.
     #[tokio::test]
     async fn send_reads_sqlite_profile_before_and_after_restart_but_requires_ownership() {
         let dir = tempfile::tempdir().unwrap();
@@ -768,6 +771,7 @@ mod tests {
         }
     }
 
+    /// Definitively absent aliases can be invited, but claimed aliases cannot be reinvited.
     #[tokio::test]
     async fn unknown_alias_invites_once_then_claimed_sqlite_alias_cannot_be_reinvited() {
         let dir = tempfile::tempdir().unwrap();

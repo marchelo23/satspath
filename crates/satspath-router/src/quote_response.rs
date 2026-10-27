@@ -173,6 +173,11 @@ pub async fn quote_verified_profile_for_network(
             recipient: recipient_of(&signed.profile, false),
         };
     }
+    if signed.profile.revoked {
+        return QuoteResponse::NoRoute {
+            reason: "Profile revoked.".into(),
+        };
+    }
     signed.profile.methods.retain(|method| {
         allowed_method_descriptors
             .iter()
@@ -200,8 +205,9 @@ pub async fn quote_verified_profile_for_network(
 
 /// Build a public payment payload for a method.
 ///
-/// - **On-chain** — a validated BIP-21 URI: `bitcoin:<address>?amount=<btc>`.
-/// - **Lightning, BOLT12, Ark, Silent Payments** — fail closed until a
+/// - **On-chain** — a validated Bitcoin URI with an address and/or BIP-352 `sp`
+///   receive pointer, bound to the requested amount.
+/// - **Lightning, BOLT12, Ark** — fail closed until a
 ///   network- and amount-bound payload can be validated.
 pub fn build_qr_payload(method: &PaymentMethod, amount_sats: u64) -> satspath_core::Result<String> {
     validate_amount_sats(amount_sats)?;
@@ -334,7 +340,7 @@ where
     .await
 }
 
-/// Validates profile expiry, filters methods to payable QR handoffs, selects a route, and constructs the [`QuoteResponse`].
+/// Check revocation and expiry, filter payable methods, select a route, and build the [`QuoteResponse`].
 async fn route_verified_signed(
     mut signed: satspath_core::SignedPaymentProfile,
     recipient: &str,
@@ -343,6 +349,11 @@ async fn route_verified_signed(
     fees: Option<FeeEstimate>,
     network: &str,
 ) -> QuoteResponse {
+    if signed.profile.revoked {
+        return QuoteResponse::NoRoute {
+            reason: "Profile revoked.".into(),
+        };
+    }
     let recipient_info = recipient_of(&signed.profile, true);
 
     // 3. Expiry (mapped to no_route to keep the frontend contract to four states).
@@ -595,6 +606,69 @@ mod tests {
             recovery: None,
         };
         (profile, kp.secret_key)
+    }
+
+    /// A valid signature and allowed SP descriptor cannot reactivate a revoked profile.
+    #[tokio::test]
+    async fn revoked_silent_payment_profile_never_routes() {
+        let secp = secp256k1::Secp256k1::new();
+        let scan = secp256k1::PublicKey::from_secret_key(
+            &secp,
+            &secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap(),
+        );
+        let spend = secp256k1::PublicKey::from_secret_key(
+            &secp,
+            &secp256k1::SecretKey::from_slice(&[3u8; 32]).unwrap(),
+        );
+        let sp = crate::silent_payments::create_silent_payment_address_for_network(
+            &scan,
+            &spend,
+            bitcoin::Network::Regtest,
+        )
+        .unwrap();
+        let method = PaymentMethod::Onchain {
+            label: "Silent Payments".into(),
+            network: BitcoinNetwork::Regtest,
+            address: None,
+            silent_payment_pubkey: Some(sp),
+            pubkey_hint: None,
+            descriptor_hint: None,
+            address_list: vec![],
+        };
+        build_qr_payload(&method, 21_000).expect("valid SP payment payload");
+        let descriptor = method.ownership_descriptor();
+        let alias = "revoked@example.com";
+        let (mut profile, secret) = base_profile(alias, vec![method]);
+        profile.revoked = true;
+        let signed = sign(profile, &secret);
+        assert!(verify_signed_profile(&signed).unwrap());
+
+        // Both entry and routing boundary reject before filtering or building a payload.
+        for allowed in [vec![descriptor], vec![]] {
+            let response = quote_verified_profile_for_network(
+                signed.clone(),
+                alias,
+                21_000,
+                &allowed,
+                "regtest",
+            )
+            .await;
+            assert!(
+                matches!(response, QuoteResponse::NoRoute { reason } if reason.contains("revoked"))
+            );
+        }
+        let response = route_verified_signed(
+            signed,
+            alias,
+            &identifier_hash(alias),
+            21_000,
+            Some(cheap_fees()),
+            "regtest",
+        )
+        .await;
+        assert!(
+            matches!(response, QuoteResponse::NoRoute { reason } if reason.contains("revoked"))
+        );
     }
 
     /// Builds a test Lightning [`PaymentMethod`].

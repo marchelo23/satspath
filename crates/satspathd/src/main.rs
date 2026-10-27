@@ -769,6 +769,7 @@ mod tests {
         assert_eq!(latest.rotation.as_ref().unwrap().sequence, latest.sequence);
     }
 
+    /// Profile updates commit the configured recovery policy to the signed profile.
     #[test]
     fn update_profile_configures_and_commits_recovery_policy() {
         use satspath_core::recovery::RecoveryPolicy;
@@ -1343,8 +1344,10 @@ mod tests {
         sign_profile(profile, &identity.secret_key).unwrap()
     }
 
+    /// Admin authentication does not bypass the fail-closed alias-control gate.
     #[tokio::test]
-    async fn public_claim_without_mock_rejects_methods_and_valid_external_profile_without_writes() {
+    async fn authenticated_claim_without_mock_rejects_methods_and_valid_external_profile_without_writes(
+    ) {
         let (base_url, server, handle) =
             start_test_daemon_full(rate_limit::RateLimiterConfig::default(), None, false).await;
         let client = reqwest::Client::new();
@@ -1387,6 +1390,7 @@ mod tests {
         ] {
             let response = client
                 .post(format!("{base_url}/v1/claim"))
+                .bearer_auth("test_token")
                 .json(&claim)
                 .send()
                 .await
@@ -1409,6 +1413,7 @@ mod tests {
         handle.abort();
     }
 
+    /// Authenticated development claims still reject external alias-control substitutes.
     #[tokio::test]
     async fn explicit_dev_mock_claim_warns_but_external_profile_stays_rejected() {
         let (base_url, server, handle) =
@@ -1420,6 +1425,7 @@ mod tests {
         let external = client_signed_profile_for_claim();
         let response = client
             .post(format!("{base_url}/v1/claim"))
+            .bearer_auth("test_token")
             .json(&serde_json::json!({
                 "invite_id": invite_id,
                 "alias": "carol@example.com",
@@ -1440,6 +1446,7 @@ mod tests {
 
         let invalid_method = client
             .post(format!("{base_url}/v1/claim"))
+            .bearer_auth("test_token")
             .json(&serde_json::json!({
                 "invite_id": invite_id,
                 "alias": "carol@example.com",
@@ -1464,6 +1471,7 @@ mod tests {
         assert_eq!(inspect["is_claimable"], true);
         let response = client
             .post(format!("{base_url}/v1/claim"))
+            .bearer_auth("test_token")
             .json(&serde_json::json!({
                 "invite_id": invite_id,
                 "alias": "carol@example.com",
@@ -1521,6 +1529,7 @@ mod tests {
         handle.abort();
     }
 
+    /// Development claims must fail before store access on production networks.
     #[test]
     fn mock_claim_is_refused_on_mainnet_and_testnet_before_store_access() {
         for network in ["mainnet", "bitcoin", "testnet", "signet", "unknown"] {
@@ -1553,6 +1562,7 @@ mod tests {
         }
     }
 
+    /// Development claims preserve the authenticated operator's existing wallet.
     #[tokio::test]
     async fn dev_mock_claim_does_not_overwrite_the_operator_wallet() {
         let (base_url, server, handle) =
@@ -1567,6 +1577,7 @@ mod tests {
 
         let response = client
             .post(format!("{base_url}/v1/claim"))
+            .bearer_auth("test_token")
             .json(&serde_json::json!({
                 "invite_id": invite_id,
                 "alias": "carol@example.com",
@@ -1586,6 +1597,7 @@ mod tests {
         handle.abort();
     }
 
+    /// Unknown development invites must not create a new persistent store.
     #[test]
     fn mock_claim_unknown_invite_does_not_create_a_store() {
         let dir = tempfile::tempdir().unwrap();
@@ -2369,6 +2381,7 @@ mod tests {
         }
     }
 
+    /// A development invite can be claimed once and exposes its resulting profile.
     #[tokio::test]
     async fn test_end_to_end_invite_claim_flow() {
         let dir = tempfile::tempdir().unwrap();
@@ -2488,6 +2501,7 @@ mod tests {
         assert_eq!(profile.unwrap().profile.alias, "carol@example.com");
     }
 
+    /// Reject development claims for expired invites or a different recipient alias.
     #[tokio::test]
     async fn test_expired_and_mismatched_claims() {
         let dir = tempfile::tempdir().unwrap();
