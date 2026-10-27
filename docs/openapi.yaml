@@ -1270,10 +1270,9 @@ paths:
       - Resolution & Routing
       summary: Receive payload and QR for own profile
       description: '**Public.** Builds a validated public receive pointer from the local wallet''s configured
-        methods. Lightning Address, LNURL and BOLT12 offers are amount-less receive pointers;
-        BOLT12 returns `bitcoin:?lno=<offer>` only after network/expiry validation. Amount-bound
-        payloads use a validated on-chain BIP-21 URI. Other experimental rails fail closed.
-        Errors return HTTP 200 with an `Error` body.'
+        methods. An amount-less Lightning Address or LNURL remains receive-only; amount-bound payloads
+        use a validated on-chain BIP-21 URI. Experimental rails fail closed. Errors return HTTP 200
+        with an `Error` body.'
       operationId: receive
       requestBody:
         required: true
@@ -3036,13 +3035,7 @@ components:
       - $ref: '#/components/schemas/OnchainReceivePointer'
       - $ref: '#/components/schemas/LightningReceivePointer'
       - $ref: '#/components/schemas/LnurlReceivePointer'
-      - $ref: '#/components/schemas/Bolt12ReceivePointer'
-      description: Amount-less Lightning and BOLT12 pointers are receive-only, not payable handoffs. Ark and Silent Payments fail closed.
-    Bolt12ReceivePointer:
-      type: string
-      maxLength: 4096
-      pattern: '^bitcoin:\?lno=lno(?:t|b|s)?1[A-Za-z0-9+]+$'
-      description: Validated network-matching, non-expired BOLT12 offer; never binds a requested amount.
+      description: Amount-less Lightning pointers are receive-only, not payable handoffs. Ark, BOLT12 and Silent Payments fail closed.
     OnchainReceivePointer:
       type: string
       maxLength: 100
@@ -4774,15 +4767,14 @@ components:
       properties:
         rail:
           type: string
-          description: '`lightning`, `bolt12`, `onchain` or `ark` (case-insensitive). Without a rail,
-            Lightning (including a sole BOLT12 offer) is preferred for amount-less requests,
-            on-chain for amount-bound requests. An unsupported selected rail returns an error.'
+          description: '`lightning`, `onchain` or `ark` (case-insensitive). Without a rail, Lightning
+            is preferred for amount-less requests, on-chain for amount-bound requests. An unsupported
+            selected rail returns an error.'
         amount_sats:
           type: integer
           format: int64
           minimum: 1
           maximum: 2100000000000000
-          description: Not supported for a BOLT12 offer; an amount-bound invoice is required.
       example:
         rail: onchain
         amount_sats: 25000
@@ -4796,7 +4788,6 @@ components:
           type: string
           enum:
           - Lightning
-          - Bolt12
           - Onchain
         payload:
           $ref: '#/components/schemas/ReceivePayload'
@@ -5080,9 +5071,6 @@ components:
           type: string
         lightning_address:
           type: string
-        bolt12_offer:
-          type: string
-          description: Public, network-checked BOLT12 offer.
         onchain_address:
           type: string
         onchain_pubkey:
@@ -5137,9 +5125,6 @@ components:
           description: Must equal the already-verified alias (see challenge/verify), else HTTP 400.
         lightning_address:
           type: string
-        bolt12_offer:
-          type: string
-          description: Public BOLT12 offer validated against the daemon network and current time; published as a separate signed Lightning method.
         onchain_address:
           type: string
           description: Validated against the daemon network.
@@ -5157,7 +5142,6 @@ components:
             type: string
             enum:
             - lightning
-            - bolt12
             - onchain
             - ark
         recovery_policy:

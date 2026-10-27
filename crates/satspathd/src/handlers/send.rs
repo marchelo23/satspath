@@ -22,8 +22,8 @@ use crate::handlers::profile::ensure_signed_profile;
 use crate::handlers::resolve::resolve_profile;
 use crate::handlers::wallet::load_wallet;
 use crate::types::{
-    build_methods, pct, receive_rail_name, safety_status, EmailInvite, ReceiveRequest, ReceiveView,
-    SendRequest, SendResponse,
+    build_methods, pct, safety_status, EmailInvite, ReceiveRequest, ReceiveView, SendRequest,
+    SendResponse,
 };
 use crate::ui::qr_svg;
 
@@ -44,7 +44,7 @@ pub(crate) fn receive_view(state: &AppState, req: ReceiveRequest) -> Result<Rece
         let req_rail = req_rail.to_lowercase();
         methods
             .into_iter()
-            .find(|m| receive_rail_name(m).eq_ignore_ascii_case(&req_rail))
+            .find(|m| m.method_name().to_lowercase() == req_rail)
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "requested rail '{}' is not configured in your profile",
@@ -90,7 +90,7 @@ pub(crate) fn receive_view(state: &AppState, req: ReceiveRequest) -> Result<Rece
 
     Ok(ReceiveView {
         alias: mask_identifier(&alias),
-        rail: receive_rail_name(&method).to_string(),
+        rail: method.method_name().to_string(),
         qr_svg: qr_svg(&payload)?,
         payload,
     })
@@ -106,10 +106,6 @@ pub(crate) fn receive_payload_for(method: &PaymentMethod) -> Result<String> {
         PaymentMethod::Lightning {
             lnurl: Some(url), ..
         } => url.clone(),
-        PaymentMethod::Lightning {
-            bolt12: Some(offer),
-            ..
-        } => format!("bitcoin:?lno={offer}"),
         PaymentMethod::Onchain {
             address,
             silent_payment_pubkey,
@@ -729,7 +725,6 @@ mod tests {
             crate::types::ProfileUpdateRequest {
                 alias: Some("alice@example.com".into()),
                 lightning_address: Some("alice@example.com".into()),
-                bolt12_offer: None,
                 onchain_address: None,
                 onchain_pubkey: None,
                 ark_server: None,

@@ -148,7 +148,6 @@ pub(crate) fn claim_invite_handler(state: &AppState, body: ClaimRequest) -> Resu
     let update_req = ProfileUpdateRequest {
         alias: Some(body.alias.clone()),
         lightning_address: body.lightning_address,
-        bolt12_offer: None,
         onchain_address: body.onchain_address,
         onchain_pubkey: body.onchain_pubkey,
         ark_server: body.ark_server,

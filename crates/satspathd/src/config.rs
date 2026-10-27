@@ -78,8 +78,6 @@ pub(crate) struct WalletState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) lightning_address: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) bolt12_offer: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) onchain_address: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) onchain_pubkey: Option<String>,

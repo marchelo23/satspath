@@ -18,13 +18,7 @@ use crate::types::{
 
 pub(crate) fn profile_response(state: &AppState) -> Result<ProfileResponse> {
     let wallet = load_wallet(&state.home)?;
-    let signed_profile = match wallet.alias.as_deref() {
-        Some(alias) => TransactionalTransparencyStore::open(&state.home)
-            .and_then(|store| store.profile(alias))
-            .ok()
-            .flatten(),
-        None => None,
-    };
+    let signed_profile = stored_profile(state, &wallet)?;
     let signature_valid = signed_profile
         .as_ref()
         .map(verify_signed_profile)
@@ -34,6 +28,43 @@ pub(crate) fn profile_response(state: &AppState) -> Result<ProfileResponse> {
         signed_profile,
         signature_valid,
     })
+}
+
+/// Read the reconciled store without allowing public GET requests to sign changes.
+pub(crate) fn stored_profile(
+    state: &AppState,
+    wallet: &WalletState,
+) -> Result<Option<satspath_core::SignedPaymentProfile>> {
+    let Some(alias) = wallet.alias.as_deref() else {
+        return Ok(None);
+    };
+    let signed = TransactionalTransparencyStore::open(&state.home)?.profile(alias)?;
+    if let Some(existing) = &signed {
+        if !existing.profile.revoked
+            && existing.profile.methods != build_methods(wallet, &state.network)
+        {
+            anyhow::bail!("stored profile methods are stale; restart the daemon to reconcile them");
+        }
+    }
+    Ok(signed.filter(|signed| !signed.profile.revoked))
+}
+
+/// Run before serving requests, or under the authenticated mutation lock.
+/// Commit replacements and revocations so other store readers cannot use stale rails.
+pub(crate) fn reconcile_stored_profile(state: &AppState, wallet: &mut WalletState) -> Result<()> {
+    let Some(alias) = wallet.alias.clone() else {
+        return Ok(());
+    };
+    let store = TransactionalTransparencyStore::open(&state.home)?;
+    let signed = store.profile(&alias)?;
+    if let Some(existing) = &signed {
+        if !existing.profile.revoked
+            && existing.profile.methods != build_methods(wallet, &state.network)
+        {
+            store_current_profile(&state.home, wallet, &state.network, true)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn update_profile(
@@ -104,13 +135,11 @@ pub(crate) fn verify_challenge(state: &AppState, body: VerifyRequest) -> Result<
     wallet.alias = Some(body.alias);
     wallet.updated_at = Some(chrono::Utc::now().timestamp());
 
-    // Only sign and store if there are methods already. Otherwise just save the wallet state.
-    if wallet.lightning_address.is_some()
-        || wallet.bolt12_offer.is_some()
-        || wallet.onchain_address.is_some()
-        || wallet.ark_server.is_some()
-    {
+    if !build_methods(&wallet, &state.network).is_empty() {
         sign_and_store(&state.home, &mut wallet, &state.network)?;
+    } else {
+        // A legacy offer-only profile must be revoked, not left active in SQLite.
+        reconcile_stored_profile(state, &mut wallet)?;
     }
     save_wallet(&state.home, &wallet)?;
     profile_response(state)
@@ -137,11 +166,9 @@ pub(crate) fn apply_method_updates(
     allow_empty: bool,
 ) -> Result<()> {
     use satspath_core::validation::{
-        validate_bitcoin_address, validate_bolt12_offer_for_network, validate_compressed_pubkey,
-        validate_lightning_address,
+        validate_bitcoin_address, validate_compressed_pubkey, validate_lightning_address,
     };
     let has_method = body.lightning_address.is_some()
-        || body.bolt12_offer.is_some()
         || body.onchain_address.is_some()
         || body.onchain_pubkey.is_some()
         || body.ark_server.is_some()
@@ -160,7 +187,6 @@ pub(crate) fn apply_method_updates(
     for method in &body.remove_methods {
         match method.as_str() {
             "lightning" => wallet.lightning_address = None,
-            "bolt12" => wallet.bolt12_offer = None,
             "onchain" => {
                 wallet.onchain_address = None;
                 wallet.onchain_pubkey = None;
@@ -175,13 +201,6 @@ pub(crate) fn apply_method_updates(
     if let Some(addr) = body.lightning_address {
         validate_lightning_address(&addr)?;
         wallet.lightning_address = Some(addr);
-    }
-    if let Some(offer) = body.bolt12_offer {
-        if offer.trim() != offer {
-            anyhow::bail!("BOLT12 offer must not contain surrounding whitespace");
-        }
-        validate_bolt12_offer_for_network(&offer, crate::types::bitcoin_network(network))?;
-        wallet.bolt12_offer = Some(offer);
     }
     if let Some(addr) = body.onchain_address {
         validate_bitcoin_address(&addr, crate::types::bitcoin_network(network))?;
@@ -213,6 +232,15 @@ pub(crate) fn sign_and_store(
     wallet: &mut WalletState,
     network: &str,
 ) -> Result<()> {
+    store_current_profile(home, wallet, network, false)
+}
+
+fn store_current_profile(
+    home: &std::path::Path,
+    wallet: &mut WalletState,
+    network: &str,
+    revoke_if_empty: bool,
+) -> Result<()> {
     use satspath_core::{transparency::payment_method_descriptor_hash, PaymentMethod};
     let alias = wallet
         .alias
@@ -223,7 +251,8 @@ pub(crate) fn sign_and_store(
         .clone()
         .ok_or_else(|| anyhow::anyhow!("identity is not initialized"))?;
     let methods = build_methods(wallet, network);
-    if methods.is_empty() {
+    let revoked = methods.is_empty() && revoke_if_empty;
+    if methods.is_empty() && !revoked {
         anyhow::bail!("profile needs at least one public receive method");
     }
 
@@ -252,7 +281,7 @@ pub(crate) fn sign_and_store(
         method_verifications: vec![],
         hybrid_pubkey: None,
         pqc_required: false,
-        revoked: false,
+        revoked,
         recovery_policy: wallet.recovery_policy.clone().or_else(|| {
             existing
                 .as_ref()
@@ -283,7 +312,9 @@ pub(crate) fn sign_and_store(
     let mut event = NameEvent {
         version: 1,
         identifier_hash: satspath_core::privacy::identifier_hash(&alias),
-        action: if history.is_empty() {
+        action: if revoked {
+            NameAction::Revoke
+        } else if history.is_empty() {
             NameAction::Register
         } else {
             NameAction::UpdateProfile

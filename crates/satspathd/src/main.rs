@@ -206,6 +206,11 @@ async fn run() -> Result<()> {
         None
     };
 
+    // Migrate legacy receive methods before any public reader or P2P task starts.
+    crate::handlers::profile::reconcile_stored_profile(
+        &state,
+        &mut crate::handlers::wallet::load_wallet(&state.home)?,
+    )?;
     print_startup_status(&state)?;
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
     let metrics_refresher = crate::telemetry::health::spawn_metrics_refresher(
@@ -661,6 +666,92 @@ mod tests {
     }
 
     #[test]
+    fn profile_updates_reject_removed_and_unknown_fields() {
+        for body in [
+            serde_json::json!({"bolt12_offer": "lno1removed"}),
+            serde_json::json!({"lightning_address": "alice@example.com", "unknown": true}),
+        ] {
+            assert!(serde_json::from_value::<crate::types::ProfileUpdateRequest>(body).is_err());
+        }
+        assert!(
+            serde_json::from_value::<crate::types::ProfileUpdateRequest>(
+                serde_json::json!({"lightning_address": "alice@example.com"})
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn stale_profiles_are_replaced_or_revoked_in_the_store() {
+        for endpoint in ["startup", "verify"] {
+            for has_methods in [true, false] {
+                let dir = tempfile::tempdir().unwrap();
+                let mut wallet = load_or_create_identity(dir.path()).unwrap();
+                let alias = "alice@example.com";
+                wallet.alias = Some(alias.into());
+                wallet.lightning_address = Some("old@example.com".into());
+                sign_and_store(dir.path(), &mut wallet, "devnet").unwrap();
+                wallet.lightning_address = has_methods.then(|| "current@example.com".into());
+                save_wallet(dir.path(), &wallet).unwrap();
+                let mut state = test_state(dir.path());
+                state.allow_mock_alias_verification = true;
+                match endpoint {
+                    "startup" => {
+                        // Public reads fail closed and must not change the log.
+                        assert!(crate::handlers::profile::profile_response(&state).is_err());
+                        assert!(crate::handlers::status::status_response(&state).is_err());
+                        assert_eq!(
+                            TransactionalTransparencyStore::open(dir.path())
+                                .unwrap()
+                                .load_log()
+                                .unwrap()
+                                .events()
+                                .len(),
+                            1
+                        );
+                        crate::handlers::profile::reconcile_stored_profile(&state, &mut wallet)
+                            .unwrap();
+                    }
+                    _ => {
+                        crate::handlers::profile::verify_challenge(
+                            &state,
+                            crate::types::VerifyRequest {
+                                alias: alias.into(),
+                                token: alias.into(),
+                            },
+                        )
+                        .unwrap();
+                    }
+                }
+                let store = TransactionalTransparencyStore::open(dir.path()).unwrap();
+                let stored = store.profile(alias).unwrap().unwrap();
+                assert_eq!(
+                    stored.profile.methods,
+                    crate::types::build_methods(&wallet, "devnet")
+                );
+                assert_eq!(stored.profile.revoked, !has_methods);
+                assert!(verify_signed_profile(&stored).unwrap());
+                assert_eq!(stored.profile.sequence, Some(1));
+                let log = store.load_log().unwrap();
+                assert_eq!(
+                    log.events().last().unwrap().action,
+                    if has_methods {
+                        satspath_core::NameAction::UpdateProfile
+                    } else {
+                        satspath_core::NameAction::Revoke
+                    }
+                );
+                let response = crate::handlers::profile::profile_response(&state).unwrap();
+                assert_eq!(response.signed_profile.is_some(), has_methods);
+                let status = crate::handlers::status::status_response(&state).unwrap();
+                assert_eq!(status.methods.is_empty(), !has_methods);
+                // Reads after reconciliation must not append another event.
+                assert_eq!(store.load_log().unwrap().events().len(), 2);
+            }
+        }
+    }
+
+    #[test]
     fn rotation_sequence_is_consistent_across_profile_event_and_registry() {
         let dir = tempfile::tempdir().unwrap();
         let mut wallet = load_or_create_identity(dir.path()).unwrap();
@@ -704,7 +795,6 @@ mod tests {
         let update_req = crate::types::ProfileUpdateRequest {
             alias: Some("alice@example.com".into()),
             lightning_address: None,
-            bolt12_offer: None,
             onchain_address: None,
             onchain_pubkey: None,
             ark_server: None,
