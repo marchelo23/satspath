@@ -63,8 +63,10 @@ supported proof type; never attach synthetic signatures to bypass verification.
 
 The CLI's explicit `--fetch-lnurl-invoice` preview option can fetch a BOLT11 only
 when its payee, network, amount and expiry checks succeed. See
-[mainnet preview limits](../docs/mainnet_safety.md). BOLT12/Ark/Silent Payments
-payable handoffs remain gated.
+[mainnet preview limits](../docs/mainnet_safety.md) and the
+[capability matrix](../docs/README.md). In `satspath preview`, BOLT12, Ark, and
+Silent Payments payable handoffs remain gated, and human terminal output includes
+static placeholder trust lines (`--json` reports actual verification fields).
 
 ## 5. Understand invite and daemon limits
 

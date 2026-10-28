@@ -26,3 +26,11 @@ current `QuoteResponse` does not carry authenticated transport provenance.
 Do not invent provenance or set `identifier_verified` based only on a signed
 profile. Unsupported BOLT12, Ark, Silent Payments and swaps fail closed until
 their wallet-specific approval and confirmation paths exist.
+
+See the complete native approval/dispatch example in
+[`SDK_QUICKSTART.md`](SDK_QUICKSTART.md#4-native-wallet-approval-and-dispatch),
+executable regressions in
+[`wallet_executor_integration.rs`](../crates/satspath-router/tests/wallet_executor_integration.rs),
+and remaining per-wallet integration guides (`docs/integrations/`) and
+conformance wallet adapter profiles tracked in
+[#196](https://github.com/satspath/satspath/issues/196).

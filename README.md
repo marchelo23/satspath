@@ -61,7 +61,7 @@ A Lightning Address (`user@domain.com`) exclusively targets a Lightning receivin
 ### What Works Today, What is Experimental, and What Has Not Been Audited?
 * **Implemented Components:** Signed profiles, key rotation, guardian recovery primitives, native HTTPS/Nostr resolvers, native BIP-353 with local DNSSEC validation, BOLT12 parsing/blinded-path/invoice-request primitives, fee consensus, transparency log/state map, regtest Catena anchoring, gossip monitoring, and a witness cosigning library. Component availability is not proof of an integrated wallet flow or deployed witness federation.
 * **Preview / Experimental:** Ark routing (Preview; live ASP client `/v1/info`, VTXO DAG verification, and Boarding/Forfeit/OOR handoff builders), Silent Payments (Experimental; public operations checked against projections of all 28 official BIP-352 vector groups; host wallet retains private keys and ECDH), Submarine/Reverse Swaps (Experimental; testnet/regtest only).
-* **Wallet handoffs:** Daemon, router, and WASM quotes emit payable QRs only for verified on-chain addresses with a matching network and exact amount. The CLI `quote` and `preview --fetch-lnurl-invoice` commands can also emit BOLT11 invoices after shared payee-key, network, amount, and expiry validation. Amount-less Lightning pointers remain receive-only; BOLT12, Ark, and Silent Payment handoffs fail closed until protocol-aware validation is available.
+* **Wallet handoffs:** Daemon and native router quotes emit amount- and network-validated BIP-21/BIP-321 URIs for verified on-chain addresses, BIP-352 Silent Payment pointers (`bitcoin:[<addr>]?sp=<sp>&amount=<btc>`), and wallet-supplied Bech32m Ark addresses (`bitcoin:?ark=<addr>&amount=<btc>`); daemon payable endpoints additionally require an independently verified method-ownership proof (`no_route` otherwise). Browser WASM `quote` emits standard on-chain `bitcoin:<addr>?amount=<btc>` previews only. The CLI `quote` (human mode) and `preview --mainnet --fetch-lnurl-invoice` commands can also emit BOLT11 invoices after shared payee-key, network, amount, and expiry validation. Amount-less Lightning pointers remain receive-only; BOLT12 payable handoffs and programmatic `PaymentIntent` execution for BOLT12, Ark, Silent Payments, and mainnet swaps fail closed.
 * **Audit Status:** SatsPath has completed internal test suites and automated adversarial simulations, but has **NOT yet undergone an independent third-party cryptographic or security audit**.
 
 See the [documentation index and capability matrix](docs/README.md) for interface-specific
@@ -228,7 +228,7 @@ When a client contacts an identifier for the very first time without prior key p
 The witness protocol requires a $K$-of-$N$ threshold (e.g. 2-of-3 or 3-of-5). If fewer than $K$ witnesses are compromised, the rogue operator cannot obtain the cosignatures needed to validate an equivocation. If $K$ or more witnesses collude with the operator to forge a split view, clients on disparate branches cannot detect the fork locally until checkpoints are audited or gossiped out-of-band.
 
 ### 6. Does SatsPath work on Bitcoin Mainnet today?
-**For public discovery and wallet handoff: YES (with documented limitations).** SatsPath can resolve mainnet Lightning Addresses, fetch mainnet BOLT11 invoices, and generate mainnet BIP-21 URIs. Standards-conformant BOLT12 offer/blinded-path/invoice-request primitives and public-projection checks for all 28 official BIP-352 test vector groups are implemented in `satspath-router`, while daemon payable handoff endpoints remain gated to verified on-chain BIP-21 payloads until live wallet interoperability is verified.  
+**For public discovery and wallet handoff: YES (with documented limitations).** SatsPath can resolve mainnet Lightning Addresses, fetch mainnet BOLT11 invoices in explicit CLI flows, and generate mainnet BIP-21/BIP-321 URIs (on-chain, BIP-352 `sp=`, and wallet-supplied `ark=` addresses where verified). Standards-conformant BOLT12 offer/blinded-path/invoice-request primitives and public-projection checks for all 28 official BIP-352 test vector groups are implemented in `satspath-router`, while daemon payable quotes require verified method ownership, daemon BOLT12 receive/pay remains gated, and `PaymentIntent` host-wallet dispatch accepts standard on-chain and payee-bound BOLT11 only.  
 **For user-payment execution: NO.** SatsPath does not connect to Bitcoin P2P to execute user payments or hold user spending keys; that remains the host wallet's responsibility. The distinct authenticated regtest checkpoint anchor path can direct an operator's Bitcoin Core wallet over loopback RPC to manage continuation UTXOs and broadcast valueless test transactions.
 
 ### 7. Has SatsPath been externally audited?
@@ -275,8 +275,9 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 ### Development Git hook
 
 Run `npm ci` once from the repository root to install Husky's pre-commit hook.
-The hook checks Rust formatting with `cargo fmt --all -- --check`, matching CI;
-it does not modify staged files. Node.js 18+ and Rust with `rustfmt` are required.
+The hook checks workspace and `fuzz/` Rust formatting (`cargo fmt ... --check`)
+and runs the Node contract, SDK quickstart, and dashboard test suites, matching
+CI without modifying staged files. Node.js 20+ and Rust with `rustfmt` are required.
 
 ### CLI Preview Usage
 

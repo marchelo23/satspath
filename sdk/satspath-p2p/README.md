@@ -45,7 +45,7 @@ Keep the publisher running. On another device/network:
 cd sdk/satspath-p2p
 npm ci
 node examples/resolve.mjs alice@example.com received-profile.json
-satspath import --file received-profile.json
+satspath import received-profile.json
 satspath show alice@example.com
 ```
 

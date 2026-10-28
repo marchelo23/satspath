@@ -1,13 +1,13 @@
-//! `satspath-wasm` — Minimal WASM bindings for SatsPath.
+//! `satspath-wasm` — Preview WASM bindings for SatsPath.
 //!
 //! Provides:
 //!   - `verify_signed_profile` — secp256k1 Schnorr verification
 //!   - `canonical_profile_json` — deterministic canonical JSON bytes
 //!   - `fingerprint_pubkey` — 8-char pubkey fingerprint
 //!   - `topic_for_alias` — SHA-256 P2P topic derivation
-//!   - `resolve_alias` — resolver chain: local → BIP353 → HTTPS well-known → Nostr NIP-05
-//!   - `quote` — resolve + verify + route + build QR payload
-//!   - `build_qr_payload` — payment URI builder (BOLT11, BIP21, ark:)
+//!   - `resolve_alias` — preview resolver chain (read-only local registry, DoH BIP-353 without local DNSSEC, HTTPS well-known; Nostr relay fetch unimplemented)
+//!   - `quote` — resolve + verify + route + build standard on-chain BIP-21 QR payload
+//!   - `build_qr_payload` — validated on-chain BIP-21 payment URI builder (Lightning, BOLT12, Silent Payments, and Ark fail closed in WASM)
 //!
 //! All dependencies are WASM-compatible (no tokio, reqwest, mio).
 

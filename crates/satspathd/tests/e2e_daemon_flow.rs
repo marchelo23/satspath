@@ -8,9 +8,9 @@
 //! - no prefix:      must pass on every PR (`cargo test -p satspathd --test e2e_daemon_flow`).
 //! - `regtest_`:     `#[ignore]`; needs Bitcoin Core regtest (`SATSPATH_BITCOIN_RPC_*`).
 //! - `live_`:        `#[ignore]`; touches the public internet (DNSSEC, ASPs).
-//! - `acceptance_`:  `#[ignore]`; executable specs for rails that are NOT yet wired into
-//!   the daemon (Silent Payments, BOLT12, Ark). Each one names its tracking issue. When
-//!   an issue is implemented, remove its `#[ignore]` so the test becomes a gate.
+//! - `acceptance_`:  executable rail acceptance specs. Silent Payments (#199) and Ark
+//!   (#209) run as active gates on every PR; unimplemented rails (currently BOLT12)
+//!   keep `#[ignore]` until wired into the daemon.
 #![cfg(unix)]
 
 use std::{

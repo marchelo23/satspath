@@ -8,6 +8,12 @@ const guide = await readFile(new URL('../SDK_QUICKSTART.md', import.meta.url), '
 const examples = [...guide.matchAll(/^```typescript\r?\n([\s\S]*?)^```/gm)]
   .map(match => match[1]);
 
+/**
+ * Finds the single TypeScript fenced code block in `docs/SDK_QUICKSTART.md` containing `text`.
+ *
+ * @param {string} text - Substring that uniquely identifies the TypeScript example.
+ * @returns {string}
+ */
 function exampleContaining(text) {
   const matches = examples.filter(source => source.includes(text));
   assert.equal(matches.length, 1, `Expected one TypeScript example containing ${text}`);
@@ -28,6 +34,11 @@ const parameters = definition[1].split(',').map(parameter => parameter.split(':'
 const createResolveAndQuote = new Function('quote', 'console',
   `return async function (${parameters.join(',')}) {\n${definition[2]}\n};`);
 
+/**
+ * Creates an in-memory console spy recording `console.log` calls.
+ *
+ * @returns {{logs: Array<unknown[]>, log: (...args: unknown[]) => void}}
+ */
 function captureConsole() {
   const logs = [];
   return { logs, log: (...args) => logs.push(args) };
@@ -35,6 +46,12 @@ function captureConsole() {
 
 const alias = 'alice@example.com';
 
+/**
+ * Builds a mock verified `ok` WASM quote response with optional field overrides.
+ *
+ * @param {Record<string, unknown>} [overrides={}] - Fields overriding the default quote fixture.
+ * @returns {Record<string, unknown>}
+ */
 function successfulQuote(overrides = {}) {
   return {
     status: 'ok',
@@ -261,11 +278,38 @@ test('documented JS amount type agrees with the actual WASM export', async () =>
 });
 
 test('native guide uses the current approval API and does not offer a legacy dispatch example', async () => {
-  const source = await readFile(new URL('../../crates/satspath-router/src/wallet_executor.rs', import.meta.url), 'utf8');
+  const executorSource = await readFile(new URL('../../crates/satspath-router/src/wallet_executor.rs', import.meta.url), 'utf8');
+  const routerLib = await readFile(new URL('../../crates/satspath-router/src/lib.rs', import.meta.url), 'utf8');
   for (const name of ['prepare_payment_intent', 'execute_quote_handoff']) {
     assert.ok(guide.includes(name));
-    assert.match(source, new RegExp(`pub (?:async )?fn ${name}\\(`));
+    assert.match(executorSource, new RegExp(`pub (?:async )?fn ${name}\\(`));
   }
   const rustExamples = [...guide.matchAll(/^```rust\r?\n([\s\S]*?)^```/gm)].map(match => match[1]);
-  assert.doesNotMatch(rustExamples.join('\n'), /wallet\.(?:pay_bolt11|send_onchain)\(/);
+  assert.ok(rustExamples.length >= 1, 'Expected at least one concrete Rust approval/dispatch example in SDK_QUICKSTART.md');
+  const rustCombined = rustExamples.join('\n');
+  for (const requiredCall of [
+    'quote_with_resolver(',
+    'prepare_payment_intent(',
+    'intent.approve(',
+    'HostWalletSdkBridge::new(',
+    'BdkOnchainBridge::new(',
+    'LdkLightningBridge::new(',
+    'execute_quote_handoff(&bridge, store, trust, evidence, &quote, approved, policy)',
+  ]) {
+    assert.ok(rustCombined.includes(requiredCall), `Expected Rust example to include ${requiredCall}`);
+  }
+  for (const exportedSymbol of [
+    'execute_quote_handoff',
+    'prepare_payment_intent',
+    'quote_with_resolver',
+    'BdkHostWallet',
+    'BdkOnchainBridge',
+    'HostWalletSdkBridge',
+    'LdkHostNode',
+    'LdkLightningBridge',
+    'PaymentIntent',
+  ]) {
+    assert.match(routerLib, new RegExp(`\\b${exportedSymbol}\\b`), `Expected satspath_router root re-export for ${exportedSymbol}`);
+  }
+  assert.doesNotMatch(rustCombined, /\b(?:pay_bolt11|send_onchain)\s*\(/);
 });
