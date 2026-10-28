@@ -242,7 +242,7 @@ the normal JSON limit is 65,536 bytes.
 
 ## 5. Endpoint index
 
-Access is **Public** (no token) or **Bearer** (token required). 55 operations
+Access is **Public** (no token) or **Bearer** (token required). 56 operations
 across 50 paths.
 
 ### UI
@@ -280,6 +280,7 @@ across 50 paths.
 | `PUT` | `/v1/profile` | Bearer | Create or update profile |
 | `POST` | `/v1/profile` | Bearer | Same as `PUT` (CORS-friendly) |
 | `POST` | `/v1/profile/methods` | Bearer | Update receive methods |
+| `POST` | `/v1/profile/methods/proof` | Bearer | Attach or renew a public ownership proof |
 | `POST` | `/v1/profile/challenge` | Bearer | Start alias verification (DEV MOCK) |
 | `POST` | `/v1/profile/verify` | Bearer | Complete alias verification (DEV MOCK) |
 | `POST` | `/v1/profile/rotate-key` | Bearer | Rotate identity key |

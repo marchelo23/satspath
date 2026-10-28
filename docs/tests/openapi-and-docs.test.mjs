@@ -193,7 +193,7 @@ function walkMarkdownFiles(dir) {
 
 test('OpenAPI 3.0.3 operations have operationId, responses, and match router auth rules', () => {
   const operations = parseOpenApiOperations(openapiText);
-  assert.equal(operations.length, 55, 'Expected all 55 HTTP operations in docs/openapi.yaml');
+  assert.equal(operations.length, 56, 'Expected all 56 HTTP operations in docs/openapi.yaml');
 
   for (const op of operations) {
     assert.ok(op.hasOperationId, `${op.method} ${op.path} must define an operationId`);

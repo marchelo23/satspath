@@ -70,7 +70,7 @@ cargo fmt --all -- --check
 bash .agents/skills/satspath-crypto-audit/scripts/audit_crypto.sh
 ```
 
-Husky checks formatting and daemon regression tests on commit. Full workspace,
+Husky checks formatting, daemon regressions and documentation tests on commit. Full workspace,
 security-audit and interoperability results must be reported separately; ignored
 or unexecuted external tests are not acceptance evidence. Request CodeRabbit with
 the exact PR comment `@coderabbitai full review`. Do not merge or close #201 until
