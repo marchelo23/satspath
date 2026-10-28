@@ -64,6 +64,23 @@ imply deployed federation operations or third-party wallet certification.
 | **Protocol conformance suite** | **Incremental** | Embedded `vectors/v1.json` covering canonicalization, expiry, BIP-21/BOLT12 handoff validation, capability descriptors, and `--observed` JSON comparison; `SKIP` never becomes `PASS`. Wallet execution, DNSSEC chain vectors, positive rotation, and `PaymentIntent` vectors remain tracked in [#196](https://github.com/satspath/satspath/issues/196) / [#204](https://github.com/satspath/satspath/issues/204) | [`crates/satspath-conformance/README.md`](../crates/satspath-conformance/README.md), `cargo test -p satspath-conformance` |
 | **Swaps & Post-Quantum Cryptography** | **Experimental / Research** | Boltz v2 testnet/regtest scaffolding (`satspath-swaps`, mainnet execution closed) and hybrid `secp256k1` + ML-DSA-65 / ML-KEM research primitives (`satspath-pqc`); excluded from production safety claims | `cargo test -p satspath-swaps -p satspath-pqc` |
 
+### H2 D1: positive daemon preview coverage
+
+The active `onchain_owned_profile_handoffs_survive_restart_and_reject_replacement`
+test in [`e2e_daemon_flow.rs`](../crates/satspathd/tests/e2e_daemon_flow.rs) covers
+profile → genuine method-key ownership → transparency resolution → `quote/pay/send`
+→ exact regtest BIP-21, including one-satoshi precision and same-home daemon restart.
+Forged signatures, replay, unverified replacement destinations, and handoff
+destination/amount/network changes are rejected. It runs in the existing
+`daemon-flow` CI job and Husky daemon tests.
+
+**Classification: hermetic preview evidence, not external interoperability.**
+Alias authorization is explicitly dev-mocked (`identifier_verified: false`);
+no wallet is opened, no spend approved, and no transaction signed or confirmed.
+External-wallet settlement and no-mock alias acceptance remain pending under
+[#202](https://github.com/satspath/satspath/issues/202); see the
+[implementation plan](implementation-plan-202.md).
+
 ## Ignored-test inventory
 
 Every `#[ignore]` test in the Rust workspace is inventoried below and checked

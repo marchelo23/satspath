@@ -17,6 +17,8 @@ use std::{
     net::{TcpListener, TcpStream},
     path::Path,
     process::{Child, Command, Stdio},
+    str::FromStr,
+    sync::Arc,
     thread,
     time::{Duration, Instant},
 };
@@ -37,7 +39,7 @@ struct TestDaemon {
     child: Child,
     base: String,
     http: Client,
-    _home: tempfile::TempDir,
+    _home: Arc<tempfile::TempDir>,
 }
 
 impl Drop for TestDaemon {
@@ -54,8 +56,19 @@ impl TestDaemon {
     }
 
     fn spawn_with_env(network: &str, extra_env: &[(&str, String)]) -> Self {
+        Self::spawn_in_home(
+            network,
+            extra_env,
+            Arc::new(tempfile::tempdir().expect("tempdir")),
+        )
+    }
+
+    fn spawn_in_home(
+        network: &str,
+        extra_env: &[(&str, String)],
+        home: Arc<tempfile::TempDir>,
+    ) -> Self {
         for attempt in 0..5 {
-            let home = tempfile::tempdir().expect("tempdir");
             let listener = TcpListener::bind("127.0.0.1:0").expect("free port");
             let address = listener.local_addr().expect("local addr");
             drop(listener);
@@ -121,6 +134,13 @@ impl TestDaemon {
 
     fn home(&self) -> &Path {
         self._home.path()
+    }
+
+    /// Reopen the same durable state with a fresh daemon process and HTTP client.
+    fn restart(&mut self, network: &str) {
+        self.child.kill().expect("stop daemon");
+        self.child.wait().expect("reap daemon");
+        *self = Self::spawn_in_home(network, &[], Arc::clone(&self._home));
     }
 
     async fn get(&self, path: &str) -> (StatusCode, Value) {
@@ -273,6 +293,7 @@ async fn mutating_routes_require_bearer_token() {
         (Method::POST, "/v1/profile/challenge"),
         (Method::POST, "/v1/profile/verify"),
         (Method::POST, "/v1/profile/methods"),
+        (Method::POST, "/v1/profile/methods/proof"),
         (Method::POST, "/v1/profile/rotate-key"),
         (Method::POST, "/v1/claim"),
         (Method::POST, "/v1/transparency/anchors"),
@@ -474,6 +495,220 @@ async fn metrics_exposes_prometheus_text() {
     let (status, text) = d.get_text("/metrics").await;
     assert_eq!(status, StatusCode::OK);
     assert!(text.contains("# TYPE"), "not Prometheus exposition: {text}");
+}
+
+/// H2 D1: real method-key ownership, but deliberately mock alias authorization.
+/// This exercises handoff previews, not wallet approval, signing or settlement.
+#[tokio::test]
+async fn onchain_owned_profile_handoffs_survive_restart_and_reject_replacement() {
+    use satspath_core::ownership::{build_signature_attestation, ProofType};
+
+    let mut d = TestDaemon::spawn("regtest");
+    let address = d.bootstrap_onchain_profile().await;
+    assert_no_onchain_handoff(&d).await;
+
+    let (status, profile) = d.get("/v1/profile").await;
+    assert_eq!(status, StatusCode::OK, "{profile}");
+    let signed: satspath_core::SignedPaymentProfile =
+        serde_json::from_value(profile["signed_profile"].clone()).expect("signed profile");
+    let method = signed
+        .profile
+        .methods
+        .iter()
+        .find(|method| matches!(method, satspath_core::PaymentMethod::Onchain { .. }))
+        .expect("onchain method");
+    // The test client owns this disposable key. Only public proof material crosses HTTP.
+    let spending = secp256k1::SecretKey::from_slice(&[1; 32]).expect("fixture key");
+    let issued = chrono::Utc::now().timestamp() - 1;
+    let proof = build_signature_attestation(
+        method,
+        &signed.profile.identity_pubkey,
+        ProofType::OnchainAddressSignature,
+        &spending,
+        issued,
+        Some(issued + 3600),
+    )
+    .expect("ownership signature");
+    let mut forged = serde_json::to_value(&proof).expect("public proof JSON");
+    forged["status"]["proof"]["signature"] = json!("00".repeat(64));
+    let (_, events_before_rejection) = d.get("/v1/transparency/events").await;
+    let (status, rejected) = d
+        .post_auth("/v1/profile/methods/proof", json!({"verification": forged}))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    let (_, unchanged) = d.get("/v1/profile").await;
+    assert_eq!(unchanged["signed_profile"], profile["signed_profile"]);
+    let (_, events_after_rejection) = d.get("/v1/transparency/events").await;
+    assert_eq!(events_after_rejection, events_before_rejection);
+    assert_no_onchain_handoff(&d).await;
+    let (status, attached) = d
+        .post_auth("/v1/profile/methods/proof", json!({"verification": proof}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{attached}");
+    assert_eq!(
+        attached["signed_profile"]["profile"]["method_verifications"],
+        json!([proof])
+    );
+
+    let (status, resolved) = d.post_auth("/v1/resolve", json!({"alias": ALIAS})).await;
+    assert_eq!(status, StatusCode::OK, "{resolved}");
+    for field in [
+        "profile_signature_verified",
+        "key_continuity_verified",
+        "transparency_inclusion_verified",
+        "checkpoint_consistency_verified",
+        "payment_methods_verified",
+    ] {
+        assert_eq!(resolved["verification"][field], true, "{field}: {resolved}");
+    }
+    // A real method-key signature must never upgrade the mock alias to attested.
+    assert_eq!(
+        resolved["verification"]["identifier_verified"], false,
+        "{resolved}"
+    );
+    assert_onchain_handoffs(&d, &address, method).await;
+
+    let (_, log_before) = d.get("/v1/transparency/status").await;
+    let (_, events_before) = d.get("/v1/transparency/events").await;
+    let pins_before = satspath_core::CheckpointStore::new(d.home())
+        .load()
+        .expect("checkpoint pins");
+    assert!(
+        !pins_before.is_empty(),
+        "resolution must persist a checkpoint pin"
+    );
+    d.restart("regtest");
+    // Check before resolution can repair/recreate a missing pin file.
+    let pins_after = satspath_core::CheckpointStore::new(d.home())
+        .load()
+        .expect("restored pins");
+    assert_eq!(
+        serde_json::to_value(pins_after).unwrap(),
+        serde_json::to_value(pins_before).unwrap()
+    );
+    let (status, restored) = d.get("/v1/profile").await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(restored["signed_profile"], attached["signed_profile"]);
+    let (status, resolved_after) = d.post_auth("/v1/resolve", json!({"alias": ALIAS})).await;
+    assert_eq!(status, StatusCode::OK, "{resolved_after}");
+    // The initial resolve advances the pin; equal-size pinned checkpoints need
+    // no consistency proof on later reads. All durable evidence stays identical.
+    assert!(resolved_after["consistency_proof"].is_null());
+    let mut pinned_resolution = resolved.clone();
+    pinned_resolution["consistency_proof"] = Value::Null;
+    assert_eq!(resolved_after, pinned_resolution);
+    let (_, log_after) = d.get("/v1/transparency/status").await;
+    let (_, events_after) = d.get("/v1/transparency/events").await;
+    assert_eq!(log_after, log_before, "restart must not republish");
+    assert_eq!(events_after, events_before);
+    assert_onchain_handoffs(&d, &address, method).await;
+
+    // Exact proof replay is rejected without appending a transparency event.
+    let (status, body) = d
+        .post_auth("/v1/profile/methods/proof", json!({"verification": proof}))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (_, events) = d.get("/v1/transparency/events").await;
+    assert_eq!(events, events_before);
+    let (_, unchanged) = d.get("/v1/profile").await;
+    assert_eq!(unchanged["signed_profile"], attached["signed_profile"]);
+
+    // A new destination cannot inherit the old destination's ownership.
+    let (status, body) = d
+        .post_auth(
+            "/v1/profile/methods",
+            json!({"onchain_address": regtest_address(2)}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let replaced: satspath_core::SignedPaymentProfile =
+        serde_json::from_value(body["signed_profile"].clone()).expect("replacement profile");
+    assert!(replaced.profile.method_verifications.is_empty());
+    assert_no_onchain_handoff(&d).await;
+    d.restart("regtest");
+    assert_no_onchain_handoff(&d).await;
+}
+
+async fn assert_no_onchain_handoff(d: &TestDaemon) {
+    for path in ["/v1/quote", "/v1/pay", "/v1/send"] {
+        let (status, body) = d
+            .post_auth(path, json!({"recipient": ALIAS, "amount_sats": 21_001}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        assert_eq!(body["status"], "no_route", "{path}: {body}");
+        for field in ["qr", "payment_payload", "payload"] {
+            assert!(body.get(field).is_none(), "{path} leaked {field}: {body}");
+        }
+    }
+}
+
+async fn assert_onchain_handoffs(
+    d: &TestDaemon,
+    address: &str,
+    method: &satspath_core::PaymentMethod,
+) {
+    use satspath_router::handoff::validate_payload;
+
+    // One satoshi and a non-round amount catch accidental BTC/satoshi rounding.
+    for (amount, btc) in [(1, "0.00000001"), (21_001, "0.00021001")] {
+        let request = json!({"recipient": ALIAS, "amount_sats": amount});
+        let expected = format!("bitcoin:{address}?amount={btc}");
+        let (status, quote) = d.post_auth("/v1/quote", request.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{quote}");
+        assert_eq!(quote["status"], "ok", "{quote}");
+        assert_eq!(quote["qr"], expected);
+        assert_eq!(
+            quote["selected_method"],
+            serde_json::to_value(method).unwrap()
+        );
+        assert_eq!(quote["recipient"]["profile_signature_verified"], true);
+        assert_eq!(quote["recipient"]["identifier_verified"], false);
+        let checked = Address::from_str(address)
+            .expect("address")
+            .require_network(Network::Regtest);
+        assert!(checked.is_ok(), "destination must be regtest");
+        validate_payload(method, &expected, "regtest", Some(amount)).expect("safe handoff");
+        for (payload, network, bound) in [
+            (
+                format!("bitcoin:{}?amount={btc}", regtest_address(2)),
+                "regtest",
+                amount,
+            ),
+            (expected.clone(), "regtest", amount + 1),
+            (expected.clone(), "mainnet", amount),
+        ] {
+            assert!(
+                validate_payload(method, &payload, network, Some(bound)).is_err(),
+                "modified handoff accepted"
+            );
+        }
+        let (status, pay) = d.post_auth("/v1/pay", request.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{pay}");
+        assert_eq!(pay["status"], "wallet_handoff", "{pay}");
+        assert_eq!(pay["payment_payload"], expected);
+        assert_eq!(pay["quote"]["qr"], expected);
+        assert_eq!(pay["amount_sats"], amount);
+        assert_eq!(pay["handoff"]["mode"], "external_wallet");
+        assert_eq!(pay["handoff"]["daemon_executes_payment"], false);
+        let (status, send) = d.post_auth("/v1/send", request).await;
+        assert_eq!(status, StatusCode::OK, "{send}");
+        assert_eq!(send["status"], "ok", "{send}");
+        assert_eq!(send["mode"], "preview_only");
+        assert_eq!(send["rail"], "Onchain");
+        assert_eq!(send["payload"], expected);
+        assert_eq!(send["amount_sats"], amount);
+        for body in [&pay, &send] {
+            assert!(body["qr_svg"].as_str().unwrap_or_default().contains("<svg"));
+            for field in [
+                "moves_funds",
+                "signs_bitcoin_transactions",
+                "broadcasts_transactions",
+                "stores_wallet_seeds_or_spending_keys",
+            ] {
+                assert_eq!(body["safety"][field], false, "{field}: {body}");
+            }
+        }
+    }
 }
 
 // ─── regtest_: Bitcoin Core required ────────────────────────────────────────

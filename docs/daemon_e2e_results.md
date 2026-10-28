@@ -26,13 +26,33 @@ RPC-only node, and a disposable daemon home.
 | Catena genesis and continuation | Three confirmed anchors, linked predecessor outpoints and 1,000-sat continuation outputs. Transaction OP_RETURN commitments and structural/checkpoint checks passed: `90f0741f48a4d9e90eb45ff89110477030b5752d73015a957f5e7010af6df27e` (index 0), `df8466e02b90d39a742029aa1bbc17daa9054d2ee8b00506bd71dcf9652f3f94` (index 1), `8a455172ed75d3e7c2ed5167bfee98fba054037c2abd9f21309bee1427188a7d` (index 2). |
 | Negative anchors | Duplicate anchor and wrong `SATSPATH_BITCOIN_NETWORK` returned HTTP 400. A daemon restarted with a non-regtest `--network` while Core RPC still selected regtest also returned HTTP 400, with no extra block or event. A mocked Core RPC reporting a non-regtest chain is rejected before signing or broadcast. |
 
+## H2 D1 automated preview fixture
+
+Unlike the historical exercise above, the committed D1 fixture attaches a real
+method-key ownership signature through HTTP and obtains positive `quote/pay/send`
+handoffs. Reproduce with:
+
+```sh
+cargo test -p satspathd --test e2e_daemon_flow onchain_owned_profile
+```
+
+It checks exact one-satoshi and 21,001-satoshi BIP-21 amounts on regtest, durable
+profile/event/checkpoint continuity across process restart, invalid signature and
+replay rejection without profile/event mutation, and ownership invalidation after
+destination replacement. Destination/amount/network tampering is rejected by the
+shared handoff validator. This is **hermetic preview coverage**: alias setup is
+dev-mocked, `identifier_verified` remains false, and no external-wallet approval,
+transaction signature, broadcast or confirmation is demonstrated. The historical
+Core transfer above is not evidence of this positive daemon journey settling.
+
 ## Remaining product blockers
 
 - No production email/domain alias attestation; invitation claiming stays
   disabled by default.
 - The `https://satspath.local/claim` URL is a placeholder, not a public claim
   service.
-- Demo payment methods have no ownership proof, so routing them returns
-  `no_route`.
+- Demo payment methods without an attached ownership proof still return
+  `no_route`; the D1 fixture does not provide a production alias-control verifier
+  or external-wallet settlement.
 - Regtest anchoring remains operator-only and must never use a wallet with real
   funds.
