@@ -150,6 +150,16 @@ function parseOpenApiOperations(yaml) {
   return operations;
 }
 
+test('invite guide requires owner authentication for claims and private lists', () => {
+  const guide = fs.readFileSync(path.join(repoRoot, 'docs/invite_flow.md'), 'utf8');
+  for (const endpoint of ['POST /v1/claim', 'GET /v1/invites', 'GET /v1/invites/notifications']) {
+    const section = guide.split(`- **Endpoint:** \`${endpoint}\``)[1];
+    assert.ok(section, endpoint);
+    assert.match(section.split('\n')[1], /\*\*Auth:\*\* Bearer token/, endpoint);
+  }
+  assert.match(guide, /GET \/v1\/claim\?invite_id=<UUID>`\n- \*\*Auth:\*\* None \(Public\)/);
+});
+
 function parseApiReferenceTable(markdown) {
   const rows = [];
   const regex = /^\|\s*`([A-Z]+)`\s*\|\s*`([^`]+)`\s*\|\s*(Public|Bearer)\s*\|/gm;

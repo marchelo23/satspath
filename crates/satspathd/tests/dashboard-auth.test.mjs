@@ -86,6 +86,32 @@ test('navigation or lock during sign-in cannot resurrect the token', async () =>
   await assert.rejects(client.request('/v1/broadcast', { method: 'POST' }), /Unlock/);
 });
 
+test('successful dashboard unlock retries notifications without a tab change', async () => {
+  const html = await readFile(new URL('../src/index.html', import.meta.url), 'utf8');
+  const handler = html.match(/\$\('dashboard-auth-form'\)\.addEventListener\('submit', async event => \{([\s\S]*?)\n  \}\);/);
+  assert.ok(handler, 'dashboard submit handler exists');
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const submit = new AsyncFunction('event', 'authInput', '$', 'dashboardAuth', 'loadNotifications', handler[1]);
+  for (const success of [true, false]) {
+    let complete;
+    let notifications = 0;
+    const elements = new Map();
+    const $ = id => {
+      if (!elements.has(id)) elements.set(id, { classList: { add() {}, remove() {} } });
+      return elements.get(id);
+    };
+    const dashboardAuth = { unlock: () => new Promise((resolve, reject) => {
+      complete = () => success ? resolve() : reject(new Error('rejected'));
+    }) };
+    const pending = submit({ preventDefault() {} }, { value: adminToken }, $, dashboardAuth, () => { notifications++; });
+    assert.equal(notifications, 0, 'do not request notifications before unlock succeeds');
+    complete();
+    await pending;
+    assert.equal(notifications, success ? 1 : 0, 'retry only after successful unlock');
+    assert.equal($('dashboard-unlock').disabled, false);
+  }
+});
+
 test('dashboard uses only the centralized helper and no persistent token storage', async () => {
   const html = await readFile(new URL('../src/index.html', import.meta.url), 'utf8');
   const module = await readFile(new URL('../src/dashboard-auth.mjs', import.meta.url), 'utf8');

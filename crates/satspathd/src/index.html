@@ -729,6 +729,7 @@
       $('dashboard-unlock').classList.add('hidden');
       $('dashboard-lock').classList.remove('hidden');
       $('dashboard-auth-status').textContent = 'Unlocked for this tab only.';
+      loadNotifications();
     } catch (error) { $('dashboard-auth-status').textContent = error.message; }
     finally { $('dashboard-unlock').disabled = false; }
   });

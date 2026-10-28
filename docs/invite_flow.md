@@ -87,7 +87,7 @@ identifier -> no signed profile -> create invite -> [future: receiver proves ali
 
 ### 2. Claim Invite (development mock only)
 - **Endpoint:** `POST /v1/claim`
-- **Auth:** None (Public mutation; the invite ID is public and is **not** an authorization token)
+- **Auth:** Bearer token (`admin.macaroon` / `SATSPATHD_AUTH_TOKEN`); the invite ID is **not** an authorization token.
 - **Availability:** Fail-closed HTTP 400 by default, even with a valid ID and `signed_profile`. On mainnet/testnet/signet it remains disabled with or without the mock flag. On devnet/regtest it works only with explicit `--dev-mock-alias-verification` (or `SATSPATH_DEV_MOCK_ALIAS_VERIFICATION=1`); the mock supplies **no** proof of email/domain ownership. A real verifier and alias attestation are still pending.
 - **Request:**
   ```json
@@ -113,13 +113,13 @@ identifier -> no signed profile -> create invite -> [future: receiver proves ali
 
 ### 3. List Invites
 - **Endpoint:** `GET /v1/invites`
-- **Auth:** None (Public `GET`)
+- **Auth:** Bearer token (`admin.macaroon` / `SATSPATHD_AUTH_TOKEN`)
 - **Response:** Array of `InviteRecord` objects.
-- **Security:** IDs are visible here and in public send claim URLs; hiding this list cannot make claim safe without alias verification.
+- **Security:** IDs are visible to the authenticated owner here and in authenticated send responses; possession of an ID cannot make claim safe without alias verification.
 
 ### 4. List Claim Notifications
 - **Endpoint:** `GET /v1/invites/notifications`
-- **Auth:** None (Public `GET`)
+- **Auth:** Bearer token (`admin.macaroon` / `SATSPATHD_AUTH_TOKEN`)
 - **Response:** Array of `ClaimNotification` objects.
 
 ### 5. Mark Notification Read

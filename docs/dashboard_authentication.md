@@ -12,8 +12,9 @@ than introducing a second server session credential and cookie lifecycle.
 `POST /v1/dashboard/auth` validates a supplied Bearer token and returns only
 `{"authenticated":true}`. It neither changes state nor issues a token or cookie.
 
-`dashboard-auth.mjs` centralizes every dashboard request. Only private mutations
-carry the token. Requests must stay on the same origin, redirects are rejected,
+`dashboard-auth.mjs` centralizes every dashboard request. Protected mutations
+and private invite-list reads carry the Bearer token; public requests do not.
+Requests must stay on the same origin, redirects are rejected,
 and ambient browser credentials are omitted. Authentication requires HTTPS,
 except for HTTP on `localhost`, `127.0.0.1` or `[::1]` for local development.
 No ambient cookie authentication exists, so cross-site form submissions cannot
