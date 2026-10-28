@@ -908,15 +908,20 @@ mod tests {
         save_wallet(dir.path(), &wallet).unwrap();
         let method = crate::types::build_methods(&wallet, "devnet").remove(0);
         let issued = now() - 10;
-        let proof = build_signature_attestation(
-            &method,
-            wallet.identity_pubkey.as_deref().unwrap(),
-            ProofType::ArkPubkeySignature,
-            &spending.secret_key,
-            issued,
-            Some(issued + 3600),
-        )
-        .unwrap();
+        let signed_proof = |issued_at| {
+            build_signature_attestation(
+                &method,
+                wallet.identity_pubkey.as_deref().unwrap(),
+                ProofType::ArkPubkeySignature,
+                &spending.secret_key,
+                issued_at,
+                Some(issued_at + 3600),
+            )
+            .unwrap()
+        };
+        let proof = signed_proof(issued);
+        let future_proof = signed_proof(now() + 100);
+        let old_proof = signed_proof(now() - 1000);
         let store = TransactionalTransparencyStore::open(dir.path()).unwrap();
         let original = serde_json::to_value(store.profile("alice@example.com").unwrap()).unwrap();
         let wallet_before = std::fs::read(crate::config::wallet_path(dir.path())).unwrap();
@@ -931,18 +936,20 @@ mod tests {
             "signature",
             "manual",
         ] {
-            let mut invalid = proof.clone();
+            let mut invalid = match case {
+                "future" => future_proof.clone(),
+                "old" => old_proof.clone(),
+                _ => proof.clone(),
+            };
             if let VerificationStatus::Verified {
-                verified_at,
                 expires_at,
                 proof,
                 proof_type,
+                ..
             } = &mut invalid.status
             {
                 match case {
                     "expired" => *expires_at = Some(now() - 1),
-                    "future" => *verified_at = now() + 100,
-                    "old" => *verified_at = now() - 1000,
                     "no_expiry" => *expires_at = None,
                     "long" => *expires_at = Some(issued + 31 * 24 * 3600),
                     "manual" => *proof_type = ProofType::ManualAttestation,
