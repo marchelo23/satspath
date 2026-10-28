@@ -156,8 +156,8 @@ Success returns `ProfileResponse` with a new signed sequence and atomic
 profile/event/checkpoint commit. Unrelated edits preserve proofs byte-for-byte;
 changed/removed methods and identity rotation invalidate them. Expired evidence
 is not silently renewed by an edit: resolvers re-check validity. This endpoint
-does not enable production alias onboarding or claims; see the
-[#201 delivery plan](implementation-plan-201.md).
+does not enable production alias onboarding or claims; those remain outside this
+partial delivery for #201.
 
 ## 4. Request pipeline and global errors
 
