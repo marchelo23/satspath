@@ -1,3 +1,5 @@
 cargo fmt --all -- --check
 # fuzz/ is a separate Cargo workspace; check it explicitly.
 cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
+# Run daemon authorization, profile and ownership regressions before committing.
+cargo test -p satspathd

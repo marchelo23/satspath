@@ -732,6 +732,50 @@ paths:
           $ref: '#/components/responses/PayloadTooLarge'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+  /v1/profile/methods/proof:
+    post:
+      tags:
+      - Profile
+      summary: Attach or renew a public on-chain or Ark ownership proof
+      description: |
+        Requires an active signed profile and public Schnorr evidence produced by
+        the method's external wallet. Only OnchainAddressSignature and
+        ArkPubkeySignature are accepted. verified_at must be within the last 600
+        seconds and not in the future; expires_at is required, must be after now,
+        and at most 30 days after verified_at. Renewal must advance verified_at.
+        Commits a new signed profile, NameEvent and checkpoint atomically.
+        Does not prove alias control or accept spending keys. Unchanged methods
+        retain proofs; replacement/removal and identity rotation invalidate them.
+      operationId: attachMethodProof
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - verification
+              properties:
+                verification:
+                  $ref: '#/components/schemas/MethodVerification'
+      responses:
+        '200':
+          description: Updated profile with the attached proof.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
   /v1/profile/challenge:
     post:
       tags:

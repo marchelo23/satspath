@@ -752,6 +752,257 @@ mod tests {
     }
 
     #[test]
+    fn method_proof_attachment_renewal_preservation_and_invalidation() {
+        use crate::handlers::profile::attach_method_proof;
+        use crate::types::MethodProofRequest;
+        use satspath_core::ownership::{build_signature_attestation, ProofType};
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let mut wallet = load_or_create_identity(dir.path()).unwrap();
+        wallet.alias = Some("alice@example.com".into());
+        wallet.lightning_address = Some("alice@example.com".into());
+        let spending = generate_identity_keypair();
+        let pk =
+            bitcoin::CompressedPublicKey::from_slice(&spending.public_key.serialize()).unwrap();
+        wallet.onchain_address =
+            Some(bitcoin::Address::p2wpkh(&pk, bitcoin::Network::Testnet).to_string());
+        sign_and_store(dir.path(), &mut wallet, "devnet").unwrap();
+        save_wallet(dir.path(), &wallet).unwrap();
+        let method = crate::types::build_methods(&wallet, "devnet")
+            .into_iter()
+            .find(|m| matches!(m, PaymentMethod::Onchain { .. }))
+            .unwrap();
+        let issued = now() - 10;
+        let proof = build_signature_attestation(
+            &method,
+            wallet.identity_pubkey.as_deref().unwrap(),
+            ProofType::OnchainAddressSignature,
+            &spending.secret_key,
+            issued,
+            Some(issued + 3600),
+        )
+        .unwrap();
+        let response = attach_method_proof(
+            &state,
+            MethodProofRequest {
+                verification: proof.clone(),
+            },
+        )
+        .unwrap();
+        let profile = response.signed_profile.unwrap();
+        assert_eq!(profile.profile.method_verifications, vec![proof.clone()]);
+        assert!(satspath_core::evaluate_method_trust_for_profile(
+            &profile.profile,
+            &method,
+            now(),
+            None
+        )
+        .is_verified());
+        let store = TransactionalTransparencyStore::open(dir.path()).unwrap();
+        let before = store.load_log().unwrap().events().len();
+        assert!(attach_method_proof(
+            &state,
+            MethodProofRequest {
+                verification: proof
+            }
+        )
+        .is_err());
+        assert_eq!(store.load_log().unwrap().events().len(), before);
+        let renewal = build_signature_attestation(
+            &method,
+            wallet.identity_pubkey.as_deref().unwrap(),
+            ProofType::OnchainAddressSignature,
+            &spending.secret_key,
+            issued + 1,
+            Some(issued + 7200),
+        )
+        .unwrap();
+        attach_method_proof(
+            &state,
+            MethodProofRequest {
+                verification: renewal.clone(),
+            },
+        )
+        .unwrap();
+        // Unrelated Lightning edits and a daemon restart retain the exact proof.
+        wallet.lightning_address = Some("other@example.com".into());
+        sign_and_store(dir.path(), &mut wallet, "devnet").unwrap();
+        save_wallet(dir.path(), &wallet).unwrap();
+        let restarted = test_state(dir.path());
+        let signed = crate::handlers::profile::profile_response(&restarted)
+            .unwrap()
+            .signed_profile
+            .unwrap();
+        assert_eq!(signed.profile.method_verifications, vec![renewal]);
+        let log = store.load_log().unwrap();
+        assert!(satspath_core::transparency::verify_event_profile(
+            log.events().last().unwrap(),
+            &signed
+        )
+        .unwrap());
+        // Method replacement invalidates its proof, not just a display badge.
+        wallet.onchain_address = Some(
+            bitcoin::Address::p2tr(
+                &bitcoin::secp256k1::Secp256k1::new(),
+                bitcoin::XOnlyPublicKey::from_slice(&spending.public_key.serialize()[1..]).unwrap(),
+                None,
+                bitcoin::Network::Testnet,
+            )
+            .to_string(),
+        );
+        sign_and_store(dir.path(), &mut wallet, "devnet").unwrap();
+        assert!(store
+            .profile("alice@example.com")
+            .unwrap()
+            .unwrap()
+            .profile
+            .method_verifications
+            .is_empty());
+        save_wallet(dir.path(), &wallet).unwrap();
+        let changed = crate::types::build_methods(&wallet, "devnet")
+            .into_iter()
+            .find(|m| matches!(m, PaymentMethod::Onchain { .. }))
+            .unwrap();
+        let renewed = build_signature_attestation(
+            &changed,
+            wallet.identity_pubkey.as_deref().unwrap(),
+            ProofType::OnchainAddressSignature,
+            &spending.secret_key,
+            issued + 1,
+            Some(issued + 3600),
+        )
+        .unwrap();
+        attach_method_proof(
+            &state,
+            MethodProofRequest {
+                verification: renewed,
+            },
+        )
+        .unwrap();
+        rotate_profile_key(&state).unwrap();
+        assert!(store
+            .profile("alice@example.com")
+            .unwrap()
+            .unwrap()
+            .profile
+            .method_verifications
+            .is_empty());
+    }
+
+    #[test]
+    fn method_proof_invalid_submissions_do_not_mutate_profile_or_wallet() {
+        use crate::handlers::profile::attach_method_proof;
+        use crate::types::MethodProofRequest;
+        use satspath_core::ownership::{
+            build_signature_attestation, ProofType, VerificationStatus,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let mut wallet = load_or_create_identity(dir.path()).unwrap();
+        wallet.alias = Some("alice@example.com".into());
+        let spending = generate_identity_keypair();
+        wallet.ark_server = Some("https://ark.example.com".into());
+        wallet.ark_pubkey = Some(hex::encode(spending.public_key.serialize()));
+        sign_and_store(dir.path(), &mut wallet, "devnet").unwrap();
+        save_wallet(dir.path(), &wallet).unwrap();
+        let method = crate::types::build_methods(&wallet, "devnet").remove(0);
+        let issued = now() - 10;
+        let proof = build_signature_attestation(
+            &method,
+            wallet.identity_pubkey.as_deref().unwrap(),
+            ProofType::ArkPubkeySignature,
+            &spending.secret_key,
+            issued,
+            Some(issued + 3600),
+        )
+        .unwrap();
+        let store = TransactionalTransparencyStore::open(dir.path()).unwrap();
+        let original = serde_json::to_value(store.profile("alice@example.com").unwrap()).unwrap();
+        let wallet_before = std::fs::read(crate::config::wallet_path(dir.path())).unwrap();
+        let count = store.load_log().unwrap().events().len();
+        for case in [
+            "expired",
+            "future",
+            "old",
+            "no_expiry",
+            "long",
+            "wrong_method",
+            "signature",
+            "manual",
+        ] {
+            let mut invalid = proof.clone();
+            if let VerificationStatus::Verified {
+                verified_at,
+                expires_at,
+                proof,
+                proof_type,
+            } = &mut invalid.status
+            {
+                match case {
+                    "expired" => *expires_at = Some(now() - 1),
+                    "future" => *verified_at = now() + 100,
+                    "old" => *verified_at = now() - 1000,
+                    "no_expiry" => *expires_at = None,
+                    "long" => *expires_at = Some(issued + 31 * 24 * 3600),
+                    "manual" => *proof_type = ProofType::ManualAttestation,
+                    "signature" => {
+                        if let satspath_core::ownership::OwnershipProof::MessageSignature {
+                            signature,
+                            ..
+                        } = proof
+                        {
+                            *signature = "00".repeat(64);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if case == "wrong_method" {
+                invalid.method_descriptor = "ark:unknown".into();
+            }
+            assert!(
+                attach_method_proof(
+                    &state,
+                    MethodProofRequest {
+                        verification: invalid
+                    }
+                )
+                .is_err(),
+                "{case}"
+            );
+            assert_eq!(
+                serde_json::to_value(store.profile("alice@example.com").unwrap()).unwrap(),
+                original,
+                "{case}"
+            );
+            assert_eq!(store.load_log().unwrap().events().len(), count, "{case}");
+            assert_eq!(
+                std::fs::read(crate::config::wallet_path(dir.path())).unwrap(),
+                wallet_before,
+                "{case}"
+            );
+        }
+        // Ark descriptors omit the server. Changing it must still drop evidence.
+        attach_method_proof(
+            &state,
+            MethodProofRequest {
+                verification: proof,
+            },
+        )
+        .unwrap();
+        wallet.ark_server = Some("https://other-ark.example.com".into());
+        sign_and_store(dir.path(), &mut wallet, "devnet").unwrap();
+        assert!(store
+            .profile("alice@example.com")
+            .unwrap()
+            .unwrap()
+            .profile
+            .method_verifications
+            .is_empty());
+    }
+
+    #[test]
     fn rotation_sequence_is_consistent_across_profile_event_and_registry() {
         let dir = tempfile::tempdir().unwrap();
         let mut wallet = load_or_create_identity(dir.path()).unwrap();
@@ -1653,6 +1904,7 @@ mod tests {
             (reqwest::Method::POST, "/v1/profile/verify"),
             (reqwest::Method::PUT, "/v1/profile"),
             (reqwest::Method::POST, "/v1/profile/methods"),
+            (reqwest::Method::POST, "/v1/profile/methods/proof"),
             (reqwest::Method::POST, "/v1/profile/rotate-key"),
             (reqwest::Method::POST, "/v1/broadcast"),
             (reqwest::Method::POST, "/v1/p2p/resolve"),

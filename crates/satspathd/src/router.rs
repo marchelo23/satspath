@@ -12,8 +12,8 @@ use crate::handlers::{
         mark_notification_read_handler,
     },
     profile::{
-        create_challenge, profile_response, recover_profile_key, rotate_profile_key,
-        update_profile, update_profile_methods, verify_challenge,
+        attach_method_proof, create_challenge, profile_response, recover_profile_key,
+        rotate_profile_key, update_profile, update_profile_methods, verify_challenge,
     },
     quote::{pay_response, quote_response},
     resolve::{dns_resolve_response, resolve_profile, resolve_v2_envelope},
@@ -31,8 +31,9 @@ use crate::http::{
 use crate::rate_limit;
 use crate::types::{
     safety_warnings, AliasRequest, CatenaVerifyRequest, ClaimRequest, ConsistencyVerifyRequest,
-    DnsResolveRequest, InclusionVerifyRequest, PayRequest, PreviewResponse, ProfileRecoverRequest,
-    ProfileUpdateRequest, QuoteRequest, ReceiveRequest, SendRequest, VerifyRequest,
+    DnsResolveRequest, InclusionVerifyRequest, MethodProofRequest, PayRequest, PreviewResponse,
+    ProfileRecoverRequest, ProfileUpdateRequest, QuoteRequest, ReceiveRequest, SendRequest,
+    VerifyRequest,
 };
 use crate::ui::{html_response, INDEX_HTML};
 use crate::v2_api;
@@ -63,6 +64,7 @@ pub(crate) fn route_template(path: &str) -> &'static str {
         "/v1/profile/rotate-key" => "/v1/profile/rotate-key",
         "/v1/profile/recover" => "/v1/profile/recover",
         "/v1/profile/methods" => "/v1/profile/methods",
+        "/v1/profile/methods/proof" => "/v1/profile/methods/proof",
         "/v1/resolve" => "/v1/resolve",
         "/v1/preview" => "/v1/preview",
         "/v1/quote" => "/v1/quote",
@@ -585,6 +587,15 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
             let _guard = state.mutation_lock.lock().await;
             match read_json::<ProfileUpdateRequest>(&mut request, state)
                 .and_then(|body| update_profile_methods(state, body))
+            {
+                Ok(resp) => json_response(StatusCode(200), &resp),
+                Err(e) => read_error_with_status(StatusCode(400), e),
+            }
+        }
+        (Method::Post, "/v1/profile/methods/proof") => {
+            let _guard = state.mutation_lock.lock().await;
+            match read_json::<MethodProofRequest>(&mut request, state)
+                .and_then(|body| attach_method_proof(state, body))
             {
                 Ok(resp) => json_response(StatusCode(200), &resp),
                 Err(e) => read_error_with_status(StatusCode(400), e),

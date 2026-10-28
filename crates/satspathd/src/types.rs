@@ -230,6 +230,12 @@ pub(crate) struct AliasRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MethodProofRequest {
+    pub(crate) verification: satspath_core::ownership::MethodVerification,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct VerifyRequest {
     pub(crate) alias: String,
     pub(crate) token: String,
