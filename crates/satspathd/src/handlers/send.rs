@@ -451,7 +451,7 @@ pub(crate) async fn send_response_with_resolver(
                     };
                     SendResponse::Ok {
                         mode: "preview_only",
-                        rail: decision.rail.to_string(),
+                        rail: decision.method.method_name().to_string(),
                         reason: decision.reason,
                         recipient: mask_identifier(&body.recipient),
                         profile_signature_verified: true,

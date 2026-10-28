@@ -2,7 +2,8 @@
 // No cookies, browser storage, token-returning endpoint, or HTML interpolation.
 const PUBLIC_POSTS = new Set([
   '/v1/receive', '/v1/dns/resolve',
-  '/v1/transparency/verify/inclusion', '/v2/resolve',
+  '/v1/transparency/verify/inclusion', '/v1/transparency/verify/catena',
+  '/v1/profile/recover', '/v2/resolve',
 ]);
 
 export function requiresAuthentication(method, pathname) {

@@ -476,6 +476,10 @@ pub fn ark_address(
     if !matches!(hrp.as_str(), "ark" | "tark") || variant != bech32::Variant::Bech32m {
         return Err("invalid Ark network or checksum".into());
     }
+    let expected_len = if hrp == "ark" { 114 } else { 115 };
+    if address.len() != expected_len {
+        return Err("invalid Ark address length for prefix".into());
+    }
     let bytes = Vec::<u8>::from_base32(&data).map_err(|e| e.to_string())?;
     if bytes.len() != 65 || bytes[0] != 0 {
         return Err("unsupported Ark version or length".into());

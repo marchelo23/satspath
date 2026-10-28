@@ -40,9 +40,9 @@ pub fn ark_receive_payload(
         bail!("unsupported VTXO pointer or expired Ark method");
     }
     let (mainnet, _, output_key) = decode_ark_address(address)?;
-    let expected_mainnet = match network.to_ascii_lowercase().as_str() {
+    let expected_mainnet = match network.trim().to_ascii_lowercase().as_str() {
         "bitcoin" | "mainnet" => true,
-        "testnet" | "signet" | "regtest" | "devnet" => false,
+        "testnet" | "signet" | "regtest" | "devnet" | "mutinynet" => false,
         _ => bail!("unsupported Ark handoff network"),
     };
     if mainnet != expected_mainnet {
@@ -222,6 +222,7 @@ mod tests {
             bech32::encode("ark", valid_bytes.to_base32(), bech32::Variant::Bech32).unwrap(),
             bech32::encode("ark", invalid_point.to_base32(), bech32::Variant::Bech32m).unwrap(),
             bech32::encode("ark", vec![0; 64].to_base32(), bech32::Variant::Bech32m).unwrap(),
+            format!("{}q", address("ark", 0, key(1), key(2))),
         ] {
             assert!(decode_ark_address(&bad).is_err(), "{bad}");
         }

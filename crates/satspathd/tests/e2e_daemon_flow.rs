@@ -689,6 +689,7 @@ async fn acceptance_ark_receive_uses_bip321_ark_param() {
 
     for update in [
         json!({"ark_address": address}),
+        json!({"ark_asp_pubkey": operator.to_string()}),
         json!({"ark_address": address, "ark_asp_pubkey": receiver.to_string()}),
         json!({"ark_address": address.to_uppercase(), "ark_asp_pubkey": operator.to_string()}),
         json!({"ark_server":"https://ark.example.com", "ark_pubkey":pubkey(7).to_string(), "ark_address":address, "ark_asp_pubkey":operator.to_string()}),

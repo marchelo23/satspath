@@ -29,7 +29,7 @@ test('one unlock authenticates all owner mutations but no public requests', asyn
     await client.request(path);
     assert.equal(calls.at(-1).options.headers.has('authorization'), false);
   }
-  for (const path of ['/v1/receive', '/v1/dns/resolve', '/v1/transparency/verify/inclusion', '/v2/resolve']) {
+  for (const path of ['/v1/receive', '/v1/dns/resolve', '/v1/transparency/verify/inclusion', '/v1/transparency/verify/catena', '/v1/profile/recover', '/v2/resolve']) {
     await client.request(path, { method: 'POST' });
     assert.equal(calls.at(-1).options.headers.has('authorization'), false);
   }
