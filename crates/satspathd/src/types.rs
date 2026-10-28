@@ -217,6 +217,8 @@ pub(crate) struct ProfileUpdateRequest {
     pub(crate) silent_payment_address: Option<String>,
     pub(crate) ark_server: Option<String>,
     pub(crate) ark_pubkey: Option<String>,
+    pub(crate) ark_address: Option<String>,
+    pub(crate) ark_asp_pubkey: Option<String>,
     #[serde(default)]
     pub(crate) remove_methods: Vec<String>,
     pub(crate) recovery_policy: Option<satspath_core::recovery::RecoveryPolicy>,
@@ -369,7 +371,7 @@ pub(crate) fn build_methods(wallet: &WalletState, network: &str) -> Vec<PaymentM
             server: server.clone(),
             pubkey: pubkey.clone(),
             vtxo_pointer: None,
-            opaque_uri: None,
+            opaque_uri: wallet.ark_address.clone(),
             proof: None,
             expires_at: None,
         });

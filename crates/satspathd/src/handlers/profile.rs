@@ -175,6 +175,8 @@ pub(crate) fn apply_method_updates(
         || body.silent_payment_address.is_some()
         || body.ark_server.is_some()
         || body.ark_pubkey.is_some()
+        || body.ark_address.is_some()
+        || body.ark_asp_pubkey.is_some()
         || !body.remove_methods.is_empty()
         || body.recovery_policy.is_some();
     if !allow_empty && !has_method {
@@ -198,6 +200,7 @@ pub(crate) fn apply_method_updates(
             "ark" => {
                 wallet.ark_server = None;
                 wallet.ark_pubkey = None;
+                wallet.ark_address = None;
             }
             _ => anyhow::bail!("unknown payment method removal: {method}"),
         }
@@ -235,9 +238,31 @@ pub(crate) fn apply_method_updates(
             validate_compressed_pubkey(&pubkey)?;
             wallet.ark_server = Some(server);
             wallet.ark_pubkey = Some(pubkey);
+            // Updating a legacy receiver cannot retain a stale contract address.
+            wallet.ark_address = None;
         }
         (None, None) => {}
         _ => anyhow::bail!("ark_server and ark_pubkey must be provided together"),
+    }
+    match (body.ark_address, body.ark_asp_pubkey) {
+        (Some(address), Some(asp_pubkey)) => {
+            validate_compressed_pubkey(&asp_pubkey)?;
+            let (_, operator, _) = satspath_router::ark_receive::decode_ark_address(&address)?;
+            let expected = bitcoin::secp256k1::PublicKey::from_slice(&hex::decode(asp_pubkey)?)?
+                .x_only_public_key()
+                .0;
+            if operator != expected {
+                anyhow::bail!("Ark address operator does not match the pinned ASP key");
+            }
+            wallet.ark_address = Some(address);
+            let method = build_methods(wallet, network)
+                .into_iter()
+                .find(|m| matches!(m, satspath_core::PaymentMethod::Ark { .. }))
+                .ok_or_else(|| anyhow::anyhow!("Ark address requires server and output pubkey"))?;
+            satspath_router::ark_receive::ark_receive_payload(&method, network, None)?;
+        }
+        (None, None) => {}
+        _ => anyhow::bail!("ark_address and ark_asp_pubkey must be provided together"),
     }
     wallet.updated_at = Some(now());
     Ok(())

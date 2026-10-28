@@ -17,6 +17,35 @@ produce an `ArkToArk` intent. This does not require Boltz, Lightning, or an
 on-chain swap. Current SatsPath CLI output is preview/intents unless explicitly
 testnet-executed and supported by the local bridge.
 
+### Standard daemon receive handoff
+
+Configure `POST /v1/profile/methods` with `ark_server`, `ark_pubkey`,
+`ark_address`, and `ark_asp_pubkey`. The address must come from the host wallet;
+SatsPath does not derive a contract from its signing key. For address-backed
+methods, `ark_pubkey` is the **compressed Taproot output key** encoded in that
+address, not the wallet's internal/signing key. `ark_asp_pubkey` is the compressed
+operator key obtained independently from the wallet/ASP discovery data. Both
+keys must match the address. The pin is checked at configuration; it is not
+an independent online authentication or liveness check.
+
+The daemon stores the address in the signed method's `opaque_uri` field and
+returns `bitcoin:?ark=<address>`, appending `&amount=<decimal BTC>` for an
+amount-bound request. The decoder checks the version-zero Bech32m checksum,
+payload length, both curve points, and `ark` (mainnet) versus `tark` (test
+networks). `tark` alone cannot distinguish testnet, signet, and regtest.
+Server/key-only legacy methods remain readable but cannot emit a payable QR.
+Replacing the server/key clears any previous address; resubmit both address
+and operator pin to enable the new receive handoff.
+
+`validate_ark_asp` also checks an address against validated `ArkAspInfo` returned
+by `LiveArkAspClient::get_asp_info`. `build_qr_payload_with_ark_asp` accepts that
+state explicitly and also checks the exact intended chain and ASP dust limit
+before delegating to the canonical QR builder. Public `/v1/receive` does not perform
+outbound network discovery. An address is not a verified VTXO DAG, proof of
+funds, ownership attestation, or payment execution authorization. Quotes retain
+their existing independently verified ownership gates. Host-wallet execution
+of Ark payment intents remains unsupported.
+
 ## Ark Swap Routes
 
 Ark swaps are different from direct Ark receive:
@@ -32,10 +61,10 @@ fails closed for execution.
 
 ## Current Status
 
-- Daemon receive currently builds a private `satspath:ark?...` pointer that is
-  rejected by the final handoff gate. Standard `bitcoin:?ark=...` reception has
-  a pending ignored acceptance test; see [#186](https://github.com/satspath/satspath/issues/186).
-  General payable quotes remain gated, regardless of the component APIs below.
+- Daemon receive and router QR generation support validated `bitcoin:?ark=...`
+  addresses with exact BTC amounts. The acceptance test for
+  [#186](https://github.com/satspath/satspath/issues/186) is enabled.
+  General payable quotes still require independent ownership verification.
 - Ark route planning and scoring are implemented.
 - Live Ark ASP client connector (`LiveArkAspClient`) queries ASP signer public keys, unilateral exit delays, and dust limits (`/v1/info`).
 - VTXO covenant tree DAG verification (`verify_ark_vtxo_dag`) and non-custodial host-wallet settlement handoff structures (`ArkBoardingHandoff`, `ArkForfeitHandoff`, `ArkOorPaymentRequest`) are implemented in `crates/satspath-router/src/ark.rs`.

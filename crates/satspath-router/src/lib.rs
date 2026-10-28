@@ -1,4 +1,5 @@
 pub mod ark;
+pub mod ark_receive;
 pub mod ark_routes;
 pub mod bip353_preview;
 pub mod bolt12;

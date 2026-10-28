@@ -82,7 +82,7 @@ pub(crate) fn receive_view(state: &AppState, req: ReceiveRequest) -> Result<Rece
             let sep = if payload.contains('?') { "&" } else { "?" };
             payload = format!("{}{}amount={}", payload, sep, fmt_btc(sats));
         } else if matches!(method, PaymentMethod::Ark { .. }) {
-            payload = format!("{}&amount={}", payload, sats);
+            payload = format!("{}&amount={}", payload, fmt_btc(sats));
         }
         // Note: Lightning Address/LNURL doesn't support amount in the static string.
     }
@@ -120,8 +120,16 @@ pub(crate) fn receive_payload_for(method: &PaymentMethod) -> Result<String> {
                 anyhow::bail!("on-chain method has no address or silent payment pubkey")
             }
         },
-        PaymentMethod::Ark { server, pubkey, .. } => {
-            format!("satspath:ark?server={server}&pubkey={pubkey}")
+        PaymentMethod::Ark {
+            opaque_uri: Some(address),
+            ..
+        } => {
+            let (mainnet, _, _) = satspath_router::ark_receive::decode_ark_address(address)?;
+            satspath_router::ark_receive::ark_receive_payload(
+                method,
+                if mainnet { "mainnet" } else { "testnet" },
+                None,
+            )?
         }
         _ => anyhow::bail!("selected method has no receive pointer"),
     };
@@ -443,7 +451,7 @@ pub(crate) async fn send_response_with_resolver(
                     };
                     SendResponse::Ok {
                         mode: "preview_only",
-                        rail: decision.rail.to_string(),
+                        rail: decision.method.method_name().to_string(),
                         reason: decision.reason,
                         recipient: mask_identifier(&body.recipient),
                         profile_signature_verified: true,
@@ -594,9 +602,7 @@ pub(crate) fn send_payload_for(method: &PaymentMethod, amount_sats: u64) -> Resu
                 anyhow::bail!("on-chain method has no address or silent payment pubkey")
             }
         },
-        PaymentMethod::Ark { server, pubkey, .. } => {
-            format!("satspath:ark?server={server}&pubkey={pubkey}&amount={amount_sats}")
-        }
+        PaymentMethod::Ark { .. } => satspath_router::build_qr_payload(method, amount_sats)?,
         _ => anyhow::bail!("selected method has no payable pointer"),
     };
     assert_no_private_material(&payload)?;
@@ -737,6 +743,8 @@ mod tests {
         let profile = crate::handlers::profile::update_profile(
             &state,
             crate::types::ProfileUpdateRequest {
+                ark_address: None,
+                ark_asp_pubkey: None,
                 alias: Some("alice@example.com".into()),
                 lightning_address: Some("alice@example.com".into()),
                 onchain_address: None,

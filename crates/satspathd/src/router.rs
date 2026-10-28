@@ -205,14 +205,15 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
 
     let is_mutation = !matches!(method, Method::Get | Method::Head | Method::Options);
     let is_public_mutation = path == "/v1/receive"
-        || path == "/v1/send"
         || path == "/v1/dns/resolve"
         || path == "/v1/transparency/verify/inclusion"
         || path == "/v1/transparency/verify/catena"
         || path == "/v1/profile/recover"
         || path == "/v2/resolve";
 
-    if is_mutation && !is_public_mutation {
+    let is_private_read = matches!(method, Method::Get | Method::Head)
+        && matches!(path.as_str(), "/v1/invites" | "/v1/invites/notifications");
+    if (is_mutation && !is_public_mutation) || is_private_read {
         if let Err(e) = check_auth(&request, &state.auth_token) {
             let resp = json_error(StatusCode(401), e)
                 .with_header(crate::http::request_id_header(&request_id));

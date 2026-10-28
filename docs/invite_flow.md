@@ -14,7 +14,7 @@ identifier -> no signed profile -> create invite -> [future: receiver proves ali
 - **Identity-key boundary:** A future production receiver should hold its own identity key locally. In the current development-only mock claim, the daemon signs with its own local identity key, **not** a receiver-controlled key; its signature is not proof of email/domain ownership.
 - **Authenticated sender attribution:** An invite may carry a Schnorr signature (`sender_signature`) bound to `sender_pubkey`. Unsigned invites are treated as unauthenticated.
 - **Strict expiry:** Reject any invite whose `expires_at` has passed. Do not extend the expiry on claim.
-- **Claim fails closed:** `POST /v1/claim` cannot establish control of an email address or domain. The public `/v1/send` response already contains the claim URL, and `/v1/invites` exposes invite IDs; neither an ID, matching alias hash, sender signature nor an independently signed profile proves receiver ownership of the alias. Without a production alias-control verifier/attestation, claims are disabled on mainnet, testnet and signet. They are also disabled by default on devnet/regtest.
+- **Claim fails closed:** `POST /v1/claim` cannot establish control of an email address or domain. Authenticated `/v1/send` returns the claim URL, and authenticated `/v1/invites` lists invite IDs; neither an ID, matching alias hash, sender signature nor an independently signed profile proves receiver ownership of the alias. Without a production alias-control verifier/attestation, claims are disabled on mainnet, testnet and signet. They are also disabled by default on devnet/regtest.
 - **Explicit insecure development mode only:** `--dev-mock-alias-verification` (or `SATSPATH_DEV_MOCK_ALIAS_VERIFICATION=1`) allows the daemon-identity claim path on **devnet/regtest only**. It does **not** verify alias control, and the resulting signed profile and transparency checkpoint do **not** constitute email/domain ownership proof. Never use it for real recipients or rely on it for payment trust. Externally supplied `signed_profile` is rejected even in mock mode: it supplies neither an alias attestation nor an independently signed `NameEvent` authorization. No Bitcoin spending key is generated or handled by claim.
 
 ---
@@ -87,7 +87,7 @@ identifier -> no signed profile -> create invite -> [future: receiver proves ali
 
 ### 2. Claim Invite (development mock only)
 - **Endpoint:** `POST /v1/claim`
-- **Auth:** None (Public mutation; the invite ID is public and is **not** an authorization token)
+- **Auth:** Bearer token (`admin.macaroon` / `SATSPATHD_AUTH_TOKEN`); the invite ID is **not** an authorization token.
 - **Availability:** Fail-closed HTTP 400 by default, even with a valid ID and `signed_profile`. On mainnet/testnet/signet it remains disabled with or without the mock flag. On devnet/regtest it works only with explicit `--dev-mock-alias-verification` (or `SATSPATH_DEV_MOCK_ALIAS_VERIFICATION=1`); the mock supplies **no** proof of email/domain ownership. A real verifier and alias attestation are still pending.
 - **Request:**
   ```json
@@ -113,13 +113,13 @@ identifier -> no signed profile -> create invite -> [future: receiver proves ali
 
 ### 3. List Invites
 - **Endpoint:** `GET /v1/invites`
-- **Auth:** None (Public `GET`)
+- **Auth:** Bearer token (`admin.macaroon` / `SATSPATHD_AUTH_TOKEN`)
 - **Response:** Array of `InviteRecord` objects.
-- **Security:** IDs are visible here and in public send claim URLs; hiding this list cannot make claim safe without alias verification.
+- **Security:** IDs are visible to the authenticated owner here and in authenticated send responses; possession of an ID cannot make claim safe without alias verification.
 
 ### 4. List Claim Notifications
 - **Endpoint:** `GET /v1/invites/notifications`
-- **Auth:** None (Public `GET`)
+- **Auth:** Bearer token (`admin.macaroon` / `SATSPATHD_AUTH_TOKEN`)
 - **Response:** Array of `ClaimNotification` objects.
 
 ### 5. Mark Notification Read

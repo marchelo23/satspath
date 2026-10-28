@@ -63,7 +63,7 @@ fn shutdown_with_stalled_request(p2p: bool) {
     let request = if p2p {
         "PUT /v1/profile"
     } else {
-        "POST /v1/send"
+        "POST /v1/receive"
     };
     let authorization = if p2p {
         format!("Authorization: Bearer {token}\r\n")

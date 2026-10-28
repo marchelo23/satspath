@@ -50,12 +50,14 @@ pub enum PaymentMethod {
         proof: Option<ArkOwnershipProof>,
         #[serde(default)]
         expires_at: Option<i64>,
-        /// Opaque Arkade receive URI (`ark1q…` address or `ark:` URI).
+        /// Wallet-generated Arkade address or legacy opaque receive URI.
         ///
         /// Set when the user registered via `--arkade-uri` and only a public
         /// receive string is available from Arkade.money.  When `Some`, the
         /// method is always `PreviewOnly` / `execution: manual_wallet`.
-        /// `server` and `pubkey` will be empty strings in this case.
+        /// Legacy opaque-only registrations have empty `server` and `pubkey`.
+        /// Address-backed handoffs retain a server and bind `pubkey` to the
+        /// compressed form of the address's Taproot output key (not a signing key).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         opaque_uri: Option<String>,
     },

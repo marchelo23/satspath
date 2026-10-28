@@ -161,7 +161,11 @@ pub fn validate_payload(
             bail!("BOLT12 offers are not supported as wallet handoffs")
         }
         PaymentMethod::Ark { .. } => {
-            bail!("Ark pointers are not supported as wallet handoffs")
+            let expected = crate::ark_receive::ark_receive_payload(method, network, amount_sats)?;
+            if payload != expected {
+                bail!("Ark URI address, amount, or parameters do not match the selected method");
+            }
+            Ok(())
         }
     }
 }
@@ -172,12 +176,14 @@ pub fn validate_payload(
 /// `Currency::BitcoinTestnet` in [`validate_bolt11`]) for local `satspathd`
 /// development. Testnet and Signet share the `tb` HRP under
 /// `bitcoin::Network::Testnet`, while Mainnet remains strictly isolated.
+/// Mutinynet uses Signet address encoding here; ASP chain identity is checked
+/// separately and remains distinct from public Signet.
 fn configured_network(network: &str) -> Result<BitcoinNetwork> {
-    match network.to_ascii_lowercase().as_str() {
+    match network.trim().to_ascii_lowercase().as_str() {
         "mainnet" | "bitcoin" => Ok(BitcoinNetwork::Mainnet),
         // Intentional alias: local `devnet` uses Testnet/Signet (`tb`) encodings.
         "testnet" | "devnet" => Ok(BitcoinNetwork::Testnet),
-        "signet" => Ok(BitcoinNetwork::Signet),
+        "signet" | "mutinynet" => Ok(BitcoinNetwork::Signet),
         "regtest" => Ok(BitcoinNetwork::Regtest),
         _ => bail!("unsupported daemon network for payment handoff"),
     }

@@ -12,13 +12,13 @@ const routerText = fs.readFileSync(path.join(repoRoot, 'crates/satspathd/src/rou
 
 const PUBLIC_MUTATION_PATHS = new Set([
   '/v1/receive',
-  '/v1/send',
   '/v1/dns/resolve',
   '/v1/transparency/verify/inclusion',
   '/v1/transparency/verify/catena',
   '/v1/profile/recover',
   '/v2/resolve',
 ]);
+const PRIVATE_READ_PATHS = new Set(['/v1/invites', '/v1/invites/notifications']);
 
 const REMOVED_LEGACY_DOCS = [
   'docs/SATSPATH_FUNCIONAMIENTO_Y_ROADMAP.md',
@@ -65,9 +65,29 @@ test('Silent Payment URI schemas cover receive and amount-bound network variants
     assert.ok(!payable.test(`bitcoin:${address}?sp=${wrongKey}&amount=0.00021000`));
   }
   assert.match(schemaBlock('ReceivePayload'), /SilentPaymentReceivePointer/);
-  assert.match(schemaBlock('ReceivePayload'), /PayableOnchainPayload/);
+  assert.match(schemaBlock('ReceivePayload'), /PayablePaymentPayload/);
+  assert.match(schemaBlock('PayablePaymentPayload'), /PayableOnchainPayload/);
+  assert.match(schemaBlock('PayablePaymentPayload'), /ArkPayablePayload/);
   for (const name of ['QuoteOk', 'SendOk', 'PayWalletHandoff']) {
-    assert.match(schemaBlock(name), /schemas\/PayableOnchainPayload/, name);
+    assert.match(schemaBlock(name), /schemas\/PayablePaymentPayload/, name);
+  }
+});
+
+test('Ark schemas cover canonical wallet payloads and reachable response rails', () => {
+  const schemaBlock = name => openapiText.match(new RegExp(`^    ${name}:\\n([\\s\\S]*?)(?=^    \\w+:|$(?![\\s\\S]))`, 'm'))[1];
+  const uriPattern = name => new RegExp(schemaBlock(name).match(/pattern: '([^']+)'/)[1]);
+  const receive = uriPattern('ArkReceivePointer');
+  const payable = uriPattern('ArkPayablePayload');
+  const address = 'ark1qzpq904am6clw3pgqwyh4p02708fy4xs0hcpwt7rwfdttuxsjameetl3ujgrw8089sl27rtp79aqcl0xspkahwnm4teg5lmhe47pxulw9m6rn8';
+  assert.ok(receive.test(`bitcoin:?ark=${address}`));
+  assert.ok(payable.test(`bitcoin:?ark=${address}&amount=0.00005000`));
+  assert.ok(!receive.test(`bitcoin:?ark=${address}&amount=0.00005000`));
+  assert.ok(!payable.test(`bitcoin:?ark=${address}&amount=0.00005000&ark=other`));
+  assert.match(schemaBlock('QuoteOk'), /schemas\/PayableOnchainMethod/);
+  assert.match(schemaBlock('QuoteOk'), /schemas\/ArkMethod/);
+  for (const name of ['ReceiveView', 'SendOk']) {
+    assert.match(schemaBlock(name), /^\s+- Ark$/m, name);
+    assert.match(schemaBlock(name), /^\s+- Onchain$/m, name);
   }
 });
 
@@ -130,6 +150,16 @@ function parseOpenApiOperations(yaml) {
   return operations;
 }
 
+test('invite guide requires owner authentication for claims and private lists', () => {
+  const guide = fs.readFileSync(path.join(repoRoot, 'docs/invite_flow.md'), 'utf8');
+  for (const endpoint of ['POST /v1/claim', 'GET /v1/invites', 'GET /v1/invites/notifications']) {
+    const section = guide.split(`- **Endpoint:** \`${endpoint}\``)[1];
+    assert.ok(section, endpoint);
+    assert.match(section.split('\n')[1], /\*\*Auth:\*\* Bearer token/, endpoint);
+  }
+  assert.match(guide, /GET \/v1\/claim\?invite_id=<UUID>`\n- \*\*Auth:\*\* None \(Public\)/);
+});
+
 function parseApiReferenceTable(markdown) {
   const rows = [];
   const regex = /^\|\s*`([A-Z]+)`\s*\|\s*`([^`]+)`\s*\|\s*(Public|Bearer)\s*\|/gm;
@@ -170,7 +200,7 @@ test('OpenAPI 3.0.3 operations have operationId, responses, and match router aut
     assert.ok(op.hasResponses, `${op.method} ${op.path} must define responses`);
 
     const isMutation = !['GET', 'HEAD', 'OPTIONS'].includes(op.method);
-    const expectedBearer = isMutation && !PUBLIC_MUTATION_PATHS.has(op.path);
+    const expectedBearer = (isMutation && !PUBLIC_MUTATION_PATHS.has(op.path)) || PRIVATE_READ_PATHS.has(op.path);
     assert.equal(
       op.requiresBearer,
       expectedBearer,
@@ -195,7 +225,7 @@ test('API_REFERENCE.md endpoint table matches OpenAPI operations and router auth
 
   for (const row of tableRows) {
     const isMutation = !['GET', 'HEAD', 'OPTIONS'].includes(row.method);
-    const expectedBearer = isMutation && !PUBLIC_MUTATION_PATHS.has(row.path);
+    const expectedBearer = (isMutation && !PUBLIC_MUTATION_PATHS.has(row.path)) || PRIVATE_READ_PATHS.has(row.path);
     assert.equal(
       row.requiresBearer,
       expectedBearer,

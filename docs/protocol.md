@@ -293,7 +293,8 @@ The payload preview formats are:
 - `lnurl:<url>` for LNURL preview,
 - a BOLT11 invoice string only when explicitly fetched by the caller,
 - `bitcoin:<address>?amount=<btc>` for on-chain mainnet preview,
-- `satspath:ark?...&network=mainnet` for Ark public pointer preview.
+- `bitcoin:?ark=<wallet-generated-address>&amount=<btc>` for validated Ark
+  address handoffs; legacy server/key-only pointers fail closed in the daemon.
 
 It must not:
 
