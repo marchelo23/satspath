@@ -710,7 +710,13 @@
   import { createDashboardClient } from '/dashboard-auth.mjs';
   const $ = (id) => document.getElementById(id);
   const authInput = $('dashboard-admin-token');
+  let notificationGeneration = 0; // Locking invalidates both fetch and body-reading work.
   const dashboardAuth = createDashboardClient({ origin: location.origin, onLock: () => {
+    notificationGeneration++;
+    const notifications = $('s-notifications');
+    notifications.innerHTML = '';
+    notifications.classList.add('hidden');
+    notifications.classList.remove('show');
     authInput.value = '';
     authInput.hidden = false;
     $('dashboard-unlock').classList.remove('hidden');
@@ -1089,11 +1095,13 @@
 
   // CLAIM & NOTIFICATIONS
   const loadNotifications = async () => {
+    const generation = notificationGeneration;
     try {
       const box = $("s-notifications");
       const r = await apiFetch("/v1/invites/notifications");
-      if (!r.ok) return;
+      if (generation !== notificationGeneration || !r.ok) return;
       const notes = await r.json();
+      if (generation !== notificationGeneration) return;
       const unread = notes.filter(n => !n.read);
       if (unread.length === 0) {
         hide(box);

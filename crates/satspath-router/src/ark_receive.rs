@@ -283,6 +283,12 @@ mod tests {
         );
         assert!(build_qr_payload_with_ark_asp(&method, 5000, "signet", &info).is_err());
         assert!(build_qr_payload_with_ark_asp(&method, 329, "regtest", &info).is_err());
+        info.network = "mutinynet".into();
+        let payload = build_qr_payload_with_ark_asp(&method, 5000, "mutinynet", &info).unwrap();
+        crate::handoff::validate_payload(&method, &payload, " MUTINYNET ", Some(5000)).unwrap();
+        assert!(build_qr_payload_with_ark_asp(&method, 5000, "signet", &info).is_err());
+        info.network = "signet".into();
+        assert!(build_qr_payload_with_ark_asp(&method, 5000, "mutinynet", &info).is_err());
         info.pubkey = key(3).to_string();
         assert!(validate_ark_asp(&address, &info).is_err());
         info.pubkey = key(1).to_string();
