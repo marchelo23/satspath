@@ -214,6 +214,7 @@ pub(crate) struct ProfileUpdateRequest {
     pub(crate) lightning_address: Option<String>,
     pub(crate) onchain_address: Option<String>,
     pub(crate) onchain_pubkey: Option<String>,
+    pub(crate) silent_payment_address: Option<String>,
     pub(crate) ark_server: Option<String>,
     pub(crate) ark_pubkey: Option<String>,
     #[serde(default)]
@@ -301,6 +302,8 @@ pub(crate) struct ClaimRequest {
     #[serde(default)]
     pub(crate) onchain_pubkey: Option<String>,
     #[serde(default)]
+    pub(crate) silent_payment_address: Option<String>,
+    #[serde(default)]
     pub(crate) ark_server: Option<String>,
     #[serde(default)]
     pub(crate) ark_pubkey: Option<String>,
@@ -337,6 +340,7 @@ pub(crate) struct InspectInviteResponse {
 // Helper to build PaymentMethod list from wallet state
 // ---------------------------------------------------------------------------
 
+/// Build public payment methods from the configured wallet receive pointers.
 pub(crate) fn build_methods(wallet: &WalletState, network: &str) -> Vec<PaymentMethod> {
     let mut methods = Vec::new();
     if let Some(addr) = &wallet.lightning_address {
@@ -348,12 +352,12 @@ pub(crate) fn build_methods(wallet: &WalletState, network: &str) -> Vec<PaymentM
             receiver_pubkey: None,
         });
     }
-    if let Some(addr) = &wallet.onchain_address {
+    if wallet.onchain_address.is_some() || wallet.silent_payment_address.is_some() {
         methods.push(PaymentMethod::Onchain {
             label: format!("Bitcoin ({})", network),
             network: bitcoin_network(network),
-            address: Some(addr.clone()),
-            silent_payment_pubkey: None,
+            address: wallet.onchain_address.clone(),
+            silent_payment_pubkey: wallet.silent_payment_address.clone(),
             pubkey_hint: wallet.onchain_pubkey.clone(),
             descriptor_hint: None,
             address_list: vec![],

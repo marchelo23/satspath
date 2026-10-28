@@ -13,7 +13,6 @@ const routerText = fs.readFileSync(path.join(repoRoot, 'crates/satspathd/src/rou
 const PUBLIC_MUTATION_PATHS = new Set([
   '/v1/receive',
   '/v1/send',
-  '/v1/claim',
   '/v1/dns/resolve',
   '/v1/transparency/verify/inclusion',
   '/v1/transparency/verify/catena',
@@ -39,6 +38,38 @@ const REMOVED_LEGACY_DOCS = [
   'docs/satspath_protocol.md',
   'docs/team_workflow.md',
 ];
+
+test('Silent Payment URI schemas cover receive and amount-bound network variants', () => {
+  const schemaBlock = name => openapiText.match(new RegExp(`^    ${name}:\\n([\\s\\S]*?)(?=^    \\w+:|$(?![\\s\\S]))`, 'm'))[1];
+  const uriPattern = name => new RegExp(schemaBlock(name).match(/pattern: '([^']+)'/)[1]);
+  const receive = uriPattern('SilentPaymentReceivePointer');
+  // Shape fixtures only: checksums and curve points are enforced by the runtime.
+  for (const [network, address, key] of [
+    ['Mainnet', `bc1${'q'.repeat(39)}`, `sp1${'q'.repeat(113)}`],
+    ['Testnet', `tb1${'q'.repeat(39)}`, `tsp1${'q'.repeat(113)}`],
+    ['Regtest', `bcrt1${'q'.repeat(39)}`, `sprt1${'q'.repeat(113)}`],
+  ]) {
+    const payable = uriPattern(`${network}SilentPaymentPayableUri`);
+    for (const addr of ['', address, address.toUpperCase()]) {
+      for (const sp of [key, key.toUpperCase()]) {
+        const uri = `bitcoin:${addr}?sp=${sp}`;
+        assert.ok(receive.test(uri), uri);
+        assert.ok(!payable.test(uri), uri);
+        assert.ok(payable.test(`${uri}&amount=0.00021000`), uri);
+        assert.ok(!receive.test(`${uri}&lightning=attacker`), uri);
+        assert.ok(!payable.test(`${uri}&amount=1e-4`), uri);
+        assert.ok(!payable.test(`${uri}&amount=0.00021000&lightning=attacker`), uri);
+      }
+    }
+    const wrongKey = network === 'Mainnet' ? `sprt1${'q'.repeat(113)}` : `sp1${'q'.repeat(113)}`;
+    assert.ok(!payable.test(`bitcoin:${address}?sp=${wrongKey}&amount=0.00021000`));
+  }
+  assert.match(schemaBlock('ReceivePayload'), /SilentPaymentReceivePointer/);
+  assert.match(schemaBlock('ReceivePayload'), /PayableOnchainPayload/);
+  for (const name of ['QuoteOk', 'SendOk', 'PayWalletHandoff']) {
+    assert.match(schemaBlock(name), /schemas\/PayableOnchainPayload/, name);
+  }
+});
 
 function parseOpenApiOperations(yaml) {
   const lines = yaml.split(/\r?\n/);

@@ -89,7 +89,9 @@ impl TestDaemon {
                 if let Ok(Some(_status)) = child.try_wait() {
                     break;
                 }
-                if TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_ok() {
+                if TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_ok()
+                    && home.path().join("wallet.json").exists()
+                {
                     ready = true;
                     break;
                 }
@@ -249,6 +251,7 @@ async fn daemon_boots_and_reports_non_custodial_safety() {
     );
 }
 
+/// Owner mutations, including claims, reject missing and incorrect admin tokens.
 #[tokio::test]
 async fn mutating_routes_require_bearer_token() {
     let d = TestDaemon::spawn("regtest");
@@ -259,6 +262,7 @@ async fn mutating_routes_require_bearer_token() {
         (Method::POST, "/v1/profile/verify"),
         (Method::POST, "/v1/profile/methods"),
         (Method::POST, "/v1/profile/rotate-key"),
+        (Method::POST, "/v1/claim"),
         (Method::POST, "/v1/transparency/anchors"),
     ] {
         for token in [None, Some(wrong.as_str())] {
@@ -495,13 +499,9 @@ async fn live_bip353_strict_dnssec_resolution_through_daemon() {
 
 /// Spec — Silent Payments (BIP-352) as a first-class daemon receive method.
 ///
-/// Today `ProfileUpdateRequest` has no Silent Payment field, `build_methods`
-/// hard-codes `silent_payment_pubkey: None`, and `receive_payload_for` would
-/// emit the non-standard `bitcoin:sp1...` form. Required: accept and validate
-/// a network-matching `sp`/`tsp`/`sprt` address, sign it into the profile, and
-/// emit a BIP-321 `bitcoin:?sp=` URI.
+/// An SP-configured profile must persist the network-checked pointer in the signed
+/// profile and emit a BIP-321 `bitcoin:?sp=` URI.
 #[tokio::test]
-#[ignore = "acceptance: Silent Payments daemon receive method not implemented yet"]
 async fn acceptance_silent_payment_receive_method() {
     let d = TestDaemon::spawn("regtest");
     d.verify_alias(ALIAS).await;
@@ -536,7 +536,11 @@ async fn acceptance_silent_payment_receive_method() {
             json!({ "silent_payment_address": mainnet_sp }),
         )
         .await;
-    assert_ne!(status, StatusCode::OK, "cross-network SP address accepted");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "cross-network SP address accepted"
+    );
 
     let (status, body) = d.post("/v1/receive", json!({ "rail": "onchain" })).await;
     assert_eq!(status, StatusCode::OK, "{body}");

@@ -1,7 +1,7 @@
 // Interim dashboard auth: a token entered once, held only in this module's closure.
 // No cookies, browser storage, token-returning endpoint, or HTML interpolation.
 const PUBLIC_POSTS = new Set([
-  '/v1/receive', '/v1/send', '/v1/claim', '/v1/dns/resolve',
+  '/v1/receive', '/v1/send', '/v1/dns/resolve',
   '/v1/transparency/verify/inclusion', '/v2/resolve',
 ]);
 

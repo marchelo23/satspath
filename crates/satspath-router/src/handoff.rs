@@ -54,25 +54,47 @@ pub fn validate_payload(
             if method_network != &expected_network {
                 bail!("on-chain method network does not match daemon network");
             }
-            if silent_payment_pubkey.is_some() {
-                bail!("silent payment handoffs are not supported until strict wallet validation is available");
+            if address.is_none() && silent_payment_pubkey.is_none() {
+                bail!("on-chain method has no address or silent payment pubkey");
             }
-            let address = address
-                .as_deref()
-                .context("on-chain method has no address")?;
-            validate_bitcoin_address(address, expected_network)?;
-            // Testnet and regtest share legacy Base58 prefixes; only their
-            // distinct SegWit HRPs can bind a payload to one of these networks.
-            let parsed_address = Address::from_str(address)?;
-            if expected_network != BitcoinNetwork::Mainnet
-                && parsed_address.is_valid_for_network(Network::Testnet)
-                && parsed_address.is_valid_for_network(Network::Regtest)
-            {
-                bail!("ambiguous testnet/regtest legacy address");
+            let btc_network = match expected_network {
+                BitcoinNetwork::Mainnet => Network::Bitcoin,
+                BitcoinNetwork::Regtest => Network::Regtest,
+                _ => Network::Testnet,
+            };
+            if let Some(sp) = silent_payment_pubkey.as_deref() {
+                satspath_handoff::silent(sp, btc_network).map_err(|e| anyhow::anyhow!("{e}"))?;
             }
-            let expected = match amount_sats {
-                Some(amount) => format!("bitcoin:{address}?amount={}", fmt_btc(amount)),
-                None => format!("bitcoin:{address}"),
+            if let Some(addr) = address.as_deref() {
+                validate_bitcoin_address(addr, expected_network)?;
+                // Testnet and regtest share legacy Base58 prefixes; only their
+                // distinct SegWit HRPs can bind a payload to one of these networks.
+                let parsed_address = Address::from_str(addr)?;
+                if expected_network != BitcoinNetwork::Mainnet
+                    && parsed_address.is_valid_for_network(Network::Testnet)
+                    && parsed_address.is_valid_for_network(Network::Regtest)
+                {
+                    bail!("ambiguous testnet/regtest legacy address");
+                }
+            }
+            let expected = match (
+                silent_payment_pubkey.as_deref(),
+                address.as_deref(),
+                amount_sats,
+            ) {
+                (Some(sp), Some(addr), Some(amount)) => {
+                    format!("bitcoin:{addr}?sp={sp}&amount={}", fmt_btc(amount))
+                }
+                (Some(sp), Some(addr), None) => format!("bitcoin:{addr}?sp={sp}"),
+                (Some(sp), None, Some(amount)) => {
+                    format!("bitcoin:?sp={sp}&amount={}", fmt_btc(amount))
+                }
+                (Some(sp), None, None) => format!("bitcoin:?sp={sp}"),
+                (None, Some(addr), Some(amount)) => {
+                    format!("bitcoin:{addr}?amount={}", fmt_btc(amount))
+                }
+                (None, Some(addr), None) => format!("bitcoin:{addr}"),
+                (None, None, _) => bail!("on-chain method has no address or silent payment pubkey"),
             };
             if payload != expected {
                 bail!(
@@ -80,13 +102,21 @@ pub fn validate_payload(
                 );
             }
             let parsed = parse_bip321(payload)?;
-            if parsed.address.as_deref() != Some(address)
+            if parsed.address.as_deref() != address.as_deref()
                 || parsed.amount_btc.as_deref() != amount_sats.map(fmt_btc).as_deref()
-                || !matches!(
-                    parsed.instructions.as_slice(),
-                    [Bip321Instruction::Onchain { .. }]
-                )
             {
+                bail!("Bitcoin URI contains conflicting address or amount");
+            }
+            if let Some(sp) = silent_payment_pubkey.as_deref() {
+                if !parsed.instructions.iter().any(|i| {
+                    matches!(i, Bip321Instruction::SilentPayment { address: parsed_sp } if parsed_sp == sp)
+                }) {
+                    bail!("Bitcoin URI is missing expected silent payment instruction");
+                }
+            } else if !matches!(
+                parsed.instructions.as_slice(),
+                [Bip321Instruction::Onchain { .. }]
+            ) {
                 bail!("Bitcoin URI contains conflicting or unsupported instructions");
             }
             Ok(())
@@ -485,6 +515,100 @@ mod tests {
             "satspath:ark?server=https://ark.example.com",
             "mainnet",
             None
+        )
+        .is_err());
+    }
+
+    /// Bind SP-only and combined URIs to the exact configured keys, network, and amount.
+    #[test]
+    fn silent_payment_handoff_validates_bip321_uri() {
+        let secp = secp256k1::Secp256k1::new();
+        let scan = secp256k1::PublicKey::from_secret_key(
+            &secp,
+            &secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap(),
+        );
+        let spend = secp256k1::PublicKey::from_secret_key(
+            &secp,
+            &secp256k1::SecretKey::from_slice(&[3u8; 32]).unwrap(),
+        );
+        let sp = crate::silent_payments::create_silent_payment_address_for_network(
+            &scan,
+            &spend,
+            Network::Regtest,
+        )
+        .unwrap();
+
+        let method = PaymentMethod::Onchain {
+            label: "regtest SP".into(),
+            network: BitcoinNetwork::Regtest,
+            address: None,
+            silent_payment_pubkey: Some(sp.clone()),
+            pubkey_hint: None,
+            descriptor_hint: None,
+            address_list: vec![],
+        };
+
+        let receive = format!("bitcoin:?sp={sp}");
+        let payable = format!("{receive}&amount=0.00021000");
+
+        validate_payload(&method, &receive, "regtest", None).unwrap();
+        validate_payload(&method, &payable, "regtest", Some(21_000)).unwrap();
+
+        // Mismatched amount
+        assert!(validate_payload(&method, &payable, "regtest", Some(50_000)).is_err());
+        // Mismatched network
+        assert!(validate_payload(&method, &payable, "mainnet", Some(21_000)).is_err());
+
+        let address = segwit_address(Network::Regtest);
+        let mut combined = method.clone();
+        if let PaymentMethod::Onchain { address: addr, .. } = &mut combined {
+            *addr = Some(address.clone());
+        }
+        let combined_receive = format!("bitcoin:{address}?sp={sp}");
+        validate_payload(&combined, &combined_receive, "regtest", None).unwrap();
+        validate_payload(
+            &combined,
+            &format!("{combined_receive}&amount=0.00021000"),
+            "regtest",
+            Some(21_000),
+        )
+        .unwrap();
+
+        let other_sp = crate::silent_payments::create_silent_payment_address_for_network(
+            &spend,
+            &scan,
+            Network::Regtest,
+        )
+        .unwrap();
+        assert_ne!(sp, other_sp);
+        for (selected, uri) in [(&method, &receive), (&combined, &combined_receive)] {
+            assert!(
+                validate_payload(selected, &uri.replace(&sp, &other_sp), "regtest", None,).is_err()
+            );
+            assert!(validate_payload(
+                selected,
+                &format!("{uri}&lightning=attacker"),
+                "regtest",
+                None,
+            )
+            .is_err());
+        }
+
+        let mainnet_sp =
+            crate::silent_payments::create_silent_payment_address(&scan, &spend).unwrap();
+        let mut mismatched = method;
+        if let PaymentMethod::Onchain {
+            silent_payment_pubkey,
+            ..
+        } = &mut mismatched
+        {
+            *silent_payment_pubkey = Some(mainnet_sp.clone());
+        }
+        assert!(validate_payload(
+            &mismatched,
+            &format!("bitcoin:?sp={mainnet_sp}"),
+            "regtest",
+            None,
         )
         .is_err());
     }

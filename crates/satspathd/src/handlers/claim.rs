@@ -75,6 +75,7 @@ fn ensure_invite_claim_enabled(state: &AppState) -> Result<()> {
     Ok(())
 }
 
+/// Claim an invite only in explicit development mock mode after the router's auth gate.
 pub(crate) fn claim_invite_handler(state: &AppState, body: ClaimRequest) -> Result<ClaimResponse> {
     ensure_invite_claim_enabled(state)?;
     // A signature over the profile proves possession of its identity key, not
@@ -150,6 +151,7 @@ pub(crate) fn claim_invite_handler(state: &AppState, body: ClaimRequest) -> Resu
         lightning_address: body.lightning_address,
         onchain_address: body.onchain_address,
         onchain_pubkey: body.onchain_pubkey,
+        silent_payment_address: body.silent_payment_address,
         ark_server: body.ark_server,
         ark_pubkey: body.ark_pubkey,
         remove_methods: vec![],

@@ -82,6 +82,8 @@ pub(crate) struct WalletState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) onchain_pubkey: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) silent_payment_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) ark_server: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) ark_pubkey: Option<String>,

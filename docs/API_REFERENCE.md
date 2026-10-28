@@ -98,7 +98,7 @@ The rule is method-based, not route-based:
 
 1. Any request that is **not** `GET`, `HEAD`, or `OPTIONS` requires the Bearer
    token, **except** this public allow-list:
-   `POST /v1/receive`, `POST /v1/send`, `POST /v1/claim`, `POST /v1/dns/resolve`,
+   `POST /v1/receive`, `POST /v1/send`, `POST /v1/dns/resolve`,
    `POST /v1/transparency/verify/inclusion`, `POST /v1/transparency/verify/catena`,
    `POST /v1/profile/recover`, and `POST /v2/resolve`.
 2. `GET`, `HEAD`, and `OPTIONS` requests are never authenticated.
@@ -294,7 +294,7 @@ List endpoints accept `offset` (default 0) and `limit` (default 50, clamped to
 | :--- | :--- | :--- | :--- |
 | `GET` | `/v1/claim?invite_id=` | Public | Inspect an invite |
 | `GET` | `/v1/claim/{id}` | Public | Inspect an invite (path form) |
-| `POST` | `/v1/claim` | Public | Disabled by default; insecure devnet/regtest mock claim only |
+| `POST` | `/v1/claim` | Bearer | Disabled by default; insecure devnet/regtest mock claim only |
 | `GET` | `/v1/invites` | Public | List invites |
 | `GET` | `/v1/invites/notifications` | Public | List claim notifications |
 | `POST` | `/v1/invites/notifications/read-all` | Bearer | Mark all read |
@@ -304,7 +304,8 @@ List endpoints accept `offset` (default 0) and `limit` (default 50, clamped to
 when the daemon's claim gate is disabled. Public `/v1/send` returns the claim URL
 and public `/v1/invites` exposes IDs: possession of an ID, a matching alias hash,
 or a signed profile does **not** prove control of an email address/domain. No
-production claim verifier or alias attestation exists. `POST /v1/claim` fails
+production claim verifier or alias attestation exists. `POST /v1/claim` requires
+admin authentication; even authenticated requests fail
 closed (HTTP 400, without changing invite, wallet or transparency state) by
 default and on mainnet/testnet/signet even if the mock flag is set. Only
 `--dev-mock-alias-verification` (or `SATSPATH_DEV_MOCK_ALIAS_VERIFICATION=1`)
@@ -436,15 +437,25 @@ production without a real alias-control verifier.
 
 After the wallet-handoff gate in [#159](https://github.com/satspath/satspath/pull/159),
 `/v1/quote`, `/v1/preview`, `/v1/pay`, and successful `/v1/send` responses emit
-only on-chain BIP-21 payloads whose address, network, and exact amount pass
+only on-chain Bitcoin URIs whose address and/or Silent Payment key, network, and exact amount pass
 final validation. A BOLT11 invoice can be validated against its payee, network,
 amount, and expiry, but these quote paths do not generate one. Lightning
-Addresses and LNURL links remain **amount-less receive pointers**; BOLT12, Ark,
-and Silent Payment handoffs return `no_route` or an explicit receive error until
-protocol-aware validation is wired into the daemon quote endpoints. On
-`/v1/receive`, an omitted rail prefers on-chain when `amount_sats` is set and
-Lightning otherwise; explicitly selecting an unsupported rail does not bypass
-validation.
+Addresses and LNURL links remain **amount-less receive pointers**. BOLT12 and Ark
+remain unavailable as amount-bound quote/pay/send handoffs and fail closed on
+receive. Configure Silent Payments with `silent_payment_address` (BIP-352,
+validated against the daemon network); remove it independently with
+`{"remove_methods":["silent_payment"]}`. On-chain receives emit
+`bitcoin:?sp=<key>` or `bitcoin:<address>?sp=<key>`, appending `&amount=<BTC>`
+when an amount is requested. Without a rail, receive
+prefers on-chain when `amount_sats` is set and Lightning otherwise.
+
+**Silent Payments compatibility note:** receive, quote, pay, and send responses
+can now contain `sp` URIs, including SP-only methods without a static address.
+This adds response variants; address-only BIP-21 payloads remain unchanged.
+Strict generated clients that accept only `PayableBip21Payload` must be updated
+to handle `PayableOnchainPayload` and `SilentPaymentReceivePointer` where applicable.
+Clients and wallets without Silent Payment support must reject these payloads
+explicitly rather than dropping the `sp` instruction.
 
 `POST /v1/pay` wraps an `ok` quote as `status: wallet_handoff` with
 `payment_payload`, `qr_svg`, and `handoff.daemon_executes_payment: false`.
