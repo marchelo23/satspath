@@ -94,25 +94,33 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9737/v1/dashboard/auth
 
 ### Which routes are protected
 
-The rule is method-based, not route-based:
+Mutations require authentication except for an explicit public allow-list;
+private invite listings require authentication even for reads:
 
 1. Any request that is **not** `GET`, `HEAD`, or `OPTIONS` requires the Bearer
    token, **except** this public allow-list:
-   `POST /v1/receive`, `POST /v1/send`, `POST /v1/dns/resolve`,
+   `POST /v1/receive`, `POST /v1/dns/resolve`,
    `POST /v1/transparency/verify/inclusion`, `POST /v1/transparency/verify/catena`,
    `POST /v1/profile/recover`, and `POST /v2/resolve`.
-2. `GET`, `HEAD`, and `OPTIONS` requests are never authenticated.
+2. `/v1/invites` and `/v1/invites/notifications` require the token, including
+   `GET`/`HEAD`. Other `GET`, `HEAD`, and `OPTIONS` requests remain public.
 
 Consequences worth knowing:
 
-* `POST /v1/resolve`, `/v1/quote`, `/v1/preview`, and `/v1/pay` **require the
-  token** even though they only read and compute.
+* `POST /v1/resolve`, `/v1/quote`, `/v1/preview`, `/v1/pay`, and `/v1/send`
+  **require the token**. Send can persist invitations; an unauthenticated
+  caller cannot trigger that mutation.
 * `POST /v1/transparency/verify/consistency` requires the token, while the
   inclusion and Catena verifiers are public.
 * Read-only `GET` endpoints such as `/v1/status`, `/v1/profile`, `/v1/node`,
-  `/v1/invites`, and `/v1/diagnostics/rate_limit` are open to anyone who can
+  and `/v1/diagnostics/rate_limit` are open to anyone who can
   reach the port. `/v1/status` includes the daemon home path. Bind to loopback
   or restrict access at the proxy.
+
+**Authentication compatibility:** `/v1/send` and the two invite-list endpoints
+now require the owner Bearer token. Existing clients must attach it; the
+dashboard's centralized client handles this after unlocking the tab. Public
+inspection of a single invite via `/v1/claim?invite_id=...` remains unchanged.
 
 ---
 
@@ -251,7 +259,7 @@ across 50 paths.
 | `POST` | `/v1/quote` | Bearer | Quote the best rail |
 | `POST` | `/v1/preview` | Bearer | Quote plus safety warnings |
 | `POST` | `/v1/pay` | Bearer | Wallet handoff (never executes payment) |
-| `POST` | `/v1/send` | Public | Preview send using the verified local SQLite profile; otherwise no route or experimental invite for a truly unknown alias |
+| `POST` | `/v1/send` | Bearer | Preview send using the verified local SQLite profile; otherwise no route or experimental invite for a truly unknown alias |
 | `POST` | `/v1/receive` | Public | Receive payload and QR for own profile |
 | `POST` | `/v1/dns/resolve` | Public | Resolve a BIP-353 name (local DNSSEC) |
 | `POST` | `/v1/p2p/resolve` | Bearer | Resolve a P2P candidate (EXPERIMENTAL) |
@@ -295,14 +303,14 @@ List endpoints accept `offset` (default 0) and `limit` (default 50, clamped to
 | `GET` | `/v1/claim?invite_id=` | Public | Inspect an invite |
 | `GET` | `/v1/claim/{id}` | Public | Inspect an invite (path form) |
 | `POST` | `/v1/claim` | Bearer | Disabled by default; insecure devnet/regtest mock claim only |
-| `GET` | `/v1/invites` | Public | List invites |
-| `GET` | `/v1/invites/notifications` | Public | List claim notifications |
+| `GET` | `/v1/invites` | Bearer | List invites |
+| `GET` | `/v1/invites/notifications` | Bearer | List claim notifications |
 | `POST` | `/v1/invites/notifications/read-all` | Bearer | Mark all read |
 | `POST` | `/v1/invites/notifications/{id}/read` | Bearer | Mark one read |
 
 `GET /v1/claim` remains public for inspection, but reports `is_claimable: false`
-when the daemon's claim gate is disabled. Public `/v1/send` returns the claim URL
-and public `/v1/invites` exposes IDs: possession of an ID, a matching alias hash,
+when the daemon's claim gate is disabled. Authenticated `/v1/send` returns the claim URL
+and authenticated `/v1/invites` lists IDs: possession of an ID, a matching alias hash,
 or a signed profile does **not** prove control of an email address/domain. No
 production claim verifier or alias attestation exists. `POST /v1/claim` requires
 admin authentication; even authenticated requests fail
@@ -495,7 +503,7 @@ names differ:
 | Issue listed | Reality |
 | :--- | :--- |
 | `GET /v1/status`, `/v1/node` | Implemented as listed. |
-| `POST /v1/resolve`, `/quote`, `/preview`, `/pay`, `/send` | Implemented. First four need the Bearer token; `/v1/send` is public. |
+| `POST /v1/resolve`, `/quote`, `/preview`, `/pay`, `/send` | Implemented. All require the Bearer token. |
 | `POST /v1/register` | **Does not exist.** Unauthenticated requests return `401`; authenticated requests reach the `404` fallback. Profiles are created through `/v1/profile/challenge`, `/verify`, then `PUT /v1/profile`. `POST /v1/receive` builds a receive payload and does not register anything. |
 | `GET /v1/transparency/events`, `/checkpoints` | Implemented, paginated. |
 | `POST /v1/transparency/anchors` | Implemented, Bearer, regtest only. |

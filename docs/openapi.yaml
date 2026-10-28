@@ -1224,7 +1224,7 @@ paths:
       tags:
       - Resolution & Routing
       summary: Preview send with local transparency and ownership checks
-      description: '**Public.** Resolves a local SQLite profile and verifies its signature, transparency inclusion, key continuity and payment-method ownership before routing. A profile found only in the legacy registry or external resolver is not payable here. Returns a validated, amount-bound on-chain payload and QR (`mode: preview_only`) or `no_route` for an unsafe/unverified rail. Only a locally unknown alias creates a persisted experimental invite; claiming it is disabled by default. The daemon never executes a payment.'
+      description: '**Requires Bearer.** Resolves a local SQLite profile and verifies its signature, transparency inclusion, key continuity and payment-method ownership before routing. A profile found only in the legacy registry or external resolver is not payable here. Returns a validated, amount-bound on-chain or address-backed Ark payload and QR (`mode: preview_only`) or `no_route` for an unsafe/unverified rail. Only a locally unknown alias creates a persisted experimental invite; claiming it is disabled by default. The daemon never executes a payment.'
       operationId: send
       requestBody:
         required: true
@@ -1232,7 +1232,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/SendRequest'
-      security: []
+      security:
+      - bearerAuth: []
       responses:
         '200':
           description: Success.
@@ -1243,7 +1244,7 @@ paths:
               example:
                 status: ok
                 mode: preview_only
-                rail: onchain
+                rail: Onchain
                 reason: Validated on-chain route selected.
                 recipient: a***@example.com
                 profile_signature_verified: true
@@ -1260,6 +1261,8 @@ paths:
                   manages_signed_profiles: true
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '429':
@@ -1271,7 +1274,7 @@ paths:
       summary: Receive payload and QR for own profile
       description: '**Public.** Builds a validated public receive pointer from the local wallet''s configured
         methods. An amount-less Lightning Address or LNURL remains receive-only; amount-bound payloads
-        use a validated on-chain BIP-21 URI. Experimental rails fail closed. Errors return HTTP 200
+        use a validated on-chain or address-backed Ark Bitcoin URI. Legacy Ark pointers and BOLT12 fail closed. Errors return HTTP 200
         with an `Error` body.'
       operationId: receive
       requestBody:
@@ -2540,7 +2543,8 @@ paths:
       summary: List invites
       description: All locally stored invite records.
       operationId: listInvites
-      security: []
+      security:
+      - bearerAuth: []
       responses:
         '200':
           description: Success. **On failure the daemon also answers HTTP 200** with an `Error` body.
@@ -2564,6 +2568,8 @@ paths:
                 expires_at: 1782896400
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '429':
           $ref: '#/components/responses/TooManyRequests'
   /v1/invites/notifications:
@@ -2573,7 +2579,8 @@ paths:
       summary: List claim notifications
       description: Notifications for claimed invites.
       operationId: listNotifications
-      security: []
+      security:
+      - bearerAuth: []
       responses:
         '200':
           description: Success. **On failure the daemon also answers HTTP 200** with an `Error` body.
@@ -2596,6 +2603,8 @@ paths:
                 read: false
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '429':
           $ref: '#/components/responses/TooManyRequests'
   /v1/invites/notifications/read-all:
@@ -2884,7 +2893,7 @@ components:
           nullable: true
         opaque_uri:
           type: string
-          description: Opaque Arkade receive URI; `server`/`pubkey` are empty strings when set.
+          description: Legacy opaque-only methods have empty server/pubkey; address-backed methods retain non-empty server and compressed output pubkey.
       required:
       - type
       - label
@@ -4351,7 +4360,9 @@ components:
         recipient:
           $ref: '#/components/schemas/QuoteRecipient'
         selected_method:
-          $ref: '#/components/schemas/PayableOnchainMethod'
+          oneOf:
+          - $ref: '#/components/schemas/PayableOnchainMethod'
+          - $ref: '#/components/schemas/ArkMethod'
         fee_sats:
           type: integer
           format: int64
@@ -4845,6 +4856,7 @@ components:
           enum:
           - Lightning
           - Onchain
+          - Ark
         payload:
           $ref: '#/components/schemas/ReceivePayload'
         qr_svg:
@@ -4917,7 +4929,8 @@ components:
         rail:
           type: string
           enum:
-          - onchain
+          - Onchain
+          - Ark
         reason:
           type: string
         recipient:

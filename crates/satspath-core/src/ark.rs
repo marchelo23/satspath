@@ -202,6 +202,7 @@ pub fn ark_ownership_challenge(
     )
 }
 
+/// Require an unambiguous HTTPS operator URL without credentials or fragments.
 pub fn validate_ark_server_url(server: &str) -> Result<()> {
     assert_no_private_material(server)?;
     let parsed =
@@ -214,6 +215,11 @@ pub fn validate_ark_server_url(server: &str) -> Result<()> {
     if parsed.host_str().is_none() {
         return Err(SatsPathError::InvalidPaymentPointer(
             "Ark server URL must include a host".into(),
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.fragment().is_some() {
+        return Err(SatsPathError::InvalidPaymentPointer(
+            "Ark server URL must not contain credentials or a fragment".into(),
         ));
     }
     Ok(())

@@ -82,16 +82,52 @@ pub fn validate_ark_asp(address: &str, info: &crate::ark::ArkAspInfo) -> Result<
     Ok(())
 }
 
+/// Build an amount-bound wallet URI using validated ASP discovery state.
+/// Unlike an address's test-network prefix, the ASP state binds the exact chain.
+/// Callers obtain this state from `LiveArkAspClient::get_asp_info`; this helper
+/// performs no network requests and does not authenticate caller-invented state.
+pub fn build_qr_payload_with_ark_asp(
+    method: &PaymentMethod,
+    amount_sats: u64,
+    network: &str,
+    info: &crate::ark::ArkAspInfo,
+) -> Result<String> {
+    let PaymentMethod::Ark {
+        opaque_uri: Some(address),
+        ..
+    } = method
+    else {
+        bail!("ASP-backed handoff requires a wallet-generated Ark address");
+    };
+    validate_ark_asp(address, info)?;
+    let canonical = |name: &str| match name.trim().to_ascii_lowercase().as_str() {
+        "bitcoin" | "mainnet" => "mainnet".to_owned(),
+        "devnet" => "testnet".to_owned(),
+        other => other.to_owned(),
+    };
+    if canonical(network) != canonical(&info.network) {
+        bail!("ASP network does not match the intended handoff network");
+    }
+    if amount_sats < info.dust_limit_sats {
+        bail!("Ark amount is below the ASP dust limit");
+    }
+    let payload = crate::build_qr_payload(method, amount_sats)?;
+    crate::handoff::validate_payload(method, &payload, network, Some(amount_sats))?;
+    Ok(payload)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bech32::ToBase32;
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
 
+    /// Deterministic public fixture key; never used in production.
     fn key(n: u8) -> PublicKey {
         PublicKey::from_secret_key(&Secp256k1::new(), &SecretKey::from_slice(&[n; 32]).unwrap())
     }
 
+    /// Encode a public wire-format fixture, including unsupported-version cases.
     fn address(hrp: &str, version: u8, operator: PublicKey, output: PublicKey) -> String {
         let bytes = [
             vec![version],
@@ -102,6 +138,7 @@ mod tests {
         bech32::encode(hrp, bytes.to_base32(), bech32::Variant::Bech32m).unwrap()
     }
 
+    /// A wallet-address-backed method with independently chosen operator/output keys.
     fn method(hrp: &str) -> PaymentMethod {
         PaymentMethod::Ark {
             label: "Ark".into(),
@@ -115,6 +152,7 @@ mod tests {
     }
 
     #[test]
+    /// Cross-check decoding against the published Arkade SDK example.
     fn official_sdk_vector_decodes_without_reencoding() {
         // https://docs.arkadeos.com/wallets/getting-started/addresses
         let (_, operator, output) = decode_ark_address("ark1qzpq904am6clw3pgqwyh4p02708fy4xs0hcpwt7rwfdttuxsjameetl3ujgrw8089sl27rtp79aqcl0xspkahwnm4teg5lmhe47pxulw9m6rn8").unwrap();
@@ -129,6 +167,7 @@ mod tests {
     }
 
     #[test]
+    /// The outgoing URI is bound to its exact selected method and amount.
     fn qr_binds_address_amount_network_and_all_parameters() {
         for (hrp, network) in [("ark", "mainnet"), ("tark", "regtest")] {
             let method = method(hrp);
@@ -160,6 +199,7 @@ mod tests {
     }
 
     #[test]
+    /// Reject malformed addresses and legacy, expired or mismatched method state.
     fn malformed_and_legacy_addresses_fail_closed() {
         let valid = address("ark", 0, key(1), key(2));
         let mut bad_checksum = valid.clone();
@@ -207,9 +247,21 @@ mod tests {
             }
             assert!(crate::build_qr_payload(&m, 5000).is_err(), "{m:?}");
         }
+        for server in [
+            "https://user@ark.example.com",
+            "https://user:pass@ark.example.com",
+            "https://ark.example.com/#fragment",
+        ] {
+            let mut m = method("ark");
+            if let PaymentMethod::Ark { server: value, .. } = &mut m {
+                *value = server.into();
+            }
+            assert!(crate::build_qr_payload(&m, 5000).is_err(), "{server}");
+        }
     }
 
     #[test]
+    /// Discovery state must bind both keys, exact chain and operational amount constraints.
     fn discovery_parameters_bind_operator_and_network() {
         let address = address("tark", 0, key(1), key(2));
         let mut info = crate::ark::ArkAspInfo {
@@ -223,6 +275,13 @@ mod tests {
             fees: None,
         };
         validate_ark_asp(&address, &info).unwrap();
+        let method = method("tark");
+        assert_eq!(
+            build_qr_payload_with_ark_asp(&method, 5000, "regtest", &info).unwrap(),
+            crate::build_qr_payload(&method, 5000).unwrap()
+        );
+        assert!(build_qr_payload_with_ark_asp(&method, 5000, "signet", &info).is_err());
+        assert!(build_qr_payload_with_ark_asp(&method, 329, "regtest", &info).is_err());
         info.pubkey = key(3).to_string();
         assert!(validate_ark_asp(&address, &info).is_err());
         info.pubkey = key(1).to_string();
@@ -234,6 +293,7 @@ mod tests {
     }
 
     #[test]
+    /// Native/browser shared validation uses the same key and network policy.
     fn shared_handoff_checker_enforces_the_same_address_policy() {
         let address = address("tark", 0, key(1), key(2));
         for (network, valid) in [

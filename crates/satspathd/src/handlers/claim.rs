@@ -54,7 +54,7 @@ pub(crate) fn inspect_invite_handler(
     })
 }
 
-/// An invite ID (also returned by public /v1/send) and a matching alias hash do
+/// An invite ID (also returned by authenticated /v1/send) and a matching alias hash do
 /// not establish control of an email address or domain. No production alias
 /// attestation is implemented for this endpoint. Keep the gate ahead of every
 /// store or wallet access, including the externally signed profile path.

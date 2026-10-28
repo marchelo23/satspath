@@ -38,7 +38,9 @@ Replacing the server/key clears any previous address; resubmit both address
 and operator pin to enable the new receive handoff.
 
 `validate_ark_asp` also checks an address against validated `ArkAspInfo` returned
-by `LiveArkAspClient::get_asp_info`. Public `/v1/receive` does not perform
+by `LiveArkAspClient::get_asp_info`. `build_qr_payload_with_ark_asp` accepts that
+state explicitly and also checks the exact intended chain and ASP dust limit
+before delegating to the canonical QR builder. Public `/v1/receive` does not perform
 outbound network discovery. An address is not a verified VTXO DAG, proof of
 funds, ownership attestation, or payment execution authorization. Quotes retain
 their existing independently verified ownership gates. Host-wallet execution

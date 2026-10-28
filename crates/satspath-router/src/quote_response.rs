@@ -627,6 +627,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Valid address-backed Ark routes use normal selection, preserve ownership gates and reject a different daemon network.
     async fn address_backed_ark_uses_the_quote_router_and_final_network_gate() {
         let address = "ark1qzpq904am6clw3pgqwyh4p02708fy4xs0hcpwt7rwfdttuxsjameetl3ujgrw8089sl27rtp79aqcl0xspkahwnm4teg5lmhe47pxulw9m6rn8";
         let method = PaymentMethod::Ark {

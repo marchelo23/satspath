@@ -6,6 +6,7 @@ import { createDashboardClient, requiresAuthentication } from '../src/dashboard-
 const adminToken = 'a'.repeat(64);
 const origin = 'http://127.0.0.1:9737';
 const ownerMutations = [
+  ['POST', '/v1/send'], ['GET', '/v1/invites'], ['GET', '/v1/invites/notifications'],
   ['POST', '/v1/claim'],
   ['POST', '/v1/profile/challenge'], ['POST', '/v1/profile/verify'],
   ['PUT', '/v1/profile'], ['POST', '/v1/profile/methods'],
@@ -24,11 +25,11 @@ test('one unlock authenticates all owner mutations but no public requests', asyn
     await client.request(path, { method });
     assert.equal(calls.at(-1).options.headers.get('authorization'), `Bearer ${adminToken}`);
   }
-  for (const path of ['/health', '/v1/control', '/v1/transparency/status', '/v1/invites/notifications', '/v1/claim?invite_id=id']) {
+  for (const path of ['/health', '/v1/control', '/v1/transparency/status', '/v1/claim?invite_id=id']) {
     await client.request(path);
     assert.equal(calls.at(-1).options.headers.has('authorization'), false);
   }
-  for (const path of ['/v1/send', '/v1/receive', '/v1/dns/resolve', '/v1/transparency/verify/inclusion', '/v2/resolve']) {
+  for (const path of ['/v1/receive', '/v1/dns/resolve', '/v1/transparency/verify/inclusion', '/v2/resolve']) {
     await client.request(path, { method: 'POST' });
     assert.equal(calls.at(-1).options.headers.has('authorization'), false);
   }

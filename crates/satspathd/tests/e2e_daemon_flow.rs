@@ -133,6 +133,18 @@ impl TestDaemon {
         decode(resp).await
     }
 
+    /// Read private local invite state using the owner credential.
+    async fn get_auth(&self, path: &str) -> (StatusCode, Value) {
+        let resp = self
+            .http
+            .get(format!("{}{path}", self.base))
+            .bearer_auth(TOKEN)
+            .send()
+            .await
+            .expect("authenticated GET");
+        decode(resp).await
+    }
+
     async fn get_text(&self, path: &str) -> (StatusCode, String) {
         let resp = self
             .http
@@ -297,13 +309,14 @@ async fn foreign_host_and_non_json_mutations_are_rejected() {
     let non_json = d
         .http
         .post(format!("{}/v1/send", d.base))
+        .bearer_auth(TOKEN)
         .header("Content-Type", "text/plain")
         .body(r#"{"recipient":"nobody@unknown.invalid","amount_sats":10000}"#)
         .send()
         .await
         .expect("non-JSON request");
     assert_eq!(non_json.status(), StatusCode::BAD_REQUEST);
-    let (status, invites) = d.get("/v1/invites").await;
+    let (status, invites) = d.get_auth("/v1/invites").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(invites, json!([]), "non-JSON send created an invite");
 }
@@ -398,11 +411,39 @@ async fn profile_lifecycle_produces_verifiable_transparency_log() {
 }
 
 #[tokio::test]
+/// Sending and enumerating private invites require owner authentication, without side effects on rejection.
+async fn send_and_invite_lists_require_owner_authentication() {
+    let d = TestDaemon::spawn("regtest");
+    for token in [None, Some("wrong-token")] {
+        let mut request = d
+            .http
+            .post(format!("{}/v1/send", d.base))
+            .json(&json!({"recipient":"nobody@unknown.invalid", "amount_sats":5000}));
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        let (status, body) = decode(request.send().await.unwrap()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        for path in ["/v1/invites", "/v1/invites/notifications"] {
+            let status = d.request_with_token(Method::GET, path, token).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+        }
+    }
+    let (status, invites) = d.get_auth("/v1/invites").await;
+    assert_eq!(status, StatusCode::OK, "{invites}");
+    assert_eq!(
+        invites,
+        json!([]),
+        "rejected send must not create an invite"
+    );
+}
+
+#[tokio::test]
 async fn send_to_unknown_alias_never_returns_payable_route() {
     let d = TestDaemon::spawn("regtest");
     d.bootstrap_onchain_profile().await;
     let (status, body) = d
-        .post(
+        .post_auth(
             "/v1/send",
             json!({ "recipient": "nobody@unknown.invalid", "amount_sats": 10_000 }),
         )
@@ -651,6 +692,8 @@ async fn acceptance_ark_receive_uses_bip321_ark_param() {
         json!({"ark_address": address, "ark_asp_pubkey": receiver.to_string()}),
         json!({"ark_address": address.to_uppercase(), "ark_asp_pubkey": operator.to_string()}),
         json!({"ark_server":"https://ark.example.com", "ark_pubkey":pubkey(7).to_string(), "ark_address":address, "ark_asp_pubkey":operator.to_string()}),
+        json!({"ark_server":"https://user:pass@ark.example.com", "ark_pubkey":receiver.to_string(), "ark_address":address, "ark_asp_pubkey":operator.to_string()}),
+        json!({"ark_server":"https://ark.example.com/#fragment", "ark_pubkey":receiver.to_string(), "ark_address":address, "ark_asp_pubkey":operator.to_string()}),
     ] {
         let (status, _) = d.post_auth("/v1/profile/methods", update).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -672,7 +715,7 @@ async fn acceptance_ark_receive_uses_bip321_ark_param() {
 
     // The configured receive pointer is not an independent ownership proof.
     let (status, body) = d
-        .post("/v1/send", json!({"recipient":ALIAS,"amount_sats":5000}))
+        .post_auth("/v1/send", json!({"recipient":ALIAS,"amount_sats":5000}))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["status"], "no_route", "{body}");

@@ -1,12 +1,13 @@
 // Interim dashboard auth: a token entered once, held only in this module's closure.
 // No cookies, browser storage, token-returning endpoint, or HTML interpolation.
 const PUBLIC_POSTS = new Set([
-  '/v1/receive', '/v1/send', '/v1/dns/resolve',
+  '/v1/receive', '/v1/dns/resolve',
   '/v1/transparency/verify/inclusion', '/v2/resolve',
 ]);
 
 export function requiresAuthentication(method, pathname) {
   const verb = method.toUpperCase();
+  if (['GET', 'HEAD'].includes(verb) && ['/v1/invites', '/v1/invites/notifications'].includes(pathname)) return true;
   if (['GET', 'HEAD', 'OPTIONS'].includes(verb)) return false;
   // Mirror the backend's public mutation exceptions, not an owner allowlist.
   return !PUBLIC_POSTS.has(pathname);

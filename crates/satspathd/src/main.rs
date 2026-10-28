@@ -1356,6 +1356,7 @@ mod tests {
         let (home, invite_id) = create_claim_test_invite(&client, &base_url).await;
         let invites: serde_json::Value = client
             .get(format!("{base_url}/v1/invites"))
+            .bearer_auth("test_token")
             .send()
             .await
             .unwrap()
@@ -1505,6 +1506,7 @@ mod tests {
         assert_eq!(inspect["is_claimable"], false);
         let notifications: serde_json::Value = client
             .get(format!("{base_url}/v1/invites/notifications"))
+            .bearer_auth("test_token")
             .send()
             .await
             .unwrap()
@@ -1909,7 +1911,13 @@ mod tests {
         let endpoint = format!("{base}/v1/send");
         let json = r#"{"recipient":"content-type@example.com","amount_sats":25000}"#;
 
-        let missing = client.post(&endpoint).body(json).send().await.unwrap();
+        let missing = client
+            .post(&endpoint)
+            .bearer_auth("test_token")
+            .body(json)
+            .send()
+            .await
+            .unwrap();
         assert_eq!(missing.status(), reqwest::StatusCode::BAD_REQUEST);
         let missing: serde_json::Value = missing.json().await.unwrap();
         assert!(missing["error"]
@@ -1919,6 +1927,7 @@ mod tests {
 
         let wrong = client
             .post(&endpoint)
+            .bearer_auth("test_token")
             .header("Content-Type", "text/plain")
             .body(json)
             .send()
@@ -1928,6 +1937,7 @@ mod tests {
 
         let valid = client
             .post(&endpoint)
+            .bearer_auth("test_token")
             .header("Content-Type", "application/json; charset=utf-8")
             .body(json)
             .send()
@@ -1999,7 +2009,7 @@ mod tests {
         let addr = base.strip_prefix("http://").unwrap();
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         let request = format!(
-            "POST /v1/send HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n401\r\n{}\r\n0\r\n\r\n",
+            "POST /v1/send HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer test_token\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n401\r\n{}\r\n0\r\n\r\n",
             "a".repeat(1025)
         );
         stream.write_all(request.as_bytes()).await.unwrap();
