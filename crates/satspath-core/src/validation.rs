@@ -309,11 +309,26 @@ pub fn validate_public_profile(profile: &PaymentProfile) -> Result<()> {
                 opaque_uri,
                 ..
             } => {
-                if let Some(uri) = opaque_uri {
+                if let Some(uri) = opaque_uri
+                    .as_ref()
+                    .filter(|_| server.is_empty() && pubkey.is_empty())
+                {
                     // Arkade opaque URI path -- server + pubkey are empty sentinels.
                     // Validate only the public URI; ownership proof is not possible.
                     crate::ark::validate_arkade_opaque_uri(uri)?;
                 } else {
+                    if let Some(address) = opaque_uri {
+                        satspath_handoff::ark(
+                            server,
+                            &hex::decode(pubkey)
+                                .map_err(|e| SatsPathError::InvalidPublicKey(e.to_string()))?,
+                            vtxo_pointer.as_deref(),
+                            Some(address),
+                            *expires_at,
+                            chrono::Utc::now().timestamp(),
+                        )
+                        .map_err(SatsPathError::InvalidPaymentPointer)?;
+                    }
                     // Full server + pubkey path -- existing validation.
                     let pointer = ArkReceivePointer {
                         server: server.clone(),

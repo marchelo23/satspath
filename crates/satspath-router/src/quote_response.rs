@@ -103,9 +103,9 @@ impl QuoteResponse {
 /// Resolve, verify, route, and build a payment payload for `recipient`.
 ///
 /// Uses the local registry for known aliases, otherwise the public resolver chain.
-/// Only amount-bound, validated on-chain payloads are emitted. Lightning and
-/// experimental rails return `no_route` until a network-bound invoice handoff
-/// can be validated here; an amount-less pointer is never a payable QR.
+/// Only amount-bound, validated on-chain or address-backed Ark payloads are
+/// emitted. Unsupported rails return `no_route`; an amount-less pointer is
+/// never a payable QR.
 ///
 /// Returns a [`QuoteResponse`] for every protocol outcome (found / not
 /// registered / no route / invalid signature) — the frontend never sees a Rust
@@ -207,7 +207,8 @@ pub async fn quote_verified_profile_for_network(
 ///
 /// - **On-chain** — a validated Bitcoin URI with an address and/or BIP-352 `sp`
 ///   receive pointer, bound to the requested amount.
-/// - **Lightning, BOLT12, Ark** — fail closed until a
+/// - **Ark** — a validated wallet-generated address, bound to an exact BTC amount.
+/// - **Lightning, BOLT12, legacy Ark pointers** — fail closed until a
 ///   network- and amount-bound payload can be validated.
 pub fn build_qr_payload(method: &PaymentMethod, amount_sats: u64) -> satspath_core::Result<String> {
     validate_amount_sats(amount_sats)?;
@@ -245,6 +246,18 @@ pub fn build_qr_payload(method: &PaymentMethod, amount_sats: u64) -> satspath_co
                     ));
                 }
             };
+            (payload, network)
+        }
+        PaymentMethod::Ark {
+            opaque_uri: Some(address),
+            ..
+        } => {
+            let (mainnet, _, _) = crate::ark_receive::decode_ark_address(address)
+                .map_err(|e| SatsPathError::InvalidPaymentPointer(e.to_string()))?;
+            let network = if mainnet { "mainnet" } else { "testnet" };
+            let payload =
+                crate::ark_receive::ark_receive_payload(method, network, Some(amount_sats))
+                    .map_err(|e| SatsPathError::InvalidPaymentPointer(e.to_string()))?;
             (payload, network)
         }
         PaymentMethod::Ark { .. } | PaymentMethod::Bolt12(_) => {
@@ -367,16 +380,21 @@ async fn route_verified_signed(
     // so an unpayable preferred rail (e.g. static Lightning pointer) does not
     // shadow a valid on-chain handoff.
     let mut last_payload_err = None;
-    signed
-        .profile
-        .methods
-        .retain(|method| match build_qr_payload(method, amount_sats) {
+    signed.profile.methods.retain(|method| {
+        match build_qr_payload(method, amount_sats).and_then(|payload| {
+            if matches!(method, PaymentMethod::Ark { .. }) {
+                validate_payload(method, &payload, network, Some(amount_sats))
+                    .map_err(|e| SatsPathError::InvalidPaymentPointer(e.to_string()))?;
+            }
+            Ok(payload)
+        }) {
             Ok(_) => true,
             Err(e) => {
                 last_payload_err = Some(e);
                 false
             }
-        });
+        }
+    });
     if signed.profile.methods.is_empty() {
         return QuoteResponse::NoRoute {
             reason: match last_payload_err {
@@ -606,6 +624,61 @@ mod tests {
             recovery: None,
         };
         (profile, kp.secret_key)
+    }
+
+    #[tokio::test]
+    async fn address_backed_ark_uses_the_quote_router_and_final_network_gate() {
+        let address = "ark1qzpq904am6clw3pgqwyh4p02708fy4xs0hcpwt7rwfdttuxsjameetl3ujgrw8089sl27rtp79aqcl0xspkahwnm4teg5lmhe47pxulw9m6rn8";
+        let method = PaymentMethod::Ark {
+            label: "Ark".into(),
+            server: "https://ark.example.com".into(),
+            pubkey: "02aff1e490371de72c3eaf0d61f17a0c7de6806ddbba7baaf28a7f77cd7c1373ee".into(),
+            opaque_uri: Some(address.into()),
+            vtxo_pointer: None,
+            proof: None,
+            expires_at: None,
+        };
+        let (profile, secret) = base_profile("alice@example.com", vec![method.clone()]);
+        let signed = sign(profile, &secret);
+        // Exercise the internal post-verification routing stage with fixed fees;
+        // the public verified-profile API must still reject an empty allow-list.
+        let denied = quote_verified_profile_for_network(
+            signed.clone(),
+            "alice@example.com",
+            5000,
+            &[],
+            "mainnet",
+        )
+        .await;
+        assert!(matches!(denied, QuoteResponse::NoRoute { .. }));
+        for (network, valid) in [("mainnet", true), ("regtest", false)] {
+            let response = route_verified_signed(
+                signed.clone(),
+                "alice@example.com",
+                "test-hash",
+                5000,
+                Some(cheap_fees()),
+                network,
+            )
+            .await;
+            if valid {
+                let QuoteResponse::Ok {
+                    selected_method,
+                    qr,
+                    ..
+                } = response
+                else {
+                    panic!("{response:?}")
+                };
+                assert_eq!(selected_method, method);
+                assert_eq!(qr, format!("bitcoin:?ark={address}&amount=0.00005000"));
+            } else {
+                assert!(
+                    matches!(response, QuoteResponse::NoRoute { .. }),
+                    "{response:?}"
+                );
+            }
+        }
     }
 
     /// A valid signature and allowed SP descriptor cannot reactivate a revoked profile.

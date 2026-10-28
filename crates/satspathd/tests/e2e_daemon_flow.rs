@@ -597,13 +597,23 @@ async fn acceptance_bolt12_offer_receive_method() {
 
 /// Spec — Ark receive pointers use a standard wallet-scannable URI.
 ///
-/// Today the daemon emits a private `satspath:ark?server=…&pubkey=…` scheme that
-/// no Ark wallet can scan, and `build_qr_payload` fails closed for Ark.
-/// Required: emit a BIP-321 `bitcoin:` URI carrying an `ark=` Ark address
-/// derived from / validated against the ASP (`LiveArkAspClient::get_asp_info`).
+/// A wallet-provided address binds its output key and pinned ASP operator key.
+/// No contract is synthesized from a wallet signing key.
 #[tokio::test]
-#[ignore = "acceptance: standard Ark receive URI not implemented yet"]
 async fn acceptance_ark_receive_uses_bip321_ark_param() {
+    let operator = pubkey(4);
+    let receiver = pubkey(5);
+    let raw = [
+        vec![0],
+        operator.x_only_public_key().0.serialize().to_vec(),
+        receiver.x_only_public_key().0.serialize().to_vec(),
+    ]
+    .concat();
+    let address = bitcoin::bech32::encode::<bitcoin::bech32::Bech32m>(
+        bitcoin::bech32::Hrp::parse("tark").unwrap(),
+        &raw,
+    )
+    .unwrap();
     let d = TestDaemon::spawn("regtest");
     d.verify_alias(ALIAS).await;
     let (status, body) = d
@@ -611,11 +621,17 @@ async fn acceptance_ark_receive_uses_bip321_ark_param() {
             "/v1/profile/methods",
             json!({
                 "ark_server": "https://ark.example.com",
-                "ark_pubkey": pubkey(5).to_string(),
+                "ark_pubkey": receiver.to_string(),
+                "ark_address": address,
+                "ark_asp_pubkey": operator.to_string(),
             }),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["signed_profile"].to_string().contains(&address),
+        "{body}"
+    );
 
     let (status, body) = d
         .post(
@@ -625,11 +641,54 @@ async fn acceptance_ark_receive_uses_bip321_ark_param() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let payload = body["payload"].as_str().unwrap_or_default();
-    assert!(
-        payload.starts_with("bitcoin:"),
-        "non-standard Ark URI: {payload}"
-    );
-    assert!(payload.contains("ark="), "missing ark= param: {payload}");
+    assert_eq!(payload, format!("bitcoin:?ark={address}&amount=0.00005000"));
+    let (status, body) = d.post("/v1/receive", json!({"rail":"ark"})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["payload"], format!("bitcoin:?ark={address}"));
+
+    for update in [
+        json!({"ark_address": address}),
+        json!({"ark_address": address, "ark_asp_pubkey": receiver.to_string()}),
+        json!({"ark_address": address.to_uppercase(), "ark_asp_pubkey": operator.to_string()}),
+        json!({"ark_server":"https://ark.example.com", "ark_pubkey":pubkey(7).to_string(), "ark_address":address, "ark_asp_pubkey":operator.to_string()}),
+    ] {
+        let (status, _) = d.post_auth("/v1/profile/methods", update).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // An operator mismatch cannot replace a valid stored receive pointer.
+    let (status, _) = d
+        .post_auth(
+            "/v1/profile/methods",
+            json!({
+                "ark_address": address, "ark_asp_pubkey": pubkey(6).to_string()
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, body) = d.post("/v1/receive", json!({"rail":"ark"})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["payload"], format!("bitcoin:?ark={address}"));
+
+    // The configured receive pointer is not an independent ownership proof.
+    let (status, body) = d
+        .post("/v1/send", json!({"recipient":ALIAS,"amount_sats":5000}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "no_route", "{body}");
+
+    // Replacing just the legacy server/key pair clears the previous address.
+    let (status, body) = d
+        .post_auth(
+            "/v1/profile/methods",
+            json!({"ark_server":"https://ark.example.com", "ark_pubkey":receiver.to_string()}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["wallet"].get("ark_address").is_none(), "{body}");
+    let (_, body) = d.post("/v1/receive", json!({"rail":"ark"})).await;
+    assert!(body.get("error").is_some(), "{body}");
+    assert!(body.get("payload").is_none(), "{body}");
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────

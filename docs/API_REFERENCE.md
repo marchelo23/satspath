@@ -437,12 +437,18 @@ production without a real alias-control verifier.
 
 After the wallet-handoff gate in [#159](https://github.com/satspath/satspath/pull/159),
 `/v1/quote`, `/v1/preview`, `/v1/pay`, and successful `/v1/send` responses emit
-only on-chain Bitcoin URIs whose address and/or Silent Payment key, network, and exact amount pass
+validated Bitcoin URIs whose on-chain address, Silent Payment key, or Ark address, network, and exact amount pass
 final validation. A BOLT11 invoice can be validated against its payee, network,
 amount, and expiry, but these quote paths do not generate one. Lightning
-Addresses and LNURL links remain **amount-less receive pointers**. BOLT12 and Ark
-remain unavailable as amount-bound quote/pay/send handoffs and fail closed on
-receive. Configure Silent Payments with `silent_payment_address` (BIP-352,
+Addresses and LNURL links remain **amount-less receive pointers**. BOLT12 and
+legacy server/key-only Ark pointers fail closed. Configure address-backed Ark
+with `ark_server`, `ark_pubkey` (compressed contract output key), `ark_address`
+(wallet-generated Bech32m), and `ark_asp_pubkey` (operator pin obtained from the
+wallet/ASP). The output key, operator pin, and mainnet/test-network prefix must
+match the address. Receives emit `bitcoin:?ark=<address>` with an optional
+`&amount=<BTC>`; quote/pay/send still require independently verified ownership.
+This is not a live ASP or VTXO check. See [Ark routes](ark_routes.md).
+Configure Silent Payments with `silent_payment_address` (BIP-352,
 validated against the daemon network); remove it independently with
 `{"remove_methods":["silent_payment"]}`. On-chain receives emit
 `bitcoin:?sp=<key>` or `bitcoin:<address>?sp=<key>`, appending `&amount=<BTC>`

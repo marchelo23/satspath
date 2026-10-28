@@ -95,14 +95,21 @@ pub fn validate_method(
             vtxo_pointer,
             opaque_uri,
             expires_at,
-        } => ark(
-            server,
-            &hex::decode(pubkey).map_err(|e| e.to_string())?,
-            vtxo_pointer,
-            opaque_uri,
-            expires_at,
-            now,
-        ),
+        } => {
+            if let (Some(address), Some(network)) = (opaque_uri, expected_network) {
+                if ark_address(address)?.0 != (network == Network::Bitcoin) {
+                    return Err("Ark address network mismatch".into());
+                }
+            }
+            ark(
+                server,
+                &hex::decode(pubkey).map_err(|e| e.to_string())?,
+                vtxo_pointer,
+                opaque_uri,
+                expires_at,
+                now,
+            )
+        }
         PaymentMethod::Bolt12(offer, network) => {
             if expected_network.is_some_and(|expected| network.is_some_and(|n| n != expected)) {
                 return Err("BOLT12 method network mismatch".into());
@@ -458,8 +465,31 @@ pub fn bolt12(value: &str, network: Option<Network>, now: u64) -> Result<(), Str
     Ok(())
 }
 
+/// Decode a canonical Arkade version-zero address into its network and keys.
+pub fn ark_address(
+    address: &str,
+) -> Result<(bool, secp256k1::XOnlyPublicKey, secp256k1::XOnlyPublicKey), String> {
+    if !(114..=115).contains(&address.len()) || address != address.to_ascii_lowercase() {
+        return Err("non-canonical Ark address".into());
+    }
+    let (hrp, data, variant) = bech32::decode(address).map_err(|e| e.to_string())?;
+    if !matches!(hrp.as_str(), "ark" | "tark") || variant != bech32::Variant::Bech32m {
+        return Err("invalid Ark network or checksum".into());
+    }
+    let bytes = Vec::<u8>::from_base32(&data).map_err(|e| e.to_string())?;
+    if bytes.len() != 65 || bytes[0] != 0 {
+        return Err("unsupported Ark version or length".into());
+    }
+    Ok((
+        hrp == "ark",
+        secp256k1::XOnlyPublicKey::from_slice(&bytes[1..33]).map_err(|e| e.to_string())?,
+        secp256k1::XOnlyPublicKey::from_slice(&bytes[33..65]).map_err(|e| e.to_string())?,
+    ))
+}
+
 /// Validate the supported Ark server/key receiver form and optional expiry.
-/// Opaque URIs and VTXOs lack a protocol decoder and must not become wallet payloads.
+/// Wallet-generated addresses are decoded and output-key-bound. Other opaque
+/// URIs and VTXO outpoints remain unsupported as wallet payloads.
 pub fn ark(
     server: &str,
     key: &[u8],
@@ -470,8 +500,15 @@ pub fn ark(
 ) -> Result<(), String> {
     https(server)?;
     public_key(key)?;
-    if vtxo.is_some() || opaque.is_some() {
+    if vtxo.is_some() {
         return Err("opaque Ark URI/VTXO handoff requires protocol validation".into());
+    }
+    if let Some(address) = opaque {
+        let (_, _, output) = ark_address(address)?;
+        let receiver = secp256k1::PublicKey::from_slice(key).map_err(|e| e.to_string())?;
+        if receiver.x_only_public_key().0 != output {
+            return Err("Ark address output key does not match receiver".into());
+        }
     }
     if expires.is_some_and(|expiry| expiry <= now) {
         return Err("Ark receiver expired".into());

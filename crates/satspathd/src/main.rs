@@ -794,6 +794,8 @@ mod tests {
 
         let state = test_state(dir.path());
         let update_req = crate::types::ProfileUpdateRequest {
+            ark_address: None,
+            ark_asp_pubkey: None,
             alias: Some("alice@example.com".into()),
             lightning_address: None,
             onchain_address: None,

@@ -161,7 +161,11 @@ pub fn validate_payload(
             bail!("BOLT12 offers are not supported as wallet handoffs")
         }
         PaymentMethod::Ark { .. } => {
-            bail!("Ark pointers are not supported as wallet handoffs")
+            let expected = crate::ark_receive::ark_receive_payload(method, network, amount_sats)?;
+            if payload != expected {
+                bail!("Ark URI address, amount, or parameters do not match the selected method");
+            }
+            Ok(())
         }
     }
 }

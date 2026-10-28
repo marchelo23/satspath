@@ -88,6 +88,8 @@ pub(crate) struct WalletState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) ark_pubkey: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) ark_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) created_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) updated_at: Option<i64>,

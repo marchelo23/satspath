@@ -3042,12 +3042,28 @@ components:
       pattern: '^bitcoin:(?:bcrt1|BCRT1)[A-Za-z0-9]{8,87}\?amount=(?:0|[1-9][0-9]{0,7})\.[0-9]{8}$'
     ReceivePayload:
       oneOf:
-      - $ref: '#/components/schemas/PayableOnchainPayload'
+      - $ref: '#/components/schemas/PayablePaymentPayload'
       - $ref: '#/components/schemas/OnchainReceivePointer'
       - $ref: '#/components/schemas/SilentPaymentReceivePointer'
       - $ref: '#/components/schemas/LightningReceivePointer'
       - $ref: '#/components/schemas/LnurlReceivePointer'
-      description: Amount-less Lightning and Silent Payment pointers are receive-only, not amount-bound payable handoffs. Ark and BOLT12 fail closed.
+      - $ref: '#/components/schemas/ArkReceivePointer'
+      description: Amount-less pointers are receive-only, not amount-bound payable handoffs. BOLT12 and legacy Ark pointers fail closed.
+    PayablePaymentPayload:
+      oneOf:
+      - $ref: '#/components/schemas/PayableOnchainPayload'
+      - $ref: '#/components/schemas/ArkPayablePayload'
+      description: Validated, amount-bound payment URI. Quote/pay/send retain independent ownership requirements.
+    ArkReceivePointer:
+      type: string
+      maxLength: 128
+      pattern: '^bitcoin:\?ark=t?ark1[023456789acdefghjklmnpqrstuvwxyz]{110}$'
+      description: Wallet-generated version-zero Bech32m Arkade address. Runtime binds its output key and mainnet/test prefix; configuration also checks the operator pin. Test networks share tark.
+    ArkPayablePayload:
+      type: string
+      maxLength: 160
+      pattern: '^bitcoin:\?ark=t?ark1[023456789acdefghjklmnpqrstuvwxyz]{110}&amount=(?:0|[1-9][0-9]{0,7})\.[0-9]{8}$'
+      description: Canonical Ark receive URI bound to the exact requested BTC amount. Not proof of VTXO validity or ASP liveness.
     SilentPaymentReceivePointer:
       type: string
       maxLength: 4096
@@ -4347,7 +4363,7 @@ components:
         reason:
           type: string
         qr:
-          $ref: '#/components/schemas/PayableOnchainPayload'
+          $ref: '#/components/schemas/PayablePaymentPayload'
         execution:
           $ref: '#/components/schemas/ExecutionMode'
         wallet_hint:
@@ -4497,7 +4513,7 @@ components:
           minimum: 1
           maximum: 2100000000000000
         payment_payload:
-          $ref: '#/components/schemas/PayableOnchainPayload'
+          $ref: '#/components/schemas/PayablePaymentPayload'
         qr_svg:
           type: string
           description: Self-contained SVG QR.
@@ -4659,7 +4675,7 @@ components:
       description: |
         Inert parser output, NOT a validated wallet handoff. The parser intentionally preserves
         untrusted BIP-321 instructions, even malformed or unsupported rails; do not render these
-        fields as a payment QR. Payable outputs use `PayableOnchainPayload` after strict validation.
+        fields as a payment QR. Payable outputs use `PayablePaymentPayload` after strict validation.
     Bip321Onchain:
       type: object
       properties:
@@ -4919,7 +4935,7 @@ components:
           minimum: 1
           maximum: 2100000000000000
         payload:
-          $ref: '#/components/schemas/PayableOnchainPayload'
+          $ref: '#/components/schemas/PayablePaymentPayload'
         qr_svg:
           type: string
         safety:
@@ -5122,6 +5138,9 @@ components:
           type: string
         ark_pubkey:
           type: string
+        ark_address:
+          type: string
+          description: Wallet-generated Arkade address, omitted for legacy server/key-only methods.
         created_at:
           type: integer
           format: int64
@@ -5182,6 +5201,13 @@ components:
           description: Must be sent together with `ark_pubkey`.
         ark_pubkey:
           type: string
+          description: For address-backed handoffs, the compressed Taproot output key, not the wallet signing key.
+        ark_address:
+          type: string
+          description: Wallet-generated Arkade address; requires ark_asp_pubkey and a configured server/output key.
+        ark_asp_pubkey:
+          type: string
+          description: Compressed operator key obtained from the wallet/ASP; must match ark_address. Configuration pin, not online ASP authentication.
         remove_methods:
           type: array
           items:

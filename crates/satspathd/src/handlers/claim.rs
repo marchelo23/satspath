@@ -154,6 +154,8 @@ pub(crate) fn claim_invite_handler(state: &AppState, body: ClaimRequest) -> Resu
         silent_payment_address: body.silent_payment_address,
         ark_server: body.ark_server,
         ark_pubkey: body.ark_pubkey,
+        ark_address: None,
+        ark_asp_pubkey: None,
         remove_methods: vec![],
         recovery_policy: None,
     };
