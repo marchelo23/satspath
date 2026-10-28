@@ -108,6 +108,13 @@ Evidence: [capability contract & ignored-test inventory](docs/README.md),
 - [ ] Define proof preservation across unrelated edits and invalidation when the
   verified payment method changes.
 
+**Partial delivery (D1):** the authenticated daemon API attaches and renews
+externally signed on-chain/Ark proofs, preserves unchanged methods' evidence,
+and invalidates it on method changes or identity rotation. Domain-proof attachment,
+real alias control and no-mock claims remain pending; H1 is not complete. See the
+[ownership lifecycle capability and evidence](docs/README.md#component-and-rail-capability-matrix)
+and `cargo test -p satspathd method_proof`.
+
 **Acceptance:** onboarding and claims without mock flags; incorrect aliases,
 expiration, and replay rejected without mutations; verified methods resolve as such.
 

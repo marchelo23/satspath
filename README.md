@@ -228,7 +228,8 @@ When a client contacts an identifier for the very first time without prior key p
 The witness protocol requires a $K$-of-$N$ threshold (e.g. 2-of-3 or 3-of-5). If fewer than $K$ witnesses are compromised, the rogue operator cannot obtain the cosignatures needed to validate an equivocation. If $K$ or more witnesses collude with the operator to forge a split view, clients on disparate branches cannot detect the fork locally until checkpoints are audited or gossiped out-of-band.
 
 ### 6. Does SatsPath work on Bitcoin Mainnet today?
-**For public discovery and wallet handoff: YES (with documented limitations).** SatsPath can resolve mainnet Lightning Addresses, fetch mainnet BOLT11 invoices in explicit CLI flows, and generate mainnet BIP-21/BIP-321 URIs (on-chain, BIP-352 `sp=`, and wallet-supplied `ark=` addresses where verified). Standards-conformant BOLT12 offer/blinded-path/invoice-request primitives and public-projection checks for all 28 official BIP-352 test vector groups are implemented in `satspath-router`, while daemon payable quotes require verified method ownership, daemon BOLT12 receive/pay remains gated, and `PaymentIntent` host-wallet dispatch accepts standard on-chain and payee-bound BOLT11 only.  
+**For public discovery and wallet handoff: YES (with documented limitations).** SatsPath can resolve mainnet Lightning Addresses, fetch mainnet BOLT11 invoices in explicit CLI flows, and generate mainnet BIP-21/BIP-321 URIs (on-chain, BIP-352 `sp=`, and wallet-supplied `ark=` addresses where verified). Standards-conformant BOLT12 offer/blinded-path/invoice-request primitives and public-projection checks for all 28 official BIP-352 test vector groups are implemented in `satspath-router`, while daemon payable quotes require verified method ownership, daemon BOLT12 receive/pay remains gated, and `PaymentIntent` host-wallet dispatch accepts standard on-chain and payee-bound BOLT11 only.
+
 **For user-payment execution: NO.** SatsPath does not connect to Bitcoin P2P to execute user payments or hold user spending keys; that remains the host wallet's responsibility. The distinct authenticated regtest checkpoint anchor path can direct an operator's Bitcoin Core wallet over loopback RPC to manage continuation UTXOs and broadcast valueless test transactions.
 
 ### 7. Has SatsPath been externally audited?
@@ -276,8 +277,9 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 Run `npm ci` once from the repository root to install Husky's pre-commit hook.
 The hook checks workspace and `fuzz/` Rust formatting (`cargo fmt ... --check`)
-and runs the Node contract, SDK quickstart, and dashboard test suites, matching
-CI without modifying staged files. Node.js 20+ and Rust with `rustfmt` are required.
+and runs daemon regressions plus the Node contract, SDK quickstart, and dashboard
+test suites, matching CI without modifying staged files. Node.js 20+ and Rust
+with `rustfmt` are required.
 
 ### CLI Preview Usage
 

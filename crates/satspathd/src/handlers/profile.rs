@@ -276,11 +276,85 @@ pub(crate) fn sign_and_store(
     store_current_profile(home, wallet, network, false)
 }
 
+/// Attach public proof material only. Call under the router's mutation lock.
+pub(crate) fn attach_method_proof(
+    state: &AppState,
+    body: crate::types::MethodProofRequest,
+) -> Result<ProfileResponse> {
+    use satspath_core::ownership::{ProofType, VerificationStatus};
+    let mut wallet = load_wallet(&state.home)?;
+    let existing = stored_profile(state, &wallet)?
+        .ok_or_else(|| anyhow::anyhow!("active profile is required"))?;
+    if !verify_signed_profile(&existing)?
+        || wallet.identity_pubkey.as_deref() != Some(&existing.profile.identity_pubkey)
+    {
+        anyhow::bail!("wallet identity or stored profile signature mismatch");
+    }
+    satspath_core::crypto::check_profile_expiry(&existing.profile)?;
+    let verification = body.verification;
+    satspath_core::validate_method_verification(&verification)?;
+    let (issued, expiry) = match &verification.status {
+        VerificationStatus::Verified {
+            proof_type: ProofType::OnchainAddressSignature | ProofType::ArkPubkeySignature,
+            verified_at,
+            expires_at: Some(expiry),
+            ..
+        } => (*verified_at, *expiry),
+        _ => {
+            anyhow::bail!("an externally signed onchain/Ark proof with explicit expiry is required")
+        }
+    };
+    let t = now();
+    if issued > t || t.saturating_sub(issued) > 600 {
+        anyhow::bail!("proof issuance must be within the last 600 seconds, not in the future");
+    }
+    if expiry <= t || expiry.saturating_sub(issued) > 30 * 24 * 3600 {
+        anyhow::bail!("proof must be unexpired and valid for at most 30 days");
+    }
+    let method = existing
+        .profile
+        .methods
+        .iter()
+        .find(|method| method.ownership_descriptor() == verification.method_descriptor)
+        .ok_or_else(|| anyhow::anyhow!("proof does not match a current payment method"))?;
+    satspath_core::verify_method_verification(
+        method,
+        &existing.profile.identity_pubkey,
+        &verification,
+        t,
+        None,
+    )?;
+    if existing.profile.method_verifications.iter().any(|old| {
+        old.method_descriptor == verification.method_descriptor
+            && matches!(&old.status, VerificationStatus::Verified { verified_at, .. } if *verified_at >= issued)
+    }) {
+        anyhow::bail!("proof replay or stale renewal: issuance must advance");
+    }
+    store_current_profile_with_proof(
+        &state.home,
+        &mut wallet,
+        &state.network,
+        false,
+        Some(verification),
+    )?;
+    profile_response(state)
+}
+
 fn store_current_profile(
     home: &std::path::Path,
     wallet: &mut WalletState,
     network: &str,
     revoke_if_empty: bool,
+) -> Result<()> {
+    store_current_profile_with_proof(home, wallet, network, revoke_if_empty, None)
+}
+
+fn store_current_profile_with_proof(
+    home: &std::path::Path,
+    wallet: &mut WalletState,
+    network: &str,
+    revoke_if_empty: bool,
+    verification: Option<satspath_core::ownership::MethodVerification>,
 ) -> Result<()> {
     use satspath_core::{transparency::payment_method_descriptor_hash, PaymentMethod};
     let alias = wallet
@@ -309,6 +383,30 @@ fn store_current_profile(
 
     let secret = load_identity_key(home, &identity_pubkey)?;
     let t = now();
+    // Descriptors do not include every payment field. Preserve evidence only for
+    // exactly unchanged methods under the same identity, never after revocation.
+    let mut method_verifications = existing
+        .as_ref()
+        .filter(|old| {
+            !old.profile.revoked && old.profile.identity_pubkey == identity_pubkey && !revoked
+        })
+        .map(|old| {
+            old.profile
+                .method_verifications
+                .iter()
+                .filter(|proof| {
+                    methods.iter().any(|method| {
+                        method.ownership_descriptor() == proof.method_descriptor
+                            && old.profile.methods.contains(method)
+                    })
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(proof) = verification {
+        satspath_core::upsert_method_verification(&mut method_verifications, proof);
+    }
     let profile = PaymentProfile {
         sequence: Some(next_sequence),
         alias: alias.clone(),
@@ -319,7 +417,7 @@ fn store_current_profile(
         preferences: vec!["lightning".into(), "ark".into(), "onchain".into()],
         nonce: Some(satspath_core::crypto::generate_nonce()),
         rotation: None,
-        method_verifications: vec![],
+        method_verifications,
         hybrid_pubkey: None,
         pqc_required: false,
         revoked,
@@ -408,13 +506,15 @@ pub(crate) fn rotate_profile_key(state: &AppState) -> Result<KeyRotationResponse
         .ok_or_else(|| anyhow::anyhow!("rotation requires existing history"))?
         .signed_event_hash()?;
     let new_key = generate_identity_keypair();
-    let unsigned = satspath_core::rotate_identity_key(
+    let mut unsigned = satspath_core::rotate_identity_key(
         &existing,
         &old_secret,
         &new_key.secret_key,
         &previous_event_hash,
         sequence,
     )?;
+    // Method challenges bind the previous identity; rotation cannot renew them.
+    unsigned.profile.method_verifications.clear();
     let signed = sign_profile(unsigned.profile, &new_key.secret_key)?;
     let mut event = NameEvent {
         version: 1,
