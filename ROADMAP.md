@@ -1,6 +1,6 @@
 # SatsPath Roadmap
 
-> Analysis baseline: `main`, commit `51b5f62`.
+> Analysis baseline: `main`, commit `51b5f62` (H0 capability contract updated at `de96102` after [#198](https://github.com/satspath/satspath/pull/198), [#199](https://github.com/satspath/satspath/pull/199), and [#209](https://github.com/satspath/satspath/pull/209); see [`docs/README.md`](docs/README.md)).
 > Engineering proposal based on a static repository review by three agents:
 > architecture/product, testing/operations, and gaps/integrations.
 > This is not certification of test runs, remote CI, deployments, or interoperability.
@@ -79,18 +79,24 @@ order, not a claim that all development must happen serially.
 
 ### H0 · P0 — Align the capability contract
 
-- [ ] Publish a CLI/daemon/WASM/dashboard matrix distinguishing discovery,
+- [x] Publish a CLI/daemon/WASM/dashboard matrix distinguishing discovery,
   amountless receive, payable quotes, approval, and external execution.
-- [ ] Fix SDK examples bypassing `PaymentIntent`, outdated bridge names/paths,
+- [x] Fix SDK examples bypassing `PaymentIntent`, outdated bridge names/paths,
   and claims that confuse primitives with interoperability.
-- [ ] Inventory ignored tests: reason, covered capability, and executing command/job.
+- [x] Inventory ignored tests: reason, covered capability, and executing command/job.
   Ignored regtest tests invoked by CI do not count as missing coverage.
 
 **Acceptance:** every advertised capability links to a test or reproducible
-evidence; previews and stubs are explicitly identified.
+evidence; previews and stubs are explicitly identified. Remaining third-party
+wallet integration guides (`docs/integrations/`) and conformance wallet adapter
+profiles remain tracked in [#196](https://github.com/satspath/satspath/issues/196)
+under H4/H5 without duplication.
 
-Evidence: [previous roadmap](docs/v02_roadmap.md),
+Evidence: [capability contract & ignored-test inventory](docs/README.md),
+[H0 implementation plan](docs/implementation-plan-200.md),
+[previous roadmap](docs/v02_roadmap.md),
 [quickstart](docs/SDK_QUICKSTART.md), [PaymentIntent contract](docs/payment_intent.md),
+[contract & SDK checks](docs/tests/openapi-and-docs.test.mjs),
 [E2E CI](.github/workflows/daemon-e2e.yml).
 
 ### H1 · P0 — Usable onboarding and method ownership verification
@@ -220,9 +226,9 @@ Evidence: [persistence](crates/satspath-core/src/transparency/database.rs),
 
 | Capability | Next verifiable result |
 | --- | --- |
-| BOLT12 | Preserve already-tested amountless receive; unify WASM/proxy contract, replace dummy invoice, and integrate a real CLN/LDK backend before enabling payment |
-| Silent Payments | Persist receive descriptor, validate network and interoperable URI, enable pending acceptance, and test a host wallet; private ECDH stays in the wallet |
-| Ark | Replace private URI with interoperable receive, enable pending acceptance, and test identified ASP/wallet implementations before enabling execution |
+| BOLT12 | Reintroduce and pass `acceptance_bolt12_offer_receive_method` for daemon amountless `bitcoin:?lno=...` receive (reverted in [#198](https://github.com/satspath/satspath/pull/198)); unify WASM/proxy contract, replace dummy invoice, and integrate a real CLN/LDK backend before enabling payment |
+| Silent Payments | Preserve `acceptance_silent_payment_receive_method` (`bitcoin:[<addr>]?sp=<sp>[&amount=<btc>]`, landed in [#199](https://github.com/satspath/satspath/pull/199)), define `PaymentIntent` approval/confirmation contract, and test an external host wallet; private ECDH stays in the wallet |
+| Ark | Preserve `acceptance_ark_receive_uses_bip321_ark_param` (`bitcoin:?ark=<addr>[&amount=<btc>]`, landed in [#209](https://github.com/satspath/satspath/pull/209)), wire dashboard/ownership inputs, and test identified ASP/wallet implementations before enabling execution |
 | Swaps | Matrix by type/script/network; complete or reject unimplemented claims early and test claim/refund/recovery on testnet/regtest |
 | PQC | Keep a separate research workstream without production-readiness promises |
 

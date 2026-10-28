@@ -1,3 +1,5 @@
 cargo fmt --all -- --check
 # fuzz/ is a separate Cargo workspace; check it explicitly.
 cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
+# Validate capability contract, OpenAPI/auth sync, SDK quickstart, and dashboard tests.
+node --test docs/tests/*.test.mjs crates/satspathd/tests/dashboard-auth.test.mjs

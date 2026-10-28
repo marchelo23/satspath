@@ -2,7 +2,8 @@
 
 This guide describes the APIs present in the checkout, not a promise of a
 published package or a completed wallet integration. See the
-[capability matrix](README.md) and [tracked SDK work](../ROADMAP.md).
+[capability matrix](README.md), [tracked SDK work](../ROADMAP.md), and upcoming
+per-wallet integration guides tracked in [#196](https://github.com/satspath/satspath/issues/196).
 
 ## 1. Build from source
 
@@ -132,9 +133,13 @@ prove that browser resolution currently completes successfully.
 
 Obtain the quote with `quote_with_resolver` or the appropriate verified-profile
 API. Native `ChainResolver` policy and daemon local-state resolution are distinct;
-do not assume every transport supplies the same evidence.
+do not assume every transport supplies the same evidence. While native
+`QuoteResponse` can format amount-bound Silent Payment (`sp=`) and address-backed
+Ark (`ark=`) URIs for verified profiles, `prepare_payment_intent` and
+`execute_quote_handoff` accept **only** standard on-chain addresses
+(`silent_payment_pubkey: None`) and payee-bound `BOLT11` invoices.
 
-For execution, use this sequence from
+For execution, use this exact sequence from
 [`wallet_executor.rs`](../crates/satspath-router/src/wallet_executor.rs):
 
 1. Populate a `TransactionalTransparencyStore` and obtain verified `HandoffTrust`
@@ -143,19 +148,78 @@ For execution, use this sequence from
    amount, positive maximum fee, and the actual `Vec<ResolverSource>` observed.
 3. Show the returned `PaymentIntent` fields to the payer. Only after genuine UI
    confirmation call `intent.approve(user_confirmed)` to obtain a single-use token.
-4. Pass the token, current store/trust/evidence, quote, `WalletExecutor` and
-   `ExecutionGatePolicy` to `execute_quote_handoff`. It reconstructs the intent
-   and rejects changed payment terms or identity state before invoking the host.
+4. Pass `&executor`, `&store`, `&trust`, `&evidence`, `&quote`, the single-use
+   `approved` token, and `&ExecutionGatePolicy` to `execute_quote_handoff`. It
+   reconstructs the intent from current state, compares the RFC 8785 digest, and
+   rejects changed payment terms or identity state before invoking the host.
+
+```rust
+use satspath_core::{
+    BitcoinNetwork, ExecutionGatePolicy, ProfileResolver, ResolverSource,
+    Result as CoreResult, TransactionalTransparencyStore,
+};
+use satspath_router::{
+    execute_quote_handoff, prepare_payment_intent, quote_with_resolver, BdkHostWallet,
+    BdkOnchainBridge, HandoffExecutionReceipt, HandoffTransparencyEvidence, HandoffTrust,
+    HostWalletSdkBridge, LdkHostNode, LdkLightningBridge, PaymentIntent,
+};
+
+pub async fn approve_and_dispatch<R, W, L, F>(
+    resolver: &R,
+    store: &TransactionalTransparencyStore,
+    trust: &HandoffTrust,
+    evidence: &HandoffTransparencyEvidence,
+    resolver_sources: Vec<ResolverSource>,
+    network: BitcoinNetwork,
+    recipient: &str,
+    amount_sats: u64,
+    max_fee_sats: u64,
+    bdk_wallet: W,
+    ldk_node: L,
+    policy: &ExecutionGatePolicy,
+    confirm_in_host_ui: F,
+) -> CoreResult<HandoffExecutionReceipt>
+where
+    R: ProfileResolver + Sync + ?Sized,
+    W: BdkHostWallet,
+    L: LdkHostNode,
+    F: FnOnce(&PaymentIntent) -> bool,
+{
+    let quote = quote_with_resolver(resolver, recipient, amount_sats).await;
+    let intent = prepare_payment_intent(
+        store,
+        trust,
+        evidence,
+        &quote,
+        network,
+        amount_sats,
+        max_fee_sats,
+        resolver_sources,
+    )?;
+
+    let user_confirmed = confirm_in_host_ui(&intent);
+    let approved = intent.approve(user_confirmed)?;
+
+    let bridge = HostWalletSdkBridge::new(
+        network,
+        BdkOnchainBridge::new(network, 5, 50, bdk_wallet),
+        LdkLightningBridge::new(network, 100, ldk_node),
+    );
+    execute_quote_handoff(&bridge, store, trust, evidence, &quote, approved, policy).await
+}
+```
 
 Do not synthesize witness evidence or provenance to make an example execute.
 The current daemon does not supply a completed witness-quorum integration.
 Missing evidence must fail, not be bypassed.
 
-**Never dispatch SatsPath quotes directly through legacy `wallet.pay_bolt11` or
+**Never dispatch SatsPath quotes directly through legacy `pay_bolt11` or
 `send_onchain` calls.** Those bypass the approval contract. The host implements
 fee-bound adapter methods, retains spending keys, and performs signing/broadcast.
-For the exact contract and limitations, see [PaymentIntent](payment_intent.md)
-and [native adapter/dispatch tests](../crates/satspath-router/tests/wallet_executor_integration.rs).
+For the exact contract and limitations, see [PaymentIntent](payment_intent.md),
+[native adapter/dispatch tests](../crates/satspath-router/tests/wallet_executor_integration.rs),
+and the remaining third-party wallet integration guide and conformance profile scope
+tracked in [#196](https://github.com/satspath/satspath/issues/196).
 
 BOLT12, Ark, Silent Payments and swap approval paths remain capability-gated.
 An amountless receive pointer is not an approved amount-bound payment.

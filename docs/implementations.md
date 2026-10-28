@@ -35,8 +35,8 @@ Spec mapping:
 | `PaymentProfile`          | `PaymentProfile`           |
 | `SignedPaymentProfile`    | `SignedPaymentProfile`     |
 | `PaymentMethod.Lightning` | `PaymentMethod::Lightning` |
-| `PaymentMethod.Onchain`   | `PaymentMethod::Onchain`   |
-| `PaymentMethod.Ark`       | `PaymentMethod::Ark`       |
+| `PaymentMethod.Onchain`   | `PaymentMethod::Onchain` (includes optional BIP-352 `silent_payment_pubkey`) |
+| `PaymentMethod.Ark`       | `PaymentMethod::Ark` (includes optional Bech32m `opaque_uri` address) |
 | `PaymentMethod.Bolt12`    | `PaymentMethod::Bolt12`    |
 | Invite                    | `Invite`, `InviteRecord`   |
 
@@ -205,7 +205,7 @@ Known v1/v2 implementation gaps:
 
 - **External Security Audit:** Independent third-party cryptographic and security audit is required before recommending real-funds production usage.
 - **Alias Inbox Attestation:** `satspathd` ships no production email/inbox verifier yet; challenge/verify and invite claiming fail closed unless the development mock is explicitly enabled on **devnet/regtest only** (not testnet or mainnet).
-- **Daemon Payable Handoff Gate:** While BOLT12 (`crates/satspath-router/src/bolt12.rs`), Ark (`crates/satspath-router/src/ark.rs`), and Silent Payments (`crates/satspath-router/src/silent_payments.rs`) primitives are implemented in `satspath-router`, `satspathd`'s `/v1/quote`, `/v1/preview`, `/v1/pay`, and `/v1/send` handoff gate (`satspath-handoff`) currently emits only validated, amount-bound on-chain BIP-21 payloads.
+- **Daemon Payable & Approval Handoff Gates:** `satspathd`'s `/v1/receive` emits validated Lightning Address/LNURL pointers, on-chain `bitcoin:<addr>`, Silent Payments `bitcoin:[<addr>]?sp=<sp>` ([#199](https://github.com/satspath/satspath/pull/199)), and wallet-supplied Ark `bitcoin:?ark=<addr>` ([#209](https://github.com/satspath/satspath/pull/209)); daemon BOLT12 receive remains pending after [#198](https://github.com/satspath/satspath/pull/198). Daemon `/v1/quote`, `/v1/pay`, and Bearer-authenticated `/v1/send` require local transparency verification plus an independently verified method-ownership proof (`no_route` otherwise), do not fetch LNURL BOLT11 invoices, and reject BOLT12. Programmatic `PaymentIntent` / `execute_quote_handoff` execution remains gated to standard on-chain addresses (`silent_payment_pubkey: None`) and payee-bound BOLT11 invoices.
 - **Silent Payments Host Wallet ECDH:** SatsPath validates BIP-352 public keys, input eligibility, and expected outputs against public projections of all 28 official vector groups, while private-key ECDH shared-secret derivation and transaction construction remain in the host wallet.
 - **Mainnet Payment Execution:** Mainnet payment execution and transaction signing are deliberately unsupported (delegated to host wallets).
 - **Witness Integration:** The cosigning library exists, but daemon v2 envelopes have empty witness signatures and no envelope consistency proof; v2 health reports quorum not satisfied. See [server status](s2s/server-v2.md).

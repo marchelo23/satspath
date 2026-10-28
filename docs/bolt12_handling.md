@@ -20,16 +20,21 @@ The native interfaces include:
 The offer→invoice-request→transport→invoice→wallet lifecycle is the intended
 integration sequence. Route scoring or parsing an offer alone does not complete it.
 
-## Receive is not payment execution
+## Receive and payable handoffs remain gated
 
-The daemon can persist a network-validated BOLT12 offer and return an **amountless**
-`bitcoin:?lno=...` receive pointer. The active
-[acceptance test](../crates/satspathd/tests/e2e_daemon_flow.rs) covers that behavior.
-Do not describe BOLT12 receive support as wholly absent.
+Daemon BOLT12 receive was temporarily reverted out of `#197` in
+[#198](https://github.com/satspath/satspath/pull/198) so it can land in a
+dedicated change: `ProfileUpdateRequest` currently has no `bolt12_offer` field,
+and `acceptance_bolt12_offer_receive_method` in
+[`crates/satspathd/tests/e2e_daemon_flow.rs`](../crates/satspathd/tests/e2e_daemon_flow.rs)
+remains `#[ignore]` as the executable acceptance gate for `POST /v1/profile/methods`
+and amountless `bitcoin:?lno=...` output on `POST /v1/receive`. The CLI
+`wallet add-bolt12` command stores an offer in local CLI state only.
 
-Daemon/router/WASM payable quote generation still rejects BOLT12 until
-protocol-aware validation and wallet approval integration are complete. An offer
-is not an amount-bound invoice. See [PaymentIntent gates](payment_intent.md).
+Daemon/router/WASM payable quote generation and `PaymentIntent` host-wallet
+dispatch reject BOLT12 until protocol-aware validation and wallet approval
+integration are complete. An offer is not an amount-bound invoice. See
+[PaymentIntent gates](payment_intent.md).
 
 ## HTTP proxy is a scaffold, not a working backend
 

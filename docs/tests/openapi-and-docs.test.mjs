@@ -91,6 +91,12 @@ test('Ark schemas cover canonical wallet payloads and reachable response rails',
   }
 });
 
+/**
+ * Parses HTTP operations from `docs/openapi.yaml` along with auth, operationId, and response flags.
+ *
+ * @param {string} yaml - Raw OpenAPI YAML text.
+ * @returns {Array<{path: string, method: string, requiresBearer: boolean, hasOperationId: boolean, hasResponses: boolean}>}
+ */
 function parseOpenApiOperations(yaml) {
   const lines = yaml.split(/\r?\n/);
   const operations = [];
@@ -160,6 +166,12 @@ test('invite guide requires owner authentication for claims and private lists', 
   assert.match(guide, /GET \/v1\/claim\?invite_id=<UUID>`\n- \*\*Auth:\*\* None \(Public\)/);
 });
 
+/**
+ * Extracts endpoint summary rows from `docs/API_REFERENCE.md`.
+ *
+ * @param {string} markdown - Raw markdown content of `docs/API_REFERENCE.md`.
+ * @returns {Array<{method: string, rawPath: string, path: string, requiresBearer: boolean}>}
+ */
 function parseApiReferenceTable(markdown) {
   const rows = [];
   const regex = /^\|\s*`([A-Z]+)`\s*\|\s*`([^`]+)`\s*\|\s*(Public|Bearer)\s*\|/gm;
@@ -175,6 +187,12 @@ function parseApiReferenceTable(markdown) {
   return rows;
 }
 
+/**
+ * Recursively collects all `.md` files under a directory, excluding `.git`, `node_modules`, and `target`.
+ *
+ * @param {string} dir - Root directory to traverse.
+ * @returns {string[]}
+ */
 function walkMarkdownFiles(dir) {
   const results = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -189,6 +207,88 @@ function walkMarkdownFiles(dir) {
     }
   }
   return results;
+}
+
+/**
+ * Recursively collects all `.rs` files under a directory, excluding `.git`, `node_modules`, and `target`.
+ *
+ * @param {string} dir - Root directory to traverse.
+ * @returns {string[]}
+ */
+function walkRustFiles(dir) {
+  const results = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === '.git' || entry.name === 'node_modules' || entry.name === 'target') {
+      continue;
+    }
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...walkRustFiles(full));
+    } else if (entry.name.endsWith('.rs')) {
+      results.push(full);
+    }
+  }
+  return results;
+}
+
+/**
+ * Scans Rust source files for `#[ignore]` / `#[ignore = "..."]` test attributes and returns
+ * a map keyed by `<relative/path.rs> :: <fn_name>` with the associated ignore reason string.
+ *
+ * @param {string[]} rustFiles - Absolute paths to `.rs` files to inspect.
+ * @returns {Map<string, string>}
+ */
+function collectIgnoredRustTests(rustFiles) {
+  const ignored = new Map();
+  for (const file of rustFiles) {
+    const rel = path.relative(repoRoot, file).replace(/\\/g, '/');
+    const content = fs.readFileSync(file, 'utf8');
+    assert.doesNotMatch(
+      content,
+      /^\s*\/\/[\/!].*```(?:rust,)?ignore\b/m,
+      `Unexpected ignored doctest in ${rel}; inventory it or make it runnable`,
+    );
+    const lines = content.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i += 1) {
+      const attrMatch = lines[i].match(/^\s*#\[ignore(?:\s*=\s*"([^"]*)")?\s*\]/);
+      if (!attrMatch) continue;
+      const reason = attrMatch[1] ?? '';
+      let fnName = null;
+      for (let j = i + 1; j < Math.min(i + 15, lines.length); j += 1) {
+        const fnMatch = lines[j].match(/^\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)\s*\(/);
+        if (fnMatch) {
+          fnName = fnMatch[1];
+          break;
+        }
+      }
+      assert.ok(fnName, `Expected test fn following #[ignore] at ${rel}:${i + 1}`);
+      ignored.set(`${rel} :: ${fnName}`, reason);
+    }
+  }
+  return ignored;
+}
+
+/**
+ * Parses the `satspath/` ASCII directory tree block in `docs/architecture.md` into repo-relative paths.
+ *
+ * @param {string} architectureMarkdown - Raw markdown content of `docs/architecture.md`.
+ * @returns {string[]}
+ */
+function parseArchitectureTreePaths(architectureMarkdown) {
+  const blockMatch = architectureMarkdown.match(/```text\r?\nsatspath\/\r?\n([\s\S]*?)```/);
+  assert.ok(blockMatch, 'Expected satspath/ workspace tree block in docs/architecture.md');
+  const stack = [];
+  const paths = [];
+  for (const line of blockMatch[1].split(/\r?\n/)) {
+    const entryMatch = line.match(/^((?:│   |    )*)(?:├── |└── )([^\s#]+)/);
+    if (!entryMatch) continue;
+    const depth = entryMatch[1].length / 4;
+    const segment = entryMatch[2].replace(/\/$/, '');
+    stack.length = depth;
+    stack[depth] = segment;
+    paths.push(stack.join('/'));
+  }
+  return paths;
 }
 
 test('OpenAPI 3.0.3 operations have operationId, responses, and match router auth rules', () => {
@@ -275,6 +375,8 @@ test('obsolete docs are removed and all markdown relative links resolve', () => 
     path.join(repoRoot, 'ROADMAP.md'),
     path.join(repoRoot, 'walktrough.md'),
     path.join(repoRoot, 'security_tests.md'),
+    path.join(repoRoot, 'sdk/satspath-p2p/README.md'),
+    path.join(repoRoot, 'crates/satspath-conformance/README.md'),
     ...walkMarkdownFiles(path.join(repoRoot, 'deploy')),
     ...walkMarkdownFiles(path.join(repoRoot, 'examples')),
     ...walkMarkdownFiles(path.join(repoRoot, 'docs')),
@@ -318,4 +420,120 @@ test('CLI setup examples configure the state variable read by the native impleme
     assert.ok(text.includes(`export ${variable}=`), `${file} must use the real CLI state override`);
     assert.doesNotMatch(text, /export SATSPATH_DATA_DIR=/);
   }
+});
+
+test('docs/README.md publishes 4-surface x 5-stage lifecycle capability matrix and reconciles #196', () => {
+  const docsIndex = fs.readFileSync(path.join(repoRoot, 'docs/README.md'), 'utf8');
+  const lifecycleSection = docsIndex.match(
+    /^## Lifecycle capability matrix by interface\r?\n([\s\S]*?)(?=^## )/m,
+  );
+  assert.ok(lifecycleSection, 'Expected ## Lifecycle capability matrix by interface in docs/README.md');
+  assert.match(
+    lifecycleSection[1],
+    /^\|\s*Surface\s*\|\s*Discovery\s*\|\s*Amountless receive\s*\|\s*Payable quotes\s*\|\s*Approval\s*\|\s*External execution\s*\|$/m,
+    'Lifecycle capability matrix must distinguish Discovery, Amountless receive, Payable quotes, Approval, and External execution',
+  );
+
+  for (const surface of [
+    '**CLI** (`satspath-cli`)',
+    '**Daemon HTTP** (`satspathd`)',
+    '**Browser WASM** (`satspath-wasm`)',
+    '**Dashboard UI** (`satspathd/src/index.html`)',
+  ]) {
+    const row = lifecycleSection[1]
+      .split(/\r?\n/)
+      .find(line => line.startsWith(`| ${surface} |`));
+    assert.ok(row, `Expected lifecycle matrix row for ${surface}`);
+    const cells = row
+      .split('|')
+      .slice(1, -1)
+      .map(cell => cell.trim());
+    assert.equal(cells.length, 6, `Expected 6 columns for ${surface}`);
+    for (const cell of cells) {
+      assert.ok(cell.length > 0, `Empty capability cell in row ${surface}`);
+    }
+  }
+
+  const reconciledSection = docsIndex.match(
+    /^## Reconciled implementation issues\r?\n([\s\S]*?)(?=^## )/m,
+  );
+  assert.ok(reconciledSection, 'Expected ## Reconciled implementation issues in docs/README.md');
+  assert.match(reconciledSection[1], /https:\/\/github\.com\/satspath\/satspath\/issues\/196/);
+  assert.match(reconciledSection[1], /docs\/integrations\/README\.md/);
+  assert.match(reconciledSection[1], /satspath-conformance wallet --adapter/);
+});
+
+test('docs/README.md ignored-test inventory matches workspace #[ignore] tests 1-to-1 and CI regtest jobs', () => {
+  const rustFiles = [
+    ...walkRustFiles(path.join(repoRoot, 'crates')),
+    ...walkRustFiles(path.join(repoRoot, 'fuzz')),
+  ];
+  const actualIgnored = collectIgnoredRustTests(rustFiles);
+  assert.ok(actualIgnored.size > 0, 'Expected workspace #[ignore] tests to inventory');
+
+  const docsIndex = fs.readFileSync(path.join(repoRoot, 'docs/README.md'), 'utf8');
+  const inventorySection = docsIndex.match(/^## Ignored-test inventory\r?\n([\s\S]*?)(?=^## )/m);
+  assert.ok(inventorySection, 'Expected ## Ignored-test inventory in docs/README.md');
+
+  const documentedIgnored = new Map();
+  const activeCiRegtestEntries = [];
+  const rowRegex = /^\|\s*`([^`]+\s::\s[A-Za-z0-9_]+)`\s*\|\s*`([^`]*)`\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*\*\*([^*]+)\*\*\s*\|$/gm;
+  let match;
+  while ((match = rowRegex.exec(inventorySection[1])) !== null) {
+    const [, testKey, reason, covered, command, classification] = match;
+    assert.ok(!documentedIgnored.has(testKey), `Duplicate ignored-test entry: ${testKey}`);
+    assert.ok(covered.trim().length > 0, `Missing covered capability for ${testKey}`);
+    assert.ok(command.trim().length > 0, `Missing command/CI job for ${testKey}`);
+    documentedIgnored.set(testKey, reason);
+    if (classification.trim() === 'Active CI regtest coverage') {
+      activeCiRegtestEntries.push(testKey);
+    }
+  }
+
+  assert.deepEqual(
+    [...documentedIgnored.keys()].sort(),
+    [...actualIgnored.keys()].sort(),
+    'docs/README.md ignored-test inventory must match actual #[ignore] tests 1-to-1',
+  );
+  for (const [key, actualReason] of actualIgnored.entries()) {
+    assert.equal(
+      documentedIgnored.get(key),
+      actualReason,
+      `Ignore reason mismatch in docs/README.md for ${key}`,
+    );
+  }
+
+  const ciWorkflows = [
+    fs.readFileSync(path.join(repoRoot, '.github/workflows/ci.yml'), 'utf8'),
+    fs.readFileSync(path.join(repoRoot, '.github/workflows/daemon-e2e.yml'), 'utf8'),
+  ].join('\n');
+  assert.equal(activeCiRegtestEntries.length, 4, 'Expected 4 active CI regtest ignored tests');
+  for (const testKey of activeCiRegtestEntries) {
+    const [relFile, fnName] = testKey.split(' :: ');
+    const testTarget = path.basename(relFile, '.rs');
+    const runsWholeTargetIgnored = new RegExp(`--test\\s+${testTarget}\\b[^\\n]*--ignored`).test(ciWorkflows);
+    const runsNamedFnIgnored = new RegExp(`--ignored\\s+${fnName}\\b`).test(ciWorkflows);
+    assert.ok(
+      runsWholeTargetIgnored || runsNamedFnIgnored,
+      `Active CI regtest test ${testKey} must be invoked with --ignored in GitHub workflows`,
+    );
+  }
+});
+
+test('architecture workspace tree paths exist on disk and P2P CLI import example matches clap syntax', () => {
+  const architecture = fs.readFileSync(path.join(repoRoot, 'docs/architecture.md'), 'utf8');
+  const treePaths = parseArchitectureTreePaths(architecture);
+  assert.ok(treePaths.length >= 15, 'Expected crate and workspace entries in docs/architecture.md tree');
+  for (const relPath of treePaths) {
+    assert.ok(
+      fs.existsSync(path.join(repoRoot, relPath)),
+      `Nonexistent workspace path in docs/architecture.md: ${relPath}`,
+    );
+  }
+
+  const cliMain = fs.readFileSync(path.join(repoRoot, 'crates/satspath-cli/src/main.rs'), 'utf8');
+  assert.match(cliMain, /Import\s*\{\s*(?:\/\/\/[^\n]*\r?\n\s*)?file:\s*Option<String>,/);
+  const p2pReadme = fs.readFileSync(path.join(repoRoot, 'sdk/satspath-p2p/README.md'), 'utf8');
+  assert.match(p2pReadme, /^satspath import received-profile\.json$/m);
+  assert.doesNotMatch(p2pReadme, /satspath import --file\b/);
 });
