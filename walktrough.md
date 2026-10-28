@@ -21,10 +21,13 @@ regtest-only path using Bitcoin Core RPC.
   provide equivalent native resolver behavior.
 - BOLT12 parsing/blinded-path/invoice-request primitives exist. They do not
   establish a live CLN/LDK wallet integration; the HTTP proxy is a dummy scaffold.
-- Daemon BOLT12 receive can expose an amountless offer; amount-bound quote/pay/send
-  do not enable BOLT12 payments.
-- Silent Payments public-vector checks and Ark ASP/DAG helpers exist. Their
-  daemon receive/payable integrations remain incomplete and gated.
+- Daemon BOLT12 receive was separated in `#198` and remains pending behind the
+  ignored `acceptance_bolt12_offer_receive_method` spec; amount-bound BOLT12
+  quotes and payments remain disabled.
+- Silent Payments (`#199`) and wallet-supplied Bech32m Ark addresses (`#209`)
+  support daemon `/v1/receive` and BIP-21/BIP-321 URI formatting (with independent
+  ownership proofs required for daemon payable quotes), while `PaymentIntent`
+  host-wallet execution remains gated to standard on-chain and payee-bound BOLT11.
 - Witness cosigning is a library; `satspath-gossip` is a binary inside
   `satspath-witness`. The daemon does not yet collect/verify witness cosignatures.
 - PQC is feature-gated research. It is not the default identity or production claim.

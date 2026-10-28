@@ -4,8 +4,11 @@ SatsPath is an open-source payment discovery and routing layer for the Bitcoin e
 
 > The diagrams describe the architectural composition, not a claim that every
 > rail or witness path is integrated in every interface. See the
-> [current capability matrix](README.md). Daemon payable quotes are on-chain;
-> CLI BOLT11 fetching is explicit; WASM and witness federation have integration gaps.
+> [current capability matrix](README.md). Daemon and router emit verified
+> on-chain, Silent Payment (`sp=`), and address-backed Ark (`ark=`) BIP-21/BIP-321
+> URIs; CLI BOLT11 fetching is explicit; `PaymentIntent` execution is gated to
+> standard on-chain and BOLT11; daemon BOLT12 receive, WASM parity, and witness
+> federation have integration gaps.
 
 ---
 
@@ -17,7 +20,7 @@ flowchart TD
     B --> C[Cryptographic Verification\nSchnorr Signature + Merkle Inclusion + Checkpoint]
     C --> D[Payment Capability Discovery\nLightning / BOLT12 / On-chain / Silent Payments / Ark]
     D --> E[Routing & Rail Selection\nAmount + Multi-Source Fees + Urgency]
-    E --> F[Validated Handoff\nBIP-21; CLI BOLT11 with explicit fetch]
+    E --> F[Validated Handoff\nBIP-21 / BIP-321 URIs; CLI BOLT11 with explicit fetch]
     F --> G[Host Wallet Execution\nUser signs with spending key & broadcasts]
 
     classDef highlight fill:#f9f,stroke:#333,stroke-width:2px;
@@ -54,19 +57,19 @@ satspath/
 │   │                           # BOLT12 handling, BIP-352 Silent Payments, routing heuristics, and handoff
 │   ├── satspath-cli/           # Reference command-line client for development and preview flows
 │   ├── satspathd/              # Modular authoritative daemon:
-│   │   ├── handlers/           #   claim, profile, quote, resolve, send, status, transparency, wallet
-│   │   ├── telemetry/          #   Metrics, /v1/health dependency probes, structured tracing
-│   │   ├── rate_limit.rs       #   Per-IP token-bucket rate limiter & 64 KB payload guard
-│   │   ├── server.rs           #   HTTP/TLS lifecycle & cleartext binding security audit
-│   │   └── v2_api.rs           #   S2S v2 authoritative resolution & witness proof envelopes
+│   │   └── src/
+│   │       ├── handlers/       #   claim, profile, quote, resolve, send, status, transparency, wallet
+│   │       ├── telemetry/      #   Metrics, /v1/health dependency probes, structured tracing
+│   │       ├── rate_limit.rs   #   Per-IP token-bucket rate limiter & 64 KB payload guard
+│   │       ├── server.rs       #   HTTP/TLS lifecycle & cleartext binding security audit
+│   │       └── v2_api.rs       #   S2S v2 authoritative resolution & witness proof envelopes
 │   ├── satspath-witness/       # Witness/cosigning library; src/bin/satspath-gossip.rs monitor
 │   ├── satspath-conformance/   # Incremental conformance runner and vectors
 │   ├── satspath-wasm/          # WebAssembly bindings for browser and web wallet integrations
 │   ├── satspath-swaps/         # Experimental testnet/regtest swap scaffolding (submarine/reverse)
 │   └── satspath-pqc/           # Experimental post-quantum hybrid signature research module (ML-DSA-65)
-├── sdk/satspath-p2p/            # Optional TypeScript P2P SDK
-├── packages/arkade-vtxo-verification/ # TypeScript Ark VTXO verification package
-└── proxy-workers/              # Stateless edge helper workers (e.g. Cloudflare)
+├── sdk/satspath-p2p/           # Optional Node.js Hyperswarm P2P profile transport
+└── proxy-workers/bolt12/       # Experimental BOLT12 HTTP worker scaffold (dummy invoice; backend TODO)
 ```
 
 ### Crate Responsibilities & Maturity
