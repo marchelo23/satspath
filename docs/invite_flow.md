@@ -75,7 +75,7 @@ identifier -> no profile -> invite -> exact HTTPS domain challenge -> atomic reg
     "display_hint": "c***@example.com",
     "amount_sats": 25000,
     "memo": "Dinner",
-    "status": "created",
+    "status": "waiting_for_claim",
     "is_expired": false,
     "is_claimable": true,
     "created_at": 1727092800,

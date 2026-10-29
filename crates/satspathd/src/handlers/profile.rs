@@ -283,6 +283,10 @@ pub(crate) fn attach_method_proof(
 ) -> Result<ProfileResponse> {
     use satspath_core::ownership::{ProofType, VerificationStatus};
     let mut wallet = load_wallet(&state.home)?;
+    wallet.alias = wallet
+        .alias
+        .as_deref()
+        .map(satspath_core::privacy::canonical_identifier);
     if let Some(alias) = body.alias {
         let alias = satspath_core::privacy::canonical_identifier(&alias);
         if wallet.alias.as_deref() != Some(&alias) {

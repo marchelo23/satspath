@@ -176,6 +176,29 @@ test('real onboarding documents domain authority separately from ownership and p
   assert.match(methods, /schemas\/ProfileUpdateRequest/);
   assert.match(methods, /not:\s*\n\s+required: \[alias\]/);
   assert.match(methods, /minProperties: 1/);
+  const alternatives = methods.match(/anyOf:\n([\s\S]*?)(?=\n          description:)/);
+  assert.ok(alternatives, 'registration requires an add-type receive method');
+  const requiredGroups = [...alternatives[1].matchAll(/- required: \[([^\]]+)\]/g)]
+    .map(match => match[1].split(',').map(field => field.trim()));
+  assert.deepEqual(requiredGroups, [
+    ['lightning_address'], ['onchain_address'], ['silent_payment_address'], ['ark_server', 'ark_pubkey'],
+  ]);
+  // Evaluate the actual required alternatives, rather than treating a nonempty
+  // object (including remove_methods) as an additive registration method.
+  const admits = object => !Object.hasOwn(object, 'alias')
+    && requiredGroups.some(group => group.every(field => Object.hasOwn(object, field)));
+  assert.equal(admits({ remove_methods: ['onchain'] }), false);
+  assert.equal(admits({ recovery_policy: {} }), false);
+  assert.equal(admits({ onchain_pubkey: 'public-hint' }), false);
+  assert.equal(admits({ ark_server: 'https://asp.example.com' }), false);
+  for (const valid of [
+    { lightning_address: 'alice@example.com' }, { onchain_address: 'address-shape-fixture' },
+    { silent_payment_address: 'silent-payment-shape-fixture' },
+    { ark_server: 'https://asp.example.com', ark_pubkey: 'public-key-shape-fixture' },
+    { onchain_address: 'address-shape-fixture', remove_methods: ['onchain'] },
+  ]) assert.equal(admits(valid), true);
+  const result = openapiText.match(/    DomainRegistrationResult:\n([\s\S]*?)(?=    AliasRequest:)/)[1];
+  assert.match(result, /claimed_invite:\n\s+anyOf:\n\s+- \$ref: '#\/components\/schemas\/InviteRecord'\n\s+- type: object\n\s+nullable: true\n\s+enum:\n\s+- null/);
   assert.match(apiRefText, /not mailbox verification or DNSSEC/);
   assert.match(apiRefText, /Method ownership still/);
   const html = fs.readFileSync(path.join(repoRoot, 'crates/satspathd/src/index.html'), 'utf8');

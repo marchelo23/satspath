@@ -2574,7 +2574,7 @@ paths:
                 memo: null
                 status: waiting_for_claim
                 is_expired: false
-                is_claimable: false
+                is_claimable: true
                 created_at: 1782810000
                 expires_at: 1782896400
                 sender_verified: true
@@ -4363,6 +4363,11 @@ components:
           - not:
               required: [alias]
             minProperties: 1
+            anyOf:
+            - required: [lightning_address]
+            - required: [onchain_address]
+            - required: [silent_payment_address]
+            - required: [ark_server, ark_pubkey]
           description: Public receive methods on the daemon network; nested alias is forbidden. At least one method is required.
         invite_id:
           type: string
@@ -4411,9 +4416,12 @@ components:
         identifier_attestation:
           $ref: '#/components/schemas/IdentifierAttestation'
         claimed_invite:
-          nullable: true
-          allOf:
+          anyOf:
           - $ref: '#/components/schemas/InviteRecord'
+          - type: object
+            nullable: true
+            enum:
+            - null
         moves_funds:
           type: boolean
           enum: [false]

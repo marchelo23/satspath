@@ -38,7 +38,9 @@ jobs:
             ${{ runner.os }}-cargo-daemon-e2e-
             ${{ runner.os }}-cargo-
       - name: Build independent CLI handoff consumer
-        run: cargo build --locked -p satspath-cli
+        # The repository does not yet track the root Cargo.lock. Generate it
+        # here; nested fixture consumers then run offline with --locked.
+        run: cargo build -p satspath-cli
       - name: Run daemon HTTP and standalone onboarding suites
         env:
           SATSPATH_FEE_SOURCES: ""

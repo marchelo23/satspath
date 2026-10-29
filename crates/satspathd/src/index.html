@@ -1064,6 +1064,7 @@
           pendingDomainRegistration = {candidate, challenge_id: registration.challenge_id, expires_at: registration.expires_at};
           msg.innerHTML = `<h3>Authorize the alias on your domain</h3>
             <p>Serve this exact body at the HTTPS URL, then click Save again before expiry. This proves domain administration, not mailbox access.</p>
+            <p>Keep this page open. Reloading clears the dashboard's pending challenge; clicking Save again requests a new body that must be published.</p>
             <div class="payload-box">${esc(registration.url)}</div>
             <pre class="payload-box" style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(registration.body)}</pre>`;
         } else {
@@ -1250,6 +1251,7 @@
         pendingDomainClaim = {candidate, challenge_id: d.challenge_id, expires_at: d.expires_at};
         resCard.innerHTML = `<h3>Authorize this alias on your domain</h3>
           <p class="reason">Serve the exact body below at this HTTPS URL before expiry. This proves domain administrator authorization, not mailbox access. No payment is executed.</p>
+          <p class="reason">Keep this page open. Reloading clears the dashboard's pending challenge; requesting it again produces a new body that must be published.</p>
           <div class="payload-box">${esc(d.url)}</div>
           <pre class="payload-box" style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(d.body)}</pre>
           <p class="reason">Expires: ${esc(new Date(d.expires_at * 1000).toISOString())}. After publishing it, click the claim button again to verify.</p>`;

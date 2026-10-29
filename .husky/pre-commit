@@ -2,8 +2,9 @@ cargo fmt --all -- --check
 # fuzz/ is a separate Cargo workspace; check it explicitly.
 cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
 # Run daemon authorization, profile and ownership regressions before committing.
-cargo build --locked -p satspath-cli
+cargo build -p satspath-cli
 cargo test -p satspath-cli
+cargo test -p satspath-core --lib invite_store
 cargo test -p satspathd
 # Validate capability contract, OpenAPI/auth sync, SDK quickstart, and dashboard tests.
 node --test docs/tests/*.test.mjs crates/satspathd/tests/dashboard-auth.test.mjs

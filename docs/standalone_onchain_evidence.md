@@ -11,7 +11,7 @@ phase 2 under #216/#171; #193/#195 are follow-ups, not prerequisites.
 ```sh
 npm ci
 # Compile the independent consumer before the hermetic test invokes it offline.
-cargo build --locked -p satspath-cli
+cargo build -p satspath-cli
 cargo test -p satspathd handlers::onboarding::tests
 cargo test -p satspathd --test e2e_daemon_flow
 cargo test -p satspath-cli check_handoff
@@ -53,7 +53,7 @@ evidence, not proof of deployment on a public domain or a wallet payment.
 | Criterion | Implementation and reproducible evidence |
 | --- | --- |
 | Initial real alias-control mechanism bound to registration and authorized event | `/v1/onboarding/challenge` prepares the signed profile and planned owner event before authorization. `/v1/onboarding/verify` fetches the exact body over HTTPS on the alias domain. The body binds profile, identity, action, sequence, predecessor, network, random challenge, expiry and optional invitation. The primary fixture verifies `identifier_verified: true`; negative fixtures reject wrong aliases, supplied evidence, untrusted TLS, private destinations, changed bodies, redirects and expiry. |
-| Functional configurable claim destination | `SATSPATH_CLAIM_BASE_URL` targets the deployment's HTTPS `/claim` dashboard, with no credentials, query or fragment; default links target the actual local daemon page. `real_domain_claim_is_atomic_separate_and_single_use` exercises the generated URL and real claim. Dashboard registration and claim forms use the secure two-step endpoints. |
+| Functional configurable claim destination | `SATSPATH_CLAIM_BASE_URL` targets the deployment's HTTPS `/claim` dashboard, with no credentials, query or fragment; only loopback binds may default to the actual local daemon page. `real_domain_claim_is_atomic_separate_and_single_use` exercises the generated URL and real claim. Dashboard registration and claim forms use the secure two-step endpoints and explicitly warn that a reload requires publishing a new challenge body. |
 | Ownership attachment and renewal | Existing `method_proof_*` regressions verify genuine signatures, freshness, bounded expiry and monotonic renewal. The primary fixture attaches a real on-chain method-key signature after domain authorization and proves the method then resolves verified. Claim fixtures attach ownership through the optional receiver `alias` without rewriting the operator wallet. |
 | Preservation and invalidation | Existing ownership regressions and the primary fixture preserve the exact proof across unrelated edits and invalidate replaced methods. All `quote/pay/send` paths reject the unverified replacement, including after restart; identity rotation invalidates identity-bound proofs. |
 | No-mock claims, expiry/replay refusal without security-state mutation | Controlled real-TLS claim tests exercise concurrent verification and exactly one successful claim, separate receiver identity, durable inspection and recovered notifications. Late SQLite failure rolls back profile, event, checkpoint, attestation, consumed challenge, claim receipt and wallet activation. Wrong/expired/cancelled invites, stale wallet state, changed candidates and replay cannot publish. |
@@ -97,18 +97,33 @@ evidence, not proof of deployment on a public domain or a wallet payment.
 
 ## Recorded local validation
 
+Review regressions additionally cover transactional batch notification recovery
+(including failed saves and retries on the same store), receiver-key persistence
+before challenge commit with rollback of only the newly created key, and a stalled
+HTTP body that must not hold the mutation lock. Wallet activation retains both
+predecessor and successor: intervening operator edits are rejected, an already
+applied successor is cleared without rewriting, and legacy rows without a known
+predecessor never overwrite a wallet. Registration rejects remove-only/metadata-only
+method inputs even when the local wallet already has a receive method. Mixed-case
+primary-alias proof attachment and an otherwise-valid unsigned-profile quote have
+specific regression coverage.
+
 Toolchain: `rustc 1.97.1`, `cargo 1.97.1`, Node `v22.23.2`; Linux, regtest
 addresses, controlled HTTPS fixture. No public-domain deployment or external
 wallet payment was exercised.
 
 | Gate | Observed result |
 | --- | --- |
-| `cargo test --workspace` with offline fee sources | 824 passed, 0 failed, 8 ignored |
+| `cargo test --workspace` with offline fee sources | 829 passed, 0 failed, 8 ignored |
 | `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
 | Root and fuzz-workspace formatting checks | Passed |
 | `audit_crypto.sh` | Passed; 0 errors/warnings; ignored external tests are not evidence |
 | Documentation/dashboard Node tests | 56 passed |
 
-Two local CodeRabbit review rounds were checked against the code and addressed.
+Three local CodeRabbit review rounds were checked against the code. The latest
+round's save-failure retry finding was fixed; its suggestion to start tracking the
+root `Cargo.lock` was deferred to a separate dependency-policy change. The initial
+build generates the currently ignored lockfile; nested consumers remain offline
+and locked.
 They are not an independent security audit or approval for real-funds use. Husky
 reruns CLI/daemon, formatting and documentation/dashboard gates on commit.

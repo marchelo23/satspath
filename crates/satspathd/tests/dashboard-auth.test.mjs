@@ -40,8 +40,14 @@ test('one unlock authenticates all owner mutations but no public requests', asyn
 
 test('expired registration and claim challenges request a fresh authorization', async () => {
   const html = await readFile(new URL('../src/index.html', import.meta.url), 'utf8');
-  for (const name of ['pendingDomainRegistration', 'pendingDomainClaim']) {
-    const declaration = html.match(new RegExp(`const verifying = ${name}([\\s\\S]*?);`));
+  for (const [name, button, responseVariable] of [
+    ['pendingDomainRegistration', 'p-save', 'response'],
+    ['pendingDomainClaim', 'c-claim-go', 'r'],
+  ]) {
+    const handler = html.match(new RegExp(`\\$\\("${button}"\\)\\.addEventListener\\("click", async \\(\\) => \\{([\\s\\S]*?)\\n  \\}\\);`));
+    assert.ok(handler, `${button} handler exists`);
+    const source = handler[1];
+    const declaration = source.match(new RegExp(`const verifying = ${name}([\\s\\S]*?);`));
     assert.ok(declaration, name);
     const check = new Function(name, 'candidate', 'Date', `return Boolean(${name}${declaration[1]});`);
     const clock = { now: () => 200_000 };
@@ -50,7 +56,13 @@ test('expired registration and claim challenges request a fresh authorization', 
     assert.equal(check({ candidate: 'unchanged', expires_at: 200 }, 'unchanged', clock), false);
     assert.equal(check({ candidate: 'unchanged', expires_at: 201 }, 'unchanged', clock), true);
     assert.equal(check({ candidate: 'changed', expires_at: 201 }, 'unchanged', clock), false);
-    assert.match(html, new RegExp(`${name} = \\{candidate, challenge_id: [^,]+, expires_at:`));
+    assert.match(source, new RegExp(`${name} = \\{candidate, challenge_id: [^,]+, expires_at:`));
+    const request = source.match(new RegExp(`const ${responseVariable} = await apiFetch\\((verifying \\? [^,]+), \\{`));
+    assert.ok(request, `${button} uses its own ${responseVariable} request`);
+    const endpoint = new Function('verifying', `return ${request[1]};`);
+    assert.equal(endpoint(true), '/v1/onboarding/verify', `${button} verifies a current challenge`);
+    assert.equal(endpoint(false), '/v1/onboarding/challenge', `${button} creates a fresh challenge`);
+    assert.match(source, /Reloading clears the dashboard's pending challenge/);
   }
 });
 

@@ -34,6 +34,16 @@ fn claim_metadata_readers_never_initialize_missing_state() {
 
 #[test]
 fn claim_base_requires_the_served_path_and_a_safe_origin() {
+    for bind in ["0.0.0.0:9737", "[::]:9737", "192.0.2.1:9737"] {
+        for tls in [false, true] {
+            let error = local_claim_base(bind.parse().unwrap(), tls).unwrap_err();
+            assert!(error.to_string().contains("SATSPATH_CLAIM_BASE_URL"));
+        }
+    }
+    assert_eq!(
+        local_claim_base("127.0.0.1:9737".parse().unwrap(), false).unwrap(),
+        "http://127.0.0.1:9737/claim"
+    );
     for base in [
         "https://node.example.com/claim",
         "https://node.example.com/prefix/claim",
@@ -241,6 +251,226 @@ async fn verify(d: &Daemon, id: &Value) -> (StatusCode, Value) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_claim_preparation_leaves_neither_pending_challenge_nor_new_key() {
+    let domain = Domain::start();
+    let d = Daemon::start(domain.client.clone());
+    let invite = satspath_core::create_invite_record(ALIAS, 1000, None, "sender".into(), 3600);
+    let id = invite.invite_id.clone();
+    InviteStore::open(d.home.path())
+        .unwrap()
+        .insert(invite)
+        .unwrap();
+    let keys = d.home.path().join(crate::config::IDENTITY_SUBDIR);
+    let key_names = || {
+        std::fs::read_dir(&keys)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let before_keys = key_names();
+    let before = d.snapshot();
+    let db = rusqlite::Connection::open(
+        d.home
+            .path()
+            .join(satspath_core::transparency::TRANSPARENCY_DB_FILE),
+    )
+    .unwrap();
+    db.execute_batch("CREATE TRIGGER refuse_pending BEFORE INSERT ON alias_challenges BEGIN SELECT RAISE(ABORT,'injected challenge failure'); END;").unwrap();
+    let request = json!({"alias":ALIAS,"methods":{"onchain_address":address(1)},"invite_id":id});
+    let (status, error) = d.post("/v1/onboarding/challenge", request.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(
+        key_names(),
+        before_keys,
+        "only the newly written receiver key may be rolled back"
+    );
+    assert_eq!(d.snapshot(), before);
+    let count: i64 = db
+        .query_row("SELECT COUNT(*) FROM alias_challenges", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0);
+    db.execute_batch("DROP TRIGGER refuse_pending").unwrap();
+    // A failed key write must happen before any challenge can be committed.
+    let backup = d.home.path().join("identity-backup");
+    std::fs::rename(&keys, &backup).unwrap();
+    std::fs::write(&keys, b"not a directory").unwrap();
+    let (status, error) = d.post("/v1/onboarding/challenge", request.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    let count: i64 = db
+        .query_row("SELECT COUNT(*) FROM alias_challenges", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(d.snapshot(), before);
+    std::fs::remove_file(&keys).unwrap();
+    std::fs::rename(backup, &keys).unwrap();
+    assert_eq!(key_names(), before_keys);
+    assert_eq!(
+        d.post("/v1/onboarding/challenge", request).await.0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn registration_recovery_preserves_intervening_edits_and_retries_applied_successors() {
+    let domain = Domain::start();
+    let d = Daemon::start(domain.client.clone());
+    let predecessor = load_wallet(d.home.path()).unwrap();
+    let pending = challenge(&d, None).await;
+    domain.publish(pending["body"].as_str().unwrap());
+    let (status, published) = verify(&d, &pending["challenge_id"]).await;
+    assert_eq!(status, StatusCode::OK, "{published}");
+    let successor = load_wallet(d.home.path()).unwrap();
+    let wallet_json = serde_json::to_string(&successor).unwrap();
+    let profile_json = serde_json::to_string(&published["signed_profile"]).unwrap();
+    let before_json = serde_json::to_string(&predecessor).unwrap();
+    let db = rusqlite::Connection::open(
+        d.home
+            .path()
+            .join(satspath_core::transparency::TRANSPARENCY_DB_FILE),
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO registration_wallet VALUES (1,?1,?2,?3)",
+        rusqlite::params![wallet_json, profile_json, before_json],
+    )
+    .unwrap();
+    let mut edited = predecessor.clone();
+    edited.lightning_address = Some("operator-edit@example.net".into());
+    save_wallet(d.home.path(), &edited).unwrap();
+    let path = crate::config::wallet_path(d.home.path());
+    let edited_bytes = std::fs::read(&path).unwrap();
+    assert!(recover_registration_wallet(&d.state).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), edited_bytes);
+    assert!(
+        TransactionalTransparencyStore::open_read_only(d.home.path())
+            .unwrap()
+            .registration_wallet()
+            .unwrap()
+            .is_some()
+    );
+    save_wallet(d.home.path(), &predecessor).unwrap();
+    db.execute_batch("CREATE TRIGGER refuse_activation_cleanup BEFORE DELETE ON registration_wallet BEGIN SELECT RAISE(ABORT,'injected cleanup failure'); END;").unwrap();
+    assert!(recover_registration_wallet(&d.state).is_err());
+    assert_eq!(
+        serde_json::to_value(load_wallet(d.home.path()).unwrap()).unwrap(),
+        serde_json::to_value(&successor).unwrap()
+    );
+    db.execute_batch("DROP TRIGGER refuse_activation_cleanup")
+        .unwrap();
+    let applied_metadata = std::fs::metadata(&path).unwrap();
+    recover_registration_wallet(&d.state).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().ino(),
+            applied_metadata.ino(),
+            "already applied successor must not be rewritten"
+        );
+    }
+    #[cfg(not(unix))]
+    let _ = applied_metadata;
+    assert!(
+        TransactionalTransparencyStore::open_read_only(d.home.path())
+            .unwrap()
+            .registration_wallet()
+            .unwrap()
+            .is_none()
+    );
+    // Migrate the previous three-column format without inventing a predecessor.
+    db.execute_batch("DROP TABLE registration_wallet; CREATE TABLE registration_wallet(id INTEGER PRIMARY KEY CHECK(id=1), wallet_json TEXT NOT NULL, profile_json TEXT NOT NULL);").unwrap();
+    db.execute(
+        "INSERT INTO registration_wallet VALUES (1,?1,?2)",
+        rusqlite::params![wallet_json, profile_json],
+    )
+    .unwrap();
+    save_wallet(d.home.path(), &predecessor).unwrap();
+    let unchanged = std::fs::read(&path).unwrap();
+    assert!(recover_registration_wallet(&d.state).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), unchanged);
+    save_wallet(d.home.path(), &successor).unwrap();
+    recover_registration_wallet(&d.state).unwrap();
+    assert!(
+        TransactionalTransparencyStore::open_read_only(d.home.path())
+            .unwrap()
+            .registration_wallet()
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn registration_requires_an_explicit_additive_receive_method() {
+    let domain = Domain::start();
+    let d = Daemon::start(domain.client.clone());
+    // Existing wallet methods cannot make a remove-only request acceptable.
+    let mut wallet = load_wallet(d.home.path()).unwrap();
+    wallet.onchain_address = Some(address(1));
+    save_wallet(d.home.path(), &wallet).unwrap();
+    let before = d.snapshot();
+    for methods in [
+        json!({"remove_methods": ["lightning"]}),
+        json!({"onchain_pubkey": "public-hint"}),
+        json!({"ark_server": "https://asp.example.com"}),
+    ] {
+        let (status, error) = d
+            .post(
+                "/v1/onboarding/challenge",
+                json!({"alias": ALIAS, "methods": methods}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert!(
+            error.to_string().contains("explicit receive method"),
+            "{error}"
+        );
+        assert_eq!(d.snapshot(), before);
+    }
+    let (status, result) = d
+        .post(
+            "/v1/onboarding/challenge",
+            json!({"alias": ALIAS, "methods": {
+                "onchain_address": address(1), "remove_methods": ["lightning"]
+            }}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stalled_challenge_body_does_not_hold_the_mutation_lock() {
+    use tokio::io::AsyncWriteExt;
+    let domain = Domain::start();
+    let d = Daemon::start(domain.client.clone());
+    let mut stalled = tokio::net::TcpStream::connect(d.state.bind).await.unwrap();
+    // tiny_http eagerly buffers bodies <= 1024 bytes before routing them.
+    // A larger body reaches read_json while its remaining bytes are stalled.
+    stalled.write_all(format!("POST /v1/onboarding/challenge HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nContent-Length: 2048\r\n\r\n{{").as_bytes()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while d.state.rate_limiter.stats().total_allowed == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let other = tokio::time::timeout(
+        Duration::from_secs(3),
+        d.post(
+            "/v1/onboarding/challenge",
+            json!({"alias":ALIAS,"methods":{"onchain_address":address(1)}}),
+        ),
+    )
+    .await;
+    drop(stalled); // Always release the blocked body reader, even on a regression.
+    let (status, body) = other.expect("a stalled body must not block other owner mutations");
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn standalone_https_registration_ownership_quote_cli_approval_and_restart() {
     let domain = Domain::start();
     let mut d = Daemon::start(domain.client.clone());
@@ -258,10 +488,11 @@ async fn standalone_https_registration_ownership_quote_cli_approval_and_restart(
     let db =
         rusqlite::Connection::open(d.home.path().join("satspath-transparency-v1.sqlite3")).unwrap();
     db.execute(
-        "INSERT INTO registration_wallet VALUES (1,?1,?2)",
+        "INSERT INTO registration_wallet VALUES (1,?1,?2,?3)",
         rusqlite::params![
             serde_json::to_string(&active).unwrap(),
-            serde_json::to_string(&signed).unwrap()
+            serde_json::to_string(&signed).unwrap(),
+            serde_json::to_string(&wallet_before_registration).unwrap()
         ],
     )
     .unwrap();

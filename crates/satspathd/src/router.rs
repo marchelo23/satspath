@@ -569,11 +569,15 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
             }
         }
         (Method::Post, "/v1/onboarding/challenge") => {
-            let _guard = state.mutation_lock.lock().await;
-            match read_json::<crate::handlers::onboarding::RegistrationRequest>(&mut request, state)
-                .and_then(|body| crate::handlers::onboarding::create_registration(state, body)) {
-                Ok(response) => json_response(StatusCode(200), &response),
-                Err(error) => read_error_with_status(StatusCode(400), error),
+            match read_json::<crate::handlers::onboarding::RegistrationRequest>(&mut request, state) {
+                Ok(body) => {
+                    let _guard = state.mutation_lock.lock().await;
+                    match crate::handlers::onboarding::create_registration(state, body) {
+                        Ok(response) => json_response(StatusCode(200), &response),
+                        Err(error) => json_error(StatusCode(400), error),
+                    }
+                },
+                Err(error) => handle_read_error(error),
             }
         }
         (Method::Post, "/v1/onboarding/verify") => {

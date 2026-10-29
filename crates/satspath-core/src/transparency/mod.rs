@@ -45,7 +45,8 @@ pub use checkpoint::{
 };
 #[cfg(feature = "std")]
 pub use database::{
-    AliasAuthorization, TransactionalTransparencyStore, DB_FILE as TRANSPARENCY_DB_FILE,
+    AliasAuthorization, RegistrationWalletActivation, TransactionalTransparencyStore,
+    DB_FILE as TRANSPARENCY_DB_FILE,
 };
 pub use event::{payment_method_descriptor_hash, profile_hash, NameAction, NameEvent};
 pub use gossip::{

@@ -432,7 +432,8 @@ requires an independent method-key proof.** No payment is approved or executed.
 For invite links, set `SATSPATH_CLAIM_BASE_URL=https://node.example.com/claim`
 to the HTTPS origin/path serving this daemon's dashboard. Credentials, query and
 fragment are forbidden. Without configuration the actual local `/claim` URL is
-used (HTTP only on loopback); there is no `satspath.local` placeholder.
+used (HTTP only on loopback); non-loopback binds require `SATSPATH_CLAIM_BASE_URL`
+even when native TLS is enabled. There is no `satspath.local` placeholder.
 
 Each save re-signs the profile (`SHA256("SatsPathProfileV1" || RFC8785(profile))`)
 with the next `sequence` and a 30-day expiry, appends a `register` or
@@ -558,7 +559,7 @@ names differ:
 | :--- | :--- |
 | `GET /v1/status`, `/v1/node` | Implemented as listed. |
 | `POST /v1/resolve`, `/quote`, `/preview`, `/pay`, `/send` | Implemented. All require the Bearer token. |
-| `POST /v1/register` | **Does not exist.** Unauthenticated requests return `401`; authenticated requests reach the `404` fallback. Profiles are created through `/v1/profile/challenge`, `/verify`, then `PUT /v1/profile`. `POST /v1/receive` builds a receive payload and does not register anything. |
+| `POST /v1/register` | **Does not exist.** Unauthenticated requests return `401`; authenticated requests reach the `404` fallback. Clean-daemon profiles are created through `/v1/onboarding/challenge` and `/v1/onboarding/verify`, without mock flags. `POST /v1/receive` builds a receive payload and does not register anything. |
 | `GET /v1/transparency/events`, `/checkpoints` | Implemented, paginated. |
 | `POST /v1/transparency/anchors` | Implemented, Bearer, regtest only. |
 

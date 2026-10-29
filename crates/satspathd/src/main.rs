@@ -772,6 +772,7 @@ mod tests {
         wallet.onchain_address =
             Some(bitcoin::Address::p2wpkh(&pk, bitcoin::Network::Testnet).to_string());
         sign_and_store(dir.path(), &mut wallet, "devnet").unwrap();
+        wallet.alias = Some("Alice@Example.COM".into());
         save_wallet(dir.path(), &wallet).unwrap();
         let method = crate::types::build_methods(&wallet, "devnet")
             .into_iter()
@@ -790,11 +791,13 @@ mod tests {
         let response = attach_method_proof(
             &state,
             MethodProofRequest {
-                alias: None,
+                alias: Some("alice@example.com".into()),
                 verification: proof.clone(),
             },
         )
         .unwrap();
+        wallet = response.wallet;
+        assert_eq!(wallet.alias.as_deref(), Some("alice@example.com"));
         let profile = response.signed_profile.unwrap();
         assert_eq!(profile.profile.method_verifications, vec![proof.clone()]);
         assert!(satspath_core::evaluate_method_trust_for_profile(

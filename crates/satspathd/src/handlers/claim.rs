@@ -236,9 +236,7 @@ fn sync_committed_claims(state: &AppState) -> Result<()> {
         satspath_core::TransactionalTransparencyStore::claimed_invites_read_only(&state.home)?;
     if !receipts.is_empty() {
         let mut mirror = InviteStore::open(&state.home)?;
-        for receipt in receipts {
-            mirror.apply_authorized_claim(&receipt)?;
-        }
+        mirror.apply_authorized_claims(&receipts)?;
     }
     Ok(())
 }

@@ -1,7 +1,7 @@
 //! Single-use HTTPS domain authorization for real registration and invite claims.
 //! Domain administration is not mailbox access. Only public material is fetched.
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use satspath_core::{
     crypto::{generate_identity_keypair, generate_nonce, sign_profile, verify_signed_profile},
     privacy::{canonical_identifier, identifier_hash},
@@ -88,6 +88,13 @@ pub(crate) fn create_registration(state: &AppState, body: RegistrationRequest) -
         body.methods.alias.is_none(),
         "methods must not contain a second alias"
     );
+    ensure!(
+        body.methods.lightning_address.is_some()
+            || body.methods.onchain_address.is_some()
+            || body.methods.silent_payment_address.is_some()
+            || (body.methods.ark_server.is_some() && body.methods.ark_pubkey.is_some()),
+        "registration requires an explicit receive method, not only removals or metadata"
+    );
     let alias = canonical_identifier(&body.alias);
     let name = satspath_core::bip353::parse_bip353_name(&alias)?;
     let url = format!(
@@ -99,7 +106,10 @@ pub(crate) fn create_registration(state: &AppState, body: RegistrationRequest) -
     let before = load_wallet(&state.home)?;
     if body.invite_id.is_none() {
         ensure!(
-            before.alias.as_deref().is_none_or(|old| old == alias),
+            before
+                .alias
+                .as_deref()
+                .is_none_or(|old| canonical_identifier(old) == alias),
             "local wallet already has another alias; use a separate receiver home"
         );
     }
@@ -204,14 +214,30 @@ pub(crate) fn create_registration(state: &AppState, body: RegistrationRequest) -
         payload.len() <= 16 * 1024,
         "authorization body exceeds 16 KiB"
     );
-    store.save_alias_challenge(
+    let new_key_path = if pending.invite.is_some() {
+        let path = state
+            .home
+            .join(crate::config::IDENTITY_SUBDIR)
+            .join(format!(
+                "{}.key",
+                pending.signed_profile.profile.identity_pubkey
+            ));
+        ensure!(!path.try_exists()?, "receiver identity path already exists");
+        Some(save_identity_key(&state.home, &secret)?)
+    } else {
+        None
+    };
+    if let Err(error) = store.save_alias_challenge(
         &pending.challenge_id,
         &serde_json::to_string(&pending)?,
         pending.expires_at,
         time,
-    )?;
-    if pending.invite.is_some() {
-        save_identity_key(&state.home, &secret)?;
+    ) {
+        if let Some(path) = new_key_path {
+            std::fs::remove_file(path)
+                .context("removing newly created, uncommitted receiver identity")?;
+        }
+        return Err(error.into());
     }
     Ok(json!({
         "challenge_id": pending.challenge_id, "expires_at": pending.expires_at,
@@ -359,6 +385,7 @@ fn finish_registration(state: &AppState, raw: &str, pending: PendingRegistration
     let candidate = log.prepare_append(event.clone(), &pending.signed_profile)?;
     let checkpoint = candidate.prepare_checkpoint(&operator)?;
     let wallet_json = serde_json::to_string(&pending.wallet)?;
+    let wallet_before_json = serde_json::to_string(&pending.wallet_before)?;
     store.commit_authorized_profile(
         &pending.signed_profile,
         &event,
@@ -369,6 +396,7 @@ fn finish_registration(state: &AppState, raw: &str, pending: PendingRegistration
             attestation: &attestation,
             claimed_invite: claimed.as_ref(),
             local_wallet_json: claimed.is_none().then_some(wallet_json.as_str()),
+            local_wallet_before_json: claimed.is_none().then_some(wallet_before_json.as_str()),
             now: now(),
         },
     )?;
@@ -385,7 +413,9 @@ fn finish_registration(state: &AppState, raw: &str, pending: PendingRegistration
 /// Replay only an atomic self-registration mirror, never arbitrary wallet edits.
 pub(crate) fn recover_registration_wallet(state: &AppState) -> Result<()> {
     let store = TransactionalTransparencyStore::open(&state.home)?;
-    if let Some((raw, profile)) = store.registration_wallet()? {
+    if let Some(activation) = store.registration_wallet()? {
+        let raw = activation.wallet_json;
+        let profile = activation.profile;
         let wallet: WalletState = serde_json::from_str(&raw)?;
         let current = load_wallet(&state.home)?;
         ensure!(
@@ -393,14 +423,32 @@ pub(crate) fn recover_registration_wallet(state: &AppState) -> Result<()> {
             "registration recovery cannot replace the local identity"
         );
         ensure!(
+            wallet.alias.as_deref() == Some(&profile.profile.alias)
+                && wallet.identity_pubkey.as_deref() == Some(&profile.profile.identity_pubkey)
+                && build_methods(&wallet, &state.network) == profile.profile.methods,
+            "registration mirror mismatch"
+        );
+        let current_json = serde_json::to_value(&current)?;
+        if current_json == serde_json::to_value(&wallet)? {
+            // The public mirror was saved but clearing the row failed. Never
+            // rewrite an already applied successor; retry only the row cleanup.
+            store.clear_registration_wallet(&raw)?;
+            return Ok(());
+        }
+        let predecessor: WalletState =
+            serde_json::from_str(activation.predecessor_json.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "legacy activation lacks its predecessor; refusing to overwrite wallet"
+                )
+            })?)?;
+        ensure!(
+            current_json == serde_json::to_value(predecessor)?,
+            "wallet changed after registration; recovery will not overwrite operator edits"
+        );
+        ensure!(
             serde_json::to_value(store.profile(&profile.profile.alias)?)?
                 == serde_json::to_value(Some(&profile))?,
             "registration recovery profile changed"
-        );
-        ensure!(
-            wallet.alias.as_deref() == Some(&profile.profile.alias)
-                && build_methods(&wallet, &state.network) == profile.profile.methods,
-            "registration mirror mismatch"
         );
         save_wallet(&state.home, &wallet)?;
         store.clear_registration_wallet(&raw)?;
@@ -471,14 +519,23 @@ pub(crate) fn claimed_profile_wallet(state: &AppState, alias: &str) -> Result<Wa
 
 /// Configured public claim page, or the actual local dashboard (never a placeholder).
 pub(crate) fn claim_url(state: &AppState, invite_id: &str) -> Result<String> {
-    let base = std::env::var("SATSPATH_CLAIM_BASE_URL").unwrap_or_else(|_| {
-        format!(
-            "{}://{}/claim",
-            if state.is_tls { "https" } else { "http" },
-            state.bind
-        )
-    });
+    let base = match std::env::var("SATSPATH_CLAIM_BASE_URL") {
+        Ok(base) => base,
+        Err(std::env::VarError::NotPresent) => local_claim_base(state.bind, state.is_tls)?,
+        Err(error) => return Err(error).context("invalid SATSPATH_CLAIM_BASE_URL"),
+    };
     configured_claim_url(&base, invite_id)
+}
+
+fn local_claim_base(bind: std::net::SocketAddr, is_tls: bool) -> Result<String> {
+    ensure!(
+        bind.ip().is_loopback(),
+        "set SATSPATH_CLAIM_BASE_URL to the public HTTPS /claim URL for a non-loopback bind"
+    );
+    Ok(format!(
+        "{}://{bind}/claim",
+        if is_tls { "https" } else { "http" }
+    ))
 }
 
 fn configured_claim_url(base: &str, invite_id: &str) -> Result<String> {

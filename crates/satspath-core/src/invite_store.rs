@@ -210,6 +210,25 @@ impl InviteStore {
     /// Replay a receipt already committed with registration in the authoritative
     /// SQLite store. The JSON invite file is only a recoverable notification mirror.
     pub fn apply_authorized_claim(&mut self, receipt: &InviteRecord) -> Result<()> {
+        self.apply_authorized_claims(std::slice::from_ref(receipt))
+    }
+
+    /// Recover all receipts in memory and persist once, or leave the original
+    /// mirror untouched if any receipt is invalid or the final save fails.
+    pub fn apply_authorized_claims(&mut self, receipts: &[InviteRecord]) -> Result<()> {
+        let mut candidate = self.clone();
+        let mut changed = false;
+        for receipt in receipts {
+            changed |= candidate.apply_authorized_claim_in_memory(receipt)?;
+        }
+        if changed {
+            candidate.save()?;
+            self.storage = candidate.storage;
+        }
+        Ok(())
+    }
+
+    fn apply_authorized_claim_in_memory(&mut self, receipt: &InviteRecord) -> Result<bool> {
         anyhow::ensure!(
             receipt.status == InviteStatus::ClaimedWithPublicProfile
                 && receipt
@@ -245,7 +264,7 @@ impl InviteStore {
                 record.status == receipt.status
                     && record.claimed_profile_pubkey == receipt.claimed_profile_pubkey
             }) {
-                return Ok(());
+                return Ok(false);
             }
         } else {
             self.storage.notifications.push(ClaimNotification {
@@ -265,7 +284,7 @@ impl InviteStore {
         self.storage
             .invites
             .insert(receipt.invite_id.clone(), receipt.clone());
-        self.save()
+        Ok(true)
     }
 
     /// Cancel an active, unclaimed invite.
@@ -316,6 +335,55 @@ impl InviteStore {
 mod tests {
     use super::*;
     use crate::create_invite_record;
+
+    #[test]
+    fn batch_claim_recovery_defers_persistence_until_all_receipts_are_valid() -> Result<()> {
+        let home = tempfile::tempdir()?;
+        let mut store = InviteStore::open(home.path())?;
+        let key = crate::crypto::generate_identity_keypair();
+        let receiver = hex::encode(key.public_key.serialize());
+        let mut receipts = Vec::new();
+        for alias in ["alice@example.com", "bob@example.com"] {
+            let mut record = create_invite_record(alias, 1000, None, "sender".into(), 3600);
+            store.insert(record.clone())?;
+            record.status = InviteStatus::ClaimedWithPublicProfile;
+            record.claimed_at = Some(chrono::Utc::now().timestamp());
+            record.claimed_profile_pubkey = Some(receiver.clone());
+            receipts.push(record);
+        }
+        let path = home.path().join(INVITES_FILE);
+        let before = std::fs::read(&path)?;
+        let mut invalid = receipts[1].clone();
+        invalid.amount_sats += 1;
+        assert!(store
+            .apply_authorized_claims(&[receipts[0].clone(), invalid])
+            .is_err());
+        assert_eq!(std::fs::read(&path)?, before);
+        assert!(
+            store.notifications().is_empty(),
+            "failed batches cannot leave partial in-memory state"
+        );
+        // Block the destination to force a final-save failure, then retry on
+        // the same store. Neither API may retain an unpersisted in-memory claim.
+        std::fs::remove_file(&path)?;
+        std::fs::create_dir(&path)?;
+        assert!(store.apply_authorized_claims(&receipts).is_err());
+        assert!(store.apply_authorized_claim(&receipts[0]).is_err());
+        assert!(store.notifications().is_empty());
+        std::fs::remove_dir(&path)?;
+        std::fs::write(&path, &before)?;
+        store.apply_authorized_claim(&receipts[0])?;
+        store.apply_authorized_claims(&receipts)?;
+        assert_eq!(InviteStore::open(home.path())?.notifications().len(), 2);
+        store.mark_all_notifications_read()?;
+        let applied = std::fs::read(&path)?;
+        store.apply_authorized_claims(&receipts)?;
+        store.apply_authorized_claim(&receipts[0])?;
+        assert_eq!(std::fs::read(path)?, applied);
+        assert_eq!(store.notifications().len(), 2);
+        assert!(store.notifications().iter().all(|note| note.read));
+        Ok(())
+    }
 
     #[test]
     fn test_email_sent_invites_expire_and_are_pruned() -> Result<()> {

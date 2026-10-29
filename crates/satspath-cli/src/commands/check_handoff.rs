@@ -119,6 +119,19 @@ mod tests {
         };
         let destination = "1BoatSLRHtKNngkdXEeobR76b53LETtpyT";
         assert!(check(&quote, "alice@example.com", destination, 21_001, "mainnet").is_ok());
+        let mut unverified = quote.clone();
+        if let QuoteResponse::Ok { recipient, .. } = &mut unverified {
+            recipient.profile_signature_verified = false;
+        }
+        let error = check(
+            &unverified,
+            "alice@example.com",
+            destination,
+            21_001,
+            "mainnet",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("profile signature verification"));
         assert!(check(&quote, "alice@example.com", "attacker", 21_001, "mainnet").is_err());
         for (alias, amount, network) in [
             ("bob@example.com", 21_001, "mainnet"),

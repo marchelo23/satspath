@@ -30,7 +30,16 @@ pub struct AliasAuthorization<'a> {
     pub attestation: &'a IdentifierAttestation,
     pub claimed_invite: Option<&'a crate::profile::InviteRecord>,
     pub local_wallet_json: Option<&'a str>,
+    pub local_wallet_before_json: Option<&'a str>,
     pub now: i64,
+}
+
+/// Both ends of the authorized public-wallet transition. A missing predecessor
+/// marks a legacy row: it may only be cleared if the successor is already applied.
+pub struct RegistrationWalletActivation {
+    pub wallet_json: String,
+    pub predecessor_json: Option<String>,
+    pub profile: SignedPaymentProfile,
 }
 
 impl TransactionalTransparencyStore {
@@ -57,10 +66,34 @@ impl TransactionalTransparencyStore {
               CREATE TABLE IF NOT EXISTS identifier_attestations(attestation_hash TEXT PRIMARY KEY, attestation_json TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS alias_challenges(challenge_id TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, payload_json TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS claimed_invites(invite_id TEXT PRIMARY KEY, invite_json TEXT NOT NULL);
-              CREATE TABLE IF NOT EXISTS registration_wallet(id INTEGER PRIMARY KEY CHECK(id=1), wallet_json TEXT NOT NULL, profile_json TEXT NOT NULL);
+               CREATE TABLE IF NOT EXISTS registration_wallet(id INTEGER PRIMARY KEY CHECK(id=1), wallet_json TEXT NOT NULL, profile_json TEXT NOT NULL, predecessor_json TEXT);
              CREATE TABLE IF NOT EXISTS operator_state(log_id TEXT PRIMARY KEY, operator_pubkey TEXT, operator_sequence INTEGER NOT NULL DEFAULT 0);
              INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);"
         ).map_err(db_error)?;
+        let has_predecessor = {
+            let mut statement = transaction
+                .prepare("PRAGMA table_info(registration_wallet)")
+                .map_err(db_error)?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(db_error)?;
+            columns
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(db_error)?
+                .iter()
+                .any(|name| name == "predecessor_json")
+        };
+        if !has_predecessor {
+            transaction
+                .execute_batch("ALTER TABLE registration_wallet ADD COLUMN predecessor_json TEXT;")
+                .map_err(db_error)?;
+        }
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (2)",
+                [],
+            )
+            .map_err(db_error)?;
         let log_id: Option<String> = transaction
             .query_row("SELECT log_id FROM operator_state LIMIT 1", [], |row| {
                 row.get(0)
@@ -277,18 +310,24 @@ impl TransactionalTransparencyStore {
     }
 
     /// Recoverable mirror activation, committed with self-registration security state.
-    pub fn registration_wallet(&self) -> Result<Option<(String, SignedPaymentProfile)>> {
-        let row: Option<(String, String)> = self
+    pub fn registration_wallet(&self) -> Result<Option<RegistrationWalletActivation>> {
+        let row: Option<(String, String, Option<String>)> = self
             .connection()?
             .query_row(
-                "SELECT wallet_json,profile_json FROM registration_wallet WHERE id=1",
+                "SELECT wallet_json,profile_json,predecessor_json FROM registration_wallet WHERE id=1",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()
             .map_err(db_error)?;
-        row.map(|(wallet, profile)| Ok((wallet, serde_json::from_str(&profile)?)))
-            .transpose()
+        row.map(|(wallet_json, profile, predecessor_json)| {
+            Ok(RegistrationWalletActivation {
+                wallet_json,
+                predecessor_json,
+                profile: serde_json::from_str(&profile)?,
+            })
+        })
+        .transpose()
     }
 
     pub fn clear_registration_wallet(&self, wallet_json: &str) -> Result<()> {
@@ -549,6 +588,7 @@ impl TransactionalTransparencyStore {
                 invited.claimed_profile_pubkey = receipt.claimed_profile_pubkey.clone();
                 if serde_json::to_value(invited)? != serde_json::to_value(receipt)?
                     || auth.local_wallet_json.is_some()
+                    || auth.local_wallet_before_json.is_some()
                 {
                     return Err(db_error("claim changed invitation or operator wallet"));
                 }
@@ -559,6 +599,12 @@ impl TransactionalTransparencyStore {
                     .transpose()?
                     .as_ref()
                     != Some(&pending["wallet"])
+                || auth
+                    .local_wallet_before_json
+                    .map(serde_json::from_str::<serde_json::Value>)
+                    .transpose()?
+                    .as_ref()
+                    != Some(&pending["wallet_before"])
             {
                 return Err(db_error("self-registration wallet or invite mismatch"));
             }
@@ -611,8 +657,8 @@ impl TransactionalTransparencyStore {
             if let Some(wallet) = auth.local_wallet_json {
                 transaction
                     .execute(
-                        "INSERT INTO registration_wallet VALUES (1,?1,?2)",
-                        params![wallet, profile_json],
+                        "INSERT INTO registration_wallet(id,wallet_json,profile_json,predecessor_json) VALUES (1,?1,?2,?3)",
+                        params![wallet, profile_json, auth.local_wallet_before_json],
                     )
                     .map_err(db_error)?;
             }
