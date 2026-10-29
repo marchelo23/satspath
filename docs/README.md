@@ -77,9 +77,13 @@ destination/amount/network changes are rejected. It runs in the existing
 **Classification: hermetic preview evidence, not external interoperability.**
 Alias authorization is explicitly dev-mocked (`identifier_verified: false`);
 no wallet is opened, no spend approved, and no transaction signed or confirmed.
-External-wallet settlement and no-mock alias acceptance remain pending under
-[#202](https://github.com/satspath/satspath/issues/202); see the
-[implementation plan](implementation-plan-202.md).
+Standalone [#202](https://github.com/satspath/satspath/issues/202) still needs
+independent CLI/daemon handoff-contract and approval-policy evidence, coordinated
+with real onboarding under [#201](https://github.com/satspath/satspath/issues/201).
+Named-wallet integration, external approval, signing, broadcasting and settlement
+belong to phase 2 ([#216](https://github.com/satspath/satspath/issues/216),
+[#171](https://github.com/satspath/satspath/issues/171)); they are not requirements
+to close standalone #202. The daemon continues to return handoffs, not payments.
 
 ## Ignored-test inventory
 

@@ -45,6 +45,13 @@ dev-mocked, `identifier_verified` remains false, and no external-wallet approval
 transaction signature, broadcast or confirmation is demonstrated. The historical
 Core transfer above is not evidence of this positive daemon journey settling.
 
+For standalone [#202](https://github.com/satspath/satspath/issues/202), remaining
+evidence covers independent CLI/daemon validation of destination, amount, network
+and approval policy, coordinated with real onboarding under #201. Named-wallet
+adapters and external approval/signing/broadcast/confirmation evidence belong to
+phase 2 (#216/#171), not standalone H2 acceptance. The lack of a settled payment
+does not itself block #202; the daemon must report handoff versus payment truthfully.
+
 ## Remaining product blockers
 
 - No production email/domain alias attestation; invitation claiming stays
@@ -52,7 +59,6 @@ Core transfer above is not evidence of this positive daemon journey settling.
 - The `https://satspath.local/claim` URL is a placeholder, not a public claim
   service.
 - Demo payment methods without an attached ownership proof still return
-  `no_route`; the D1 fixture does not provide a production alias-control verifier
-  or external-wallet settlement.
+  `no_route`; the D1 fixture does not provide a production alias-control verifier.
 - Regtest anchoring remains operator-only and must never use a wallet with real
   funds.
