@@ -3,6 +3,7 @@ cargo fmt --all -- --check
 cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
 # Keep Lightning retrieval, payee/network binding and quote regressions local.
 cargo test -p satspath-router --lib
+cargo test -p satspath-router --test wallet_executor_integration
 # Run daemon authorization, profile and ownership regressions before committing.
 cargo test -p satspathd
 # Validate capability contract, OpenAPI/auth sync, SDK quickstart, and dashboard tests.

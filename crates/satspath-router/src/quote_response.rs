@@ -423,8 +423,17 @@ async fn route_verified_signed_with_invoices(
     let mut last_payload_err = None;
     signed.profile.methods.retain(|method| {
         match prepared_payload(method, amount_sats, invoices).and_then(|payload| {
-            validate_payload(method, &payload, network, Some(amount_sats))
-                .map_err(|e| SatsPathError::InvalidPaymentPointer(e.to_string()))?;
+            // Public resolver quotes historically derive on-chain network from
+            // the signed method. The daemon enforces its configured network at
+            // its own final gate; do not silently force SDK testnet quotes onto
+            // the public API's mainnet fee-source default.
+            if matches!(
+                method,
+                PaymentMethod::Lightning { .. } | PaymentMethod::Ark { .. }
+            ) {
+                validate_payload(method, &payload, network, Some(amount_sats))
+                    .map_err(|e| SatsPathError::InvalidPaymentPointer(e.to_string()))?;
+            }
             Ok(payload)
         }) {
             Ok(_) => true,
@@ -489,8 +498,13 @@ async fn route_verified_signed_with_invoices(
     // 5. Build the payment payload.
     let qr =
         match prepared_payload(&route.selected_method, amount_sats, invoices).and_then(|payload| {
-            validate_payload(&route.selected_method, &payload, network, Some(amount_sats))
-                .map_err(|e| SatsPathError::InvalidPaymentPointer(e.to_string()))?;
+            if matches!(
+                &route.selected_method,
+                PaymentMethod::Lightning { .. } | PaymentMethod::Ark { .. }
+            ) {
+                validate_payload(&route.selected_method, &payload, network, Some(amount_sats))
+                    .map_err(|e| SatsPathError::InvalidPaymentPointer(e.to_string()))?;
+            }
             Ok(payload)
         }) {
             Ok(payload) => payload,
