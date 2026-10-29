@@ -70,8 +70,10 @@ The active `onchain_owned_profile_handoffs_survive_restart_and_reject_replacemen
 test in [`e2e_daemon_flow.rs`](../crates/satspathd/tests/e2e_daemon_flow.rs) covers
 profile → genuine method-key ownership → transparency resolution → `quote/pay/send`
 → exact regtest BIP-21, including one-satoshi precision and same-home daemon restart.
-Forged signatures, replay, unverified replacement destinations, and handoff
-destination/amount/network changes are rejected. It runs in the existing
+HTTP assertions cover rejection of forged signatures, replay, and unverified
+replacement destinations. Separate direct calls to the shared handoff validator
+assert rejection of destination/amount/network tampering, not through a daemon
+route. The test runs in the existing
 `daemon-flow` CI job and Husky daemon tests.
 
 **Classification: hermetic preview evidence, not external interoperability.**
