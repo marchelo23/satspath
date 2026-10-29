@@ -73,6 +73,24 @@ test('Silent Payment URI schemas cover receive and amount-bound network variants
   }
 });
 
+test('Lightning invoices are payable handoffs, not receive pointers or execution', () => {
+  const schemaBlock = name => openapiText.match(new RegExp(`^    ${name}:\\n([\\s\\S]*?)(?=^    \\w+:|$(?![\\s\\S]))`, 'm'))[1];
+  const invoice = new RegExp(schemaBlock('LightningPayableInvoice').match(/pattern: '([^']+)'/)[1]);
+  // Shape fixtures only; cryptographic validation is covered by Rust tests.
+  for (const prefix of ['lnbc', 'lntb', 'lnbcrt', 'lntbs']) {
+    const shape = `${prefix}21000n1qqqqqq`;
+    assert.ok(invoice.test(shape));
+    assert.ok(invoice.test(shape.toUpperCase()));
+    assert.ok(!invoice.test(`${shape}?amount=1`));
+  }
+  for (const pointer of ['alice@example.com', 'https://example.com/lnurl', 'lno1qqqq', 'lnbc1qqqq']) {
+    assert.ok(!invoice.test(pointer));
+  }
+  assert.match(schemaBlock('PayablePaymentPayload'), /LightningPayableInvoice/);
+  assert.match(schemaBlock('QuoteOk'), /schemas\/LightningMethod/);
+  assert.match(apiRefText, /Invoice generation is not payment execution/);
+});
+
 test('Ark schemas cover canonical wallet payloads and reachable response rails', () => {
   const schemaBlock = name => openapiText.match(new RegExp(`^    ${name}:\\n([\\s\\S]*?)(?=^    \\w+:|$(?![\\s\\S]))`, 'm'))[1];
   const uriPattern = name => new RegExp(schemaBlock(name).match(/pattern: '([^']+)'/)[1]);

@@ -189,14 +189,34 @@ pub async fn quote_verified_profile_for_network(
                 .into(),
         };
     }
+    if !signed.profile.alias.eq_ignore_ascii_case(recipient)
+        || check_profile_expiry(&signed.profile).is_err()
+    {
+        return QuoteResponse::NoRoute {
+            reason: "Profile expired or recipient alias mismatch.".into(),
+        };
+    }
+    // Fetch only after signature, alias, expiry and independent ownership gates.
+    // Preserve the original signed method; never replace it with fetched data.
+    let mut invoices = std::collections::HashMap::new();
+    for method in &signed.profile.methods {
+        if matches!(method, PaymentMethod::Lightning { .. }) {
+            if let Ok(invoice) =
+                crate::lightning::fetch_verified_method_invoice(method, amount_sats, network).await
+            {
+                invoices.insert(method.ownership_descriptor(), invoice);
+            }
+        }
+    }
     let recipient_hash = identifier_hash(recipient);
-    route_verified_signed(
+    route_verified_signed_with_invoices(
         signed,
         recipient,
         &recipient_hash,
         amount_sats,
         None,
         network,
+        &invoices,
     )
     .await
 }
@@ -355,12 +375,33 @@ where
 
 /// Check revocation and expiry, filter payable methods, select a route, and build the [`QuoteResponse`].
 async fn route_verified_signed(
+    signed: satspath_core::SignedPaymentProfile,
+    recipient: &str,
+    recipient_hash: &str,
+    amount_sats: u64,
+    fees: Option<FeeEstimate>,
+    network: &str,
+) -> QuoteResponse {
+    route_verified_signed_with_invoices(
+        signed,
+        recipient,
+        recipient_hash,
+        amount_sats,
+        fees,
+        network,
+        &std::collections::HashMap::new(),
+    )
+    .await
+}
+
+async fn route_verified_signed_with_invoices(
     mut signed: satspath_core::SignedPaymentProfile,
     recipient: &str,
     recipient_hash: &str,
     amount_sats: u64,
     fees: Option<FeeEstimate>,
     network: &str,
+    invoices: &std::collections::HashMap<String, String>,
 ) -> QuoteResponse {
     if signed.profile.revoked {
         return QuoteResponse::NoRoute {
@@ -381,11 +422,9 @@ async fn route_verified_signed(
     // shadow a valid on-chain handoff.
     let mut last_payload_err = None;
     signed.profile.methods.retain(|method| {
-        match build_qr_payload(method, amount_sats).and_then(|payload| {
-            if matches!(method, PaymentMethod::Ark { .. }) {
-                validate_payload(method, &payload, network, Some(amount_sats))
-                    .map_err(|e| SatsPathError::InvalidPaymentPointer(e.to_string()))?;
-            }
+        match prepared_payload(method, amount_sats, invoices).and_then(|payload| {
+            validate_payload(method, &payload, network, Some(amount_sats))
+                .map_err(|e| SatsPathError::InvalidPaymentPointer(e.to_string()))?;
             Ok(payload)
         }) {
             Ok(_) => true,
@@ -448,14 +487,19 @@ async fn route_verified_signed(
     };
 
     // 5. Build the payment payload.
-    let qr = match build_qr_payload(&route.selected_method, amount_sats) {
-        Ok(payload) => payload,
-        Err(e) => {
-            return QuoteResponse::NoRoute {
-                reason: format!("could not build payment payload: {e}"),
+    let qr =
+        match prepared_payload(&route.selected_method, amount_sats, invoices).and_then(|payload| {
+            validate_payload(&route.selected_method, &payload, network, Some(amount_sats))
+                .map_err(|e| SatsPathError::InvalidPaymentPointer(e.to_string()))?;
+            Ok(payload)
+        }) {
+            Ok(payload) => payload,
+            Err(e) => {
+                return QuoteResponse::NoRoute {
+                    reason: format!("could not build payment payload: {e}"),
+                }
             }
-        }
-    };
+        };
 
     QuoteResponse::Ok {
         recipient: recipient_info,
@@ -466,6 +510,18 @@ async fn route_verified_signed(
         qr,
         execution: route.execution,
         wallet_hint: route.wallet_hint,
+    }
+}
+
+fn prepared_payload(
+    method: &PaymentMethod,
+    amount_sats: u64,
+    invoices: &std::collections::HashMap<String, String>,
+) -> satspath_core::Result<String> {
+    if let Some(invoice) = invoices.get(&method.ownership_descriptor()) {
+        Ok(invoice.clone())
+    } else {
+        build_qr_payload(method, amount_sats)
     }
 }
 
@@ -624,6 +680,159 @@ mod tests {
             recovery: None,
         };
         (profile, kp.secret_key)
+    }
+
+    #[tokio::test]
+    async fn verified_lightning_routes_with_bound_invoice_and_rechecks_modified_handoffs() {
+        let (invoice, payee) = crate::lightning_tests::bound_invoice(
+            lightning_invoice::Currency::BitcoinTestnet,
+            2100,
+            false,
+        );
+        let method = PaymentMethod::Lightning {
+            label: "verified LN".into(),
+            lightning_address: Some("alice@example.com".into()),
+            lnurl: None,
+            bolt12: None,
+            receiver_pubkey: Some(payee),
+        };
+        let (profile, key) = base_profile("alice@example.com", vec![method.clone()]);
+        let signed = sign(profile, &key);
+        let descriptor = method.ownership_descriptor();
+        let mut invoices = std::collections::HashMap::from([(descriptor.clone(), invoice.clone())]);
+        for (network, amount, valid) in [
+            ("testnet", 2100, true),
+            ("mainnet", 2100, false),
+            ("testnet", 2101, false),
+        ] {
+            let response = route_verified_signed_with_invoices(
+                signed.clone(),
+                "alice@example.com",
+                "fixture",
+                amount,
+                Some(cheap_fees()),
+                network,
+                &invoices,
+            )
+            .await;
+            assert_eq!(matches!(response, QuoteResponse::Ok { .. }), valid);
+            if let QuoteResponse::Ok {
+                qr,
+                selected_method,
+                ..
+            } = response
+            {
+                assert_eq!(qr, invoice);
+                assert_eq!(selected_method.ownership_descriptor(), descriptor);
+            }
+        }
+        invoices.insert(descriptor, "lntb1modified".into());
+        assert!(matches!(
+            route_verified_signed_with_invoices(
+                signed.clone(),
+                "alice@example.com",
+                "fixture",
+                2100,
+                Some(cheap_fees()),
+                "testnet",
+                &invoices
+            )
+            .await,
+            QuoteResponse::NoRoute { .. }
+        ));
+        // An identity signature alone must never authorize network retrieval.
+        assert!(matches!(
+            quote_verified_profile_for_network(
+                signed.clone(),
+                "alice@example.com",
+                2100,
+                &[],
+                "testnet"
+            )
+            .await,
+            QuoteResponse::NoRoute { .. }
+        ));
+        assert!(matches!(
+            quote_verified_profile_for_network(
+                signed,
+                "mallory@example.com",
+                2100,
+                &[method.ownership_descriptor()],
+                "testnet"
+            )
+            .await,
+            QuoteResponse::NoRoute { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn domain_ownership_requires_fresh_identity_bound_body_before_allowlisting() {
+        use crate::lightning::verified_method_descriptors_with_fetch;
+        use satspath_core::{attach_well_known_proof, ProofType};
+        let (_, payee) = crate::lightning_tests::bound_invoice(
+            lightning_invoice::Currency::BitcoinTestnet,
+            2100,
+            false,
+        );
+        let method = PaymentMethod::Lightning {
+            label: "domain proof".into(),
+            lightning_address: Some("alice@example.com".into()),
+            lnurl: None,
+            bolt12: None,
+            receiver_pubkey: Some(payee),
+        };
+        let (mut profile, key) = base_profile("alice@example.com", vec![method.clone()]);
+        let now = chrono::Utc::now().timestamp();
+        let body = format!("{} challenge-205", profile.identity_pubkey);
+        let proof = attach_well_known_proof(
+            &method,
+            &profile.identity_pubkey,
+            ProofType::LightningAddressChallenge,
+            "https://example.com/.well-known/satspath/alice",
+            "challenge-205",
+            &body,
+            now - 1,
+            Some(now + 3600),
+        )
+        .unwrap();
+        profile.method_verifications.push(proof.clone());
+        let signed = sign(profile.clone(), &key);
+        assert!(!satspath_core::verify_payment_method_states(&signed.profile, now)[0].verified);
+        let allowed = verified_method_descriptors_with_fetch(&signed, |url| {
+            assert_eq!(url, "https://example.com/.well-known/satspath/alice");
+            let body = body.clone();
+            async move { Ok(body) }
+        })
+        .await;
+        assert_eq!(allowed, vec![method.ownership_descriptor()]);
+        assert!(verified_method_descriptors_with_fetch(&signed, |_| async {
+            Ok("modified body".into())
+        })
+        .await
+        .is_empty());
+        assert!(verified_method_descriptors_with_fetch(&signed, |_| async {
+            anyhow::bail!("offline")
+        })
+        .await
+        .is_empty());
+        profile.method_verifications.push(proof);
+        let duplicate = sign(profile, &key);
+        assert!(
+            verified_method_descriptors_with_fetch(&duplicate, |_| async {
+                panic!("duplicate proof must not trigger network")
+            })
+            .await
+            .is_empty()
+        );
+        let mut tampered = signed;
+        tampered.profile.alias = "attacker@example.com".into();
+        assert!(
+            verified_method_descriptors_with_fetch(&tampered, |_| async {
+                panic!("invalid signature must not trigger network")
+            })
+            .await
+            .is_empty()
+        );
     }
 
     #[tokio::test]

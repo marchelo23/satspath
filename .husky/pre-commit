@@ -1,6 +1,8 @@
 cargo fmt --all -- --check
 # fuzz/ is a separate Cargo workspace; check it explicitly.
 cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
+# Keep Lightning retrieval, payee/network binding and quote regressions local.
+cargo test -p satspath-router --lib
 # Run daemon authorization, profile and ownership regressions before committing.
 cargo test -p satspathd
 # Validate capability contract, OpenAPI/auth sync, SDK quickstart, and dashboard tests.

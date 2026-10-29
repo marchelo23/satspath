@@ -3,6 +3,184 @@ use crate::{fetch_invoice, LnurlPayMetadata};
 use mockito::Server;
 use serde_json::json;
 
+/// Deterministic signed fixture, valid from 2023 until 2100 (not endpoint evidence).
+pub(crate) fn bound_invoice(
+    currency: lightning_invoice::Currency,
+    amount: u64,
+    expired: bool,
+) -> (String, String) {
+    use bitcoin::hashes::{sha256, Hash};
+    use lightning_invoice::{InvoiceBuilder, PaymentSecret};
+    use secp256k1::{Secp256k1, SecretKey};
+    use std::time::{Duration, UNIX_EPOCH};
+    let key = SecretKey::from_slice(&[42; 32]).unwrap();
+    let secp = Secp256k1::new();
+    let payee = secp256k1::PublicKey::from_secret_key(&secp, &key).to_string();
+    let invoice = InvoiceBuilder::new(currency)
+        .description("issue 205 deterministic fixture".into())
+        .payment_hash(sha256::Hash::from_slice(&[1; 32]).unwrap())
+        .payment_secret(PaymentSecret([2; 32]))
+        .timestamp(UNIX_EPOCH + Duration::from_secs(1_700_000_000))
+        .expiry_time(Duration::from_secs(if expired { 1 } else { 2_400_000_000 }))
+        .min_final_cltv_expiry_delta(18)
+        .amount_milli_satoshis(amount * 1000)
+        .build_signed(|hash| secp.sign_ecdsa_recoverable(hash, &key))
+        .unwrap()
+        .to_string();
+    (invoice, payee)
+}
+
+#[tokio::test]
+async fn verified_retrieval_binds_payee_amount_currency_and_expiry() {
+    use crate::lightning::verified_invoice_from_metadata;
+    use lightning_invoice::Currency;
+    use satspath_core::PaymentMethod;
+    for (currency, network) in [
+        (Currency::Bitcoin, "mainnet"),
+        (Currency::BitcoinTestnet, "testnet"),
+        (Currency::Signet, "signet"),
+        (Currency::Regtest, "regtest"),
+    ] {
+        for case in [
+            "valid",
+            "payee",
+            "amount",
+            "network",
+            "expired",
+            "signature",
+        ] {
+            let mut server = Server::new_async().await;
+            let (mut invoice, mut payee) = bound_invoice(
+                currency.clone(),
+                if case == "amount" { 2101 } else { 2100 },
+                case == "expired",
+            );
+            if case == "payee" {
+                payee = secp256k1::PublicKey::from_secret_key(
+                    &secp256k1::Secp256k1::new(),
+                    &secp256k1::SecretKey::from_slice(&[43; 32]).unwrap(),
+                )
+                .to_string();
+            }
+            if case == "signature" {
+                invoice.pop();
+                invoice.push('!');
+            }
+            let metadata = server.mock("GET", "/.well-known/lnurlp/alice")
+                .with_body(json!({"callback": format!("{}/callback", server.url()), "minSendable": 1000, "maxSendable": 10000000, "tag": "payRequest"}).to_string())
+                .create_async().await;
+            let callback = server
+                .mock("GET", "/callback?amount=2100000")
+                .with_body(json!({"pr": invoice}).to_string())
+                .create_async()
+                .await;
+            let method = PaymentMethod::Lightning {
+                label: "fixture".into(),
+                lightning_address: Some("alice@example.com".into()),
+                lnurl: None,
+                bolt12: None,
+                receiver_pubkey: Some(payee),
+            };
+            let configured = if case == "network" {
+                if network == "mainnet" {
+                    "testnet"
+                } else {
+                    "mainnet"
+                }
+            } else {
+                network
+            };
+            let meta = fetch_lnurl_metadata_with_options(
+                &format!("alice@{}", server.host_with_port()),
+                false,
+            )
+            .await
+            .unwrap();
+            let result =
+                verified_invoice_from_metadata(&method, &meta, 2100, configured, false).await;
+            assert_eq!(
+                result.is_ok(),
+                case == "valid",
+                "{network}/{case}: {result:?}"
+            );
+            metadata.assert_async().await;
+            callback.assert_async().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn verified_retrieval_rejects_unsupported_methods_before_network() {
+    use satspath_core::PaymentMethod;
+    let method = PaymentMethod::Lightning {
+        label: "unbound".into(),
+        lightning_address: Some("alice@example.com".into()),
+        lnurl: None,
+        bolt12: None,
+        receiver_pubkey: None,
+    };
+    assert!(
+        crate::lightning::fetch_verified_method_invoice(&method, 2100, "testnet")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn lnurl_transport_rejects_oversized_and_unsuccessful_responses() {
+    for (status, body) in [
+        (200, "x".repeat(50_001)),
+        (302, "{}".into()),
+        (503, "{}".into()),
+    ] {
+        let mut server = Server::new_async().await;
+        let request = server
+            .mock("GET", "/.well-known/lnurlp/alice")
+            .with_status(status)
+            .with_body(body)
+            .create_async()
+            .await;
+        let result =
+            fetch_lnurl_metadata_with_options(&format!("alice@{}", server.host_with_port()), false)
+                .await;
+        assert!(result.is_err(), "status {status}");
+        request.assert_async().await;
+    }
+}
+
+#[tokio::test]
+async fn lnurl_callback_preserves_query_and_rejects_duplicate_amount() {
+    let mut server = Server::new_async().await;
+    let (invoice, _) = bound_invoice(lightning_invoice::Currency::Bitcoin, 2100, false);
+    let request = server
+        .mock(
+            "GET",
+            "/callback?token=public&amount=2100000&comment=%C3%A9",
+        )
+        .with_body(json!({"pr": invoice}).to_string())
+        .create_async()
+        .await;
+    let mut meta = LnurlPayMetadata {
+        callback: format!("{}/callback?token=public", server.url()),
+        min_sendable: 1000,
+        max_sendable: 10000000,
+        tag: "payRequest".into(),
+        comment_allowed: 1,
+    };
+    assert!(
+        fetch_invoice_with_options(&meta, 2100, Some("éclair"), false)
+            .await
+            .is_ok()
+    );
+    request.assert_async().await;
+    meta.callback = format!("{}/callback?amount=1", server.url());
+    assert!(fetch_invoice_with_options(&meta, 2100, None, false)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("ambiguous"));
+}
+
 #[tokio::test]
 async fn test_full_lnurl_flow_with_mock() {
     let mut server = Server::new_async().await;

@@ -244,12 +244,7 @@ async fn fetch_lnurl_metadata_internal(
             .timeout(std::time::Duration::from_secs(10))
             .build()?
     };
-    let meta = client
-        .get(&url)
-        .send()
-        .await?
-        .json::<LnurlPayMetadata>()
-        .await?;
+    let meta: LnurlPayMetadata = bounded_json(client.get(&url).send().await?).await?;
     if meta.tag != "payRequest" {
         anyhow::bail!("unexpected LNURL tag: {}", meta.tag);
     }
@@ -270,7 +265,147 @@ pub async fn fetch_invoice(
     amount_sats: u64,
     comment: Option<&str>,
 ) -> anyhow::Result<String> {
-    fetch_invoice_internal(meta, amount_sats, comment, true).await
+    fetch_invoice_internal(
+        meta,
+        amount_sats,
+        comment,
+        true,
+        Some(bitcoin::Network::Bitcoin),
+    )
+    .await
+}
+
+/// Retrieve an invoice only for an independently ownership-verified method.
+/// Callers must verify the profile and ownership before calling this function.
+/// The final handoff gate binds the signature to the method's receiver key,
+/// exact amount, configured currency and expiry. BOLT12 and raw LNURL pointers
+/// remain unsupported in this first delivery.
+pub async fn fetch_verified_method_invoice(
+    method: &PaymentMethod,
+    amount_sats: u64,
+    network: &str,
+) -> anyhow::Result<String> {
+    satspath_core::validation::validate_amount_sats(amount_sats)?;
+    // Validate both pointer and receiver key before making outbound requests.
+    let PaymentMethod::Lightning {
+        lightning_address: Some(address),
+        lnurl: None,
+        bolt12: None,
+        receiver_pubkey: Some(receiver),
+        ..
+    } = method
+    else {
+        anyhow::bail!(
+            "Lightning invoice retrieval requires a verified Lightning Address and receiver key"
+        );
+    };
+    receiver.parse::<secp256k1::PublicKey>()?;
+    crate::handoff::validate_payload(method, address, network, None)?;
+    if !matches!(
+        network,
+        "mainnet" | "bitcoin" | "testnet" | "devnet" | "signet" | "regtest"
+    ) {
+        anyhow::bail!("unsupported Lightning network for payment handoff");
+    }
+    let meta = fetch_lnurl_metadata_internal(address, true).await?;
+    verified_invoice_from_metadata(method, &meta, amount_sats, network, true).await
+}
+
+/// Refresh domain-control proofs for a transparently resolved profile before
+/// constructing the daemon's routing allow-list. Stored verification flags alone
+/// never authorize Lightning retrieval.
+pub async fn verified_method_descriptors(
+    signed: &satspath_core::SignedPaymentProfile,
+) -> Vec<String> {
+    verified_method_descriptors_with_fetch(signed, |url| async move {
+        let client = satspath_core::outbound::http_client(std::time::Duration::from_secs(10));
+        Ok(String::from_utf8(
+            bounded_bytes(client.get(url).send().await?).await?,
+        )?)
+    })
+    .await
+}
+
+pub(crate) async fn verified_method_descriptors_with_fetch<F, Fut>(
+    signed: &satspath_core::SignedPaymentProfile,
+    fetch: F,
+) -> Vec<String>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<String>>,
+{
+    use satspath_core::{
+        crypto::{check_profile_expiry, verify_signed_profile},
+        MethodTrust,
+    };
+    if !verify_signed_profile(signed).unwrap_or(false)
+        || signed.profile.revoked
+        || check_profile_expiry(&signed.profile).is_err()
+    {
+        return Vec::new();
+    }
+    let now = chrono::Utc::now().timestamp();
+    let states = satspath_core::verify_payment_method_states(&signed.profile, now);
+    let mut allowed = Vec::new();
+    for (method, state) in signed.profile.methods.iter().zip(states) {
+        if state.verified {
+            allowed.push(state.descriptor);
+            continue;
+        }
+        if signed
+            .profile
+            .method_verifications
+            .iter()
+            .filter(|proof| proof.method_descriptor == state.descriptor)
+            .count()
+            != 1
+            || !matches!(
+                satspath_core::evaluate_method_trust_for_profile(
+                    &signed.profile,
+                    method,
+                    now,
+                    None
+                ),
+                MethodTrust::NeedsNetworkCheck(_)
+            )
+        {
+            continue;
+        }
+        let Some(url) = satspath_core::well_known_url_for_method(method) else {
+            continue;
+        };
+        if satspath_core::outbound::validate_request_url(&url).is_err() {
+            continue;
+        }
+        let body = match fetch(url).await {
+            Ok(body) => body,
+            Err(_) => continue,
+        };
+        if matches!(
+            satspath_core::evaluate_method_trust_for_profile(
+                &signed.profile,
+                method,
+                chrono::Utc::now().timestamp(),
+                Some(&body)
+            ),
+            MethodTrust::Verified(_)
+        ) {
+            allowed.push(state.descriptor);
+        }
+    }
+    allowed
+}
+
+pub(crate) async fn verified_invoice_from_metadata(
+    method: &PaymentMethod,
+    meta: &LnurlPayMetadata,
+    amount_sats: u64,
+    network: &str,
+    enforce_ssrf: bool,
+) -> anyhow::Result<String> {
+    let invoice = fetch_invoice_internal(meta, amount_sats, None, enforce_ssrf, None).await?;
+    crate::handoff::validate_payload(method, &invoice, network, Some(amount_sats))?;
+    Ok(invoice)
 }
 
 /// Fetch invoice with explicit SSRF enforcement control (test-only transport path for mock servers).
@@ -281,7 +416,14 @@ pub(crate) async fn fetch_invoice_with_options(
     comment: Option<&str>,
     enforce_ssrf: bool,
 ) -> anyhow::Result<String> {
-    fetch_invoice_internal(meta, amount_sats, comment, enforce_ssrf).await
+    fetch_invoice_internal(
+        meta,
+        amount_sats,
+        comment,
+        enforce_ssrf,
+        Some(bitcoin::Network::Bitcoin),
+    )
+    .await
 }
 
 async fn fetch_invoice_internal(
@@ -289,6 +431,7 @@ async fn fetch_invoice_internal(
     amount_sats: u64,
     comment: Option<&str>,
     enforce_ssrf: bool,
+    expected_network: Option<bitcoin::Network>,
 ) -> anyhow::Result<String> {
     satspath_core::validation::validate_amount_sats(amount_sats)?;
     let amount_msats = amount_sats * 1_000;
@@ -309,25 +452,32 @@ async fn fetch_invoice_internal(
         );
     }
 
-    let mut url = format!("{}?amount={}", meta.callback, amount_msats);
+    let mut url = url::Url::parse(&meta.callback)?;
+    if url
+        .query_pairs()
+        .any(|(key, _)| key == "amount" || key == "comment")
+        || url.fragment().is_some()
+    {
+        anyhow::bail!("ambiguous LNURL callback parameters");
+    }
+    url.query_pairs_mut()
+        .append_pair("amount", &amount_msats.to_string());
     if let Some(c) = comment {
         if meta.comment_allowed > 0 {
-            let trimmed = &c[..c.len().min(meta.comment_allowed as usize)];
-            url.push_str(&format!("&comment={}", urlencoding::encode(trimmed)));
+            let trimmed: String = c.chars().take(meta.comment_allowed as usize).collect();
+            url.query_pairs_mut().append_pair("comment", &trimmed);
         }
     }
 
     let client = if enforce_ssrf {
-        satspath_core::outbound::validate_request_url(&url)?;
+        satspath_core::outbound::validate_request_url(url.as_str())?;
         satspath_core::outbound::http_client(std::time::Duration::from_secs(10))
     } else {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()?
     };
-    let raw_body = client.get(&url).send().await?.text().await?;
-    let resp: LnurlInvoiceResponse = serde_json::from_str(&raw_body)
-        .map_err(|e| anyhow::anyhow!("failed to parse LNURL callback response: {e}"))?;
+    let resp: LnurlInvoiceResponse = bounded_json(client.get(url).send().await?).await?;
 
     // LNURL-02: typed LNURL ERROR response
     if resp.status.as_deref() == Some("ERROR") {
@@ -346,9 +496,32 @@ async fn fetch_invoice_internal(
     }
 
     // LNURL-02: decode and validate the BOLT11 invoice
-    validate_bolt11_invoice(&bolt11, amount_msats)?;
+    validate_bolt11_invoice_for_network(&bolt11, amount_msats, expected_network)?;
 
     Ok(bolt11)
+}
+
+/// Bound untrusted LNURL metadata and callback responses before deserialization.
+async fn bounded_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+) -> anyhow::Result<T> {
+    Ok(serde_json::from_slice(&bounded_bytes(response).await?)?)
+}
+
+async fn bounded_bytes(response: reqwest::Response) -> anyhow::Result<Vec<u8>> {
+    const MAX_BYTES: usize = 50_000;
+    let mut response = response.error_for_status()?;
+    if !response.status().is_success() {
+        anyhow::bail!("LNURL endpoint did not return a successful status");
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if chunk.len() > MAX_BYTES - bytes.len() {
+            anyhow::bail!("LNURL response exceeds size limit");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 /// Decode a BOLT11 invoice and validate its amount and expiry for LNURL-02 compliance on mainnet.

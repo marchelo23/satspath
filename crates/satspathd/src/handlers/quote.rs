@@ -27,13 +27,8 @@ pub(crate) async fn quote_response(
             }
         }
     };
-    let allowed: Vec<String> = resolved
-        .verification
-        .payment_method_states
-        .iter()
-        .filter(|state| state.verified)
-        .map(|state| state.descriptor.clone())
-        .collect();
+    let allowed =
+        satspath_router::lightning::verified_method_descriptors(&resolved.signed_profile).await;
     let quote = satspath_router::quote_verified_profile_for_network(
         resolved.signed_profile,
         &body.recipient,

@@ -467,7 +467,7 @@ tagged by `status`:
 
 | `status` | Meaning |
 | :--- | :--- |
-| `ok` | Route selected; `qr` holds a validated, amount-bound on-chain BIP-21 URI for the configured network. |
+| `ok` | Route selected; `qr` holds a validated, amount-bound Bitcoin URI or BOLT11 invoice for the configured network. |
 | `no_route` | Profile resolution failed (including lookup or signature verification), no usable route was found, or the selected payload failed handoff validation. Resolution failures have a `reason` starting with `transparency verification failed:`. |
 
 `/v1/quote`, `/v1/preview`, `/v1/pay`, and `/v1/send` route only through the mandatory
@@ -483,8 +483,16 @@ After the wallet-handoff gate in [#159](https://github.com/satspath/satspath/pul
 `/v1/quote`, `/v1/preview`, `/v1/pay`, and successful `/v1/send` responses emit
 validated Bitcoin URIs whose on-chain address, Silent Payment key, or Ark address, network, and exact amount pass
 final validation. A BOLT11 invoice can be validated against its payee, network,
-amount, and expiry, but these quote paths do not generate one. Lightning
-Addresses and LNURL links remain **amount-less receive pointers**. BOLT12 and
+amount, and expiry. The verified daemon quote path now retrieves invoices for
+Lightning Addresses carrying an independently verified receiver key. Retrieval
+occurs only after profile signature, alias, expiry, transparency and ownership
+checks; callback responses are bounded and production SSRF protections remain
+enabled. Mainnet, testnet/devnet, signet and regtest currencies are checked exactly.
+Raw LNURL and BOLT12 invoice retrieval remain unsupported. Lightning
+Addresses and LNURL links themselves remain **amount-less receive pointers**.
+Invoice generation is not payment execution: pay returns `wallet_handoff` and
+send retains `preview_only`. See [issue #205 implementation plan](implementation-plan-205.md)
+for D1 limitations and pending live test-network evidence. BOLT12 and
 legacy server/key-only Ark pointers fail closed. Configure address-backed Ark
 with `ark_server`, `ark_pubkey` (compressed contract output key), `ark_address`
 (wallet-generated Bech32m), and `ark_asp_pubkey` (operator pin obtained from the

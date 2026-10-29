@@ -175,13 +175,7 @@ pub(crate) async fn send_response(state: &AppState, body: SendRequest) -> SendRe
                     reason: e.to_string(),
                 };
             }
-            let allowed: Vec<String> = resolved
-                .verification
-                .payment_method_states
-                .iter()
-                .filter(|method| method.verified)
-                .map(|method| method.descriptor.clone())
-                .collect();
+            let allowed = satspath_router::lightning::verified_method_descriptors(&signed).await;
             // quote_verified_profile uses select_route, amount-bound QR validation
             // and ONLY independently verified ownership descriptors. No proof is
             // synthesized from an identity signature or a static receive address.

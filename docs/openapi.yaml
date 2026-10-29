@@ -3106,7 +3106,13 @@ components:
       oneOf:
       - $ref: '#/components/schemas/PayableOnchainPayload'
       - $ref: '#/components/schemas/ArkPayablePayload'
-      description: Validated, amount-bound payment URI. Quote/pay/send retain independent ownership requirements.
+      - $ref: '#/components/schemas/LightningPayableInvoice'
+      description: Validated, amount-bound payment URI or BOLT11 invoice. Quote/pay/send retain independent ownership requirements. Invoice generation is not execution.
+    LightningPayableInvoice:
+      type: string
+      maxLength: 4096
+      pattern: '^(?:(?:lnbc|lntb|lnbcrt|lntbs)[0-9]+[munp]?1[023456789acdefghjklmnpqrstuvwxyz]+|(?:LNBC|LNTB|LNBCRT|LNTBS)[0-9]+[MUNP]?1[023456789ACDEFGHJKLMNPQRSTUVWXYZ]+)$'
+      description: BOLT11 from a verified Lightning Address. Runtime checks signature, authenticated receiver public key, exact configured currency, amount and expiry; the pattern checks shape only. Raw LNURL and BOLT12 retrieval are unsupported. No payment is executed.
     ArkReceivePointer:
       type: string
       maxLength: 128
@@ -4395,7 +4401,7 @@ components:
       description: Protocol quote contract. Always returned with HTTP 200; branch on `status`.
     QuoteOk:
       type: object
-      description: The router filters methods through `build_qr_payload` before selection; amount-less Lightning pointers are not payable quotes. The daemon validates the final payload again.
+      description: The router filters methods through validated payment payloads before selection; amount-less Lightning pointers are not payable quotes. Verified Lightning Addresses may retrieve receiver-bound BOLT11 invoices after a fresh domain ownership check. The daemon validates the final payload again.
       properties:
         status:
           type: string
@@ -4407,6 +4413,7 @@ components:
           oneOf:
           - $ref: '#/components/schemas/PayableOnchainMethod'
           - $ref: '#/components/schemas/ArkMethod'
+          - $ref: '#/components/schemas/LightningMethod'
         fee_sats:
           type: integer
           format: int64
