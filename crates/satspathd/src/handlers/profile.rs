@@ -283,6 +283,12 @@ pub(crate) fn attach_method_proof(
 ) -> Result<ProfileResponse> {
     use satspath_core::ownership::{ProofType, VerificationStatus};
     let mut wallet = load_wallet(&state.home)?;
+    if let Some(alias) = body.alias {
+        let alias = satspath_core::privacy::canonical_identifier(&alias);
+        if wallet.alias.as_deref() != Some(&alias) {
+            wallet = super::onboarding::claimed_profile_wallet(state, &alias)?;
+        }
+    }
     let existing = stored_profile(state, &wallet)?
         .ok_or_else(|| anyhow::anyhow!("active profile is required"))?;
     if !verify_signed_profile(&existing)?
@@ -337,7 +343,16 @@ pub(crate) fn attach_method_proof(
         false,
         Some(verification),
     )?;
-    profile_response(state)
+    let signed_profile = stored_profile(state, &wallet)?;
+    let signature_valid = signed_profile
+        .as_ref()
+        .map(verify_signed_profile)
+        .transpose()?;
+    Ok(ProfileResponse {
+        wallet,
+        signed_profile,
+        signature_valid,
+    })
 }
 
 fn store_current_profile(
@@ -470,11 +485,57 @@ fn store_current_profile_with_proof(
         recovery: signed.profile.recovery.clone(),
         owner_signature: String::new(),
     };
+    let operator = load_or_create_transparency_operator(home)?;
+    // Preserve a current local domain grant only for the same identity. Owner
+    // updates cannot extend its validity or confer authority on a replacement key.
+    let attestation = if !revoked {
+        history
+            .last()
+            .and_then(|previous| previous.identifier_attestation_hash.as_deref())
+            .map(|hash| store.identifier_attestation(hash))
+            .transpose()?
+            .flatten()
+            .filter(|old| {
+                old.identity_pubkey == signed.profile.identity_pubkey
+                    && old.identifier_hash == event.identifier_hash
+                    && history.last().is_some_and(|previous| {
+                        previous.profile_hash == old.profile_hash
+                            && old.attestation_hash().ok().as_deref()
+                                == previous.identifier_attestation_hash.as_deref()
+                    })
+                    && old.expires_at > t
+                    && old.method == satspath_core::IdentifierVerificationMethod::Domain
+                    && old.verifier_pubkey
+                        == hex::encode(
+                            secp256k1::PublicKey::from_secret_key(
+                                &secp256k1::Secp256k1::new(),
+                                &operator,
+                            )
+                            .serialize(),
+                        )
+                    && old.verify(t).unwrap_or(false)
+            })
+    } else {
+        None
+    };
+    let attestation = if let Some(mut old) = attestation {
+        old.profile_hash = event.profile_hash.clone();
+        old.nonce = satspath_core::crypto::generate_nonce();
+        old.issued_at = t;
+        old.sign(&operator)?;
+        event.identifier_attestation_hash = Some(old.attestation_hash()?);
+        Some(old)
+    } else {
+        None
+    };
     event.sign(&secret)?;
     let candidate = log.prepare_append(event.clone(), &signed)?;
-    let operator = load_or_create_transparency_operator(home)?;
     let checkpoint = candidate.prepare_checkpoint(&operator)?;
-    store.commit_profile_event_checkpoint(&alias, &signed, &event, &checkpoint)?;
+    if let Some(attestation) = attestation {
+        store.commit_attested_profile(&signed, &event, &checkpoint, &attestation)?;
+    } else {
+        store.commit_profile_event_checkpoint(&alias, &signed, &event, &checkpoint)?;
+    }
     Ok(())
 }
 

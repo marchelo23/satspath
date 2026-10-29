@@ -319,6 +319,18 @@ fn invite_response(state: &AppState, body: &SendRequest) -> SendResponse {
         secret_opt.as_ref(),
         86400,
     );
+    let mut invite = invite;
+    invite.claim_url = match crate::handlers::onboarding::claim_url(
+        state,
+        invite.invite_id.as_deref().unwrap_or_default(),
+    ) {
+        Ok(url) => url,
+        Err(error) => {
+            return SendResponse::NoRoute {
+                reason: error.to_string(),
+            }
+        }
+    };
     let mut store = match satspath_core::InviteStore::open(&state.home) {
         Ok(store) => store,
         Err(e) => {
@@ -633,6 +645,7 @@ mod tests {
 
     fn test_state(home: &Path) -> AppState {
         AppState {
+            alias_test_client: None,
             p2p: crate::p2p::Bridge::new(false),
             home: home.to_owned(),
             bind: "127.0.0.1:0".parse().unwrap(),

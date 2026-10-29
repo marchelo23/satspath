@@ -207,6 +207,67 @@ impl InviteStore {
         Ok(updated)
     }
 
+    /// Replay a receipt already committed with registration in the authoritative
+    /// SQLite store. The JSON invite file is only a recoverable notification mirror.
+    pub fn apply_authorized_claim(&mut self, receipt: &InviteRecord) -> Result<()> {
+        anyhow::ensure!(
+            receipt.status == InviteStatus::ClaimedWithPublicProfile
+                && receipt
+                    .claimed_at
+                    .is_some_and(|time| time >= receipt.created_at && time < receipt.expires_at)
+                && receipt.claimed_profile_pubkey.is_some(),
+            "invalid committed claim receipt"
+        );
+        let original = self.storage.invites.get(&receipt.invite_id);
+        if let Some(original) = original {
+            anyhow::ensure!(
+                original.identifier_hash == receipt.identifier_hash
+                    && original.amount_sats == receipt.amount_sats
+                    && original.created_at == receipt.created_at
+                    && original.expires_at == receipt.expires_at,
+                "conflicting invite mirror"
+            );
+        }
+        let notification = self
+            .storage
+            .notifications
+            .iter()
+            .find(|n| n.invite_id == receipt.invite_id);
+        if let Some(notification) = notification {
+            anyhow::ensure!(
+                Some(&notification.claimed_profile_pubkey)
+                    == receipt.claimed_profile_pubkey.as_ref()
+                    && notification.identifier_hash == receipt.identifier_hash
+                    && notification.amount_sats == receipt.amount_sats,
+                "conflicting claim notification"
+            );
+            if original.is_some_and(|record| {
+                record.status == receipt.status
+                    && record.claimed_profile_pubkey == receipt.claimed_profile_pubkey
+            }) {
+                return Ok(());
+            }
+        } else {
+            self.storage.notifications.push(ClaimNotification {
+                notification_id: format!("registration-{}", receipt.invite_id),
+                invite_id: receipt.invite_id.clone(),
+                identifier_hash: receipt.identifier_hash.clone(),
+                display_hint: receipt.display_hint.clone(),
+                amount_sats: receipt.amount_sats,
+                claimed_at: receipt.claimed_at.expect("validated receipt"),
+                claimed_profile_pubkey: receipt
+                    .claimed_profile_pubkey
+                    .clone()
+                    .expect("validated receipt"),
+                read: false,
+            });
+        }
+        self.storage
+            .invites
+            .insert(receipt.invite_id.clone(), receipt.clone());
+        self.save()
+    }
+
     /// Cancel an active, unclaimed invite.
     pub fn cancel(&mut self, invite_id: &str) -> Result<InviteRecord> {
         let record = self

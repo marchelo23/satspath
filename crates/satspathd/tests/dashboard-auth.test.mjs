@@ -9,6 +9,8 @@ const ownerMutations = [
   ['POST', '/v1/send'], ['GET', '/v1/invites'], ['GET', '/v1/invites/notifications'],
   ['POST', '/v1/claim'],
   ['POST', '/v1/profile/challenge'], ['POST', '/v1/profile/verify'],
+  ['POST', '/v1/onboarding/challenge'], ['POST', '/v1/onboarding/verify'],
+  ['POST', '/v1/profile/methods/proof'],
   ['PUT', '/v1/profile'], ['POST', '/v1/profile/methods'],
   ['POST', '/v1/profile/rotate-key'], ['POST', '/v1/broadcast'],
   ['POST', '/v1/p2p/resolve'], ['POST', '/v1/invites/notifications/id/read'],
@@ -34,6 +36,22 @@ test('one unlock authenticates all owner mutations but no public requests', asyn
     assert.equal(calls.at(-1).options.headers.has('authorization'), false);
   }
   assert.equal(requiresAuthentication('POST', '/v1/future-owner-action'), true);
+});
+
+test('expired registration and claim challenges request a fresh authorization', async () => {
+  const html = await readFile(new URL('../src/index.html', import.meta.url), 'utf8');
+  for (const name of ['pendingDomainRegistration', 'pendingDomainClaim']) {
+    const declaration = html.match(new RegExp(`const verifying = ${name}([\\s\\S]*?);`));
+    assert.ok(declaration, name);
+    const check = new Function(name, 'candidate', 'Date', `return Boolean(${name}${declaration[1]});`);
+    const clock = { now: () => 200_000 };
+    assert.equal(check(null, 'unchanged', clock), false);
+    assert.equal(check({ candidate: 'unchanged', expires_at: 199 }, 'unchanged', clock), false);
+    assert.equal(check({ candidate: 'unchanged', expires_at: 200 }, 'unchanged', clock), false);
+    assert.equal(check({ candidate: 'unchanged', expires_at: 201 }, 'unchanged', clock), true);
+    assert.equal(check({ candidate: 'changed', expires_at: 201 }, 'unchanged', clock), false);
+    assert.match(html, new RegExp(`${name} = \\{candidate, challenge_id: [^,]+, expires_at:`));
+  }
 });
 
 test('lock and 401 remove authorization; public access remains usable', async () => {

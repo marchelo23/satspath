@@ -1031,38 +1031,51 @@
   });
 
   // MY PROFILE
+  let pendingDomainRegistration = null;
   $("p-save").addEventListener("click", async () => {
     const btn = $("p-save"), msg = $("p-msg"), err = $("p-err");
     hide(msg); hide(err); btn.disabled = true;
     try {
-      let alias = $("p-alias").value.trim() || undefined;
-      
-      if (alias) {
-        const cRes = await apiFetch("/v1/profile/challenge", {
-          method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({ alias })
-        });
-        const cData = await cRes.json();
-        if (cData.error) throw new Error(cData.error);
-        
-        const token = prompt(cData.message + "\n\nEnter verification token for " + alias + ":");
-        if (!token) throw new Error("Verification cancelled.");
-        
-        const vRes = await apiFetch("/v1/profile/verify", {
-          method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({ alias, token: token.trim() })
-        });
-        const vData = await vRes.json();
-        if (vData.error) throw new Error(vData.error);
-        alias = undefined; // Already updated and verified
-      }
-
+      const alias = $("p-alias").value.trim();
       const payload = {
-        alias,
         lightning_address: $("p-ln").value.trim() || undefined,
         onchain_address: $("p-onchain").value.trim() || undefined,
         onchain_pubkey: $("p-onchain-pubkey").value.trim() || undefined,
         ark_server: $("p-ark-server").value.trim() || undefined,
         ark_pubkey: $("p-ark-pubkey").value.trim() || undefined,
       };
+      const currentResponse = await apiFetch("/v1/profile");
+      const current = await currentResponse.json();
+      if (current.error) throw new Error(current.error);
+      if (!current.wallet.alias) {
+        if (!alias) throw new Error("Enter an alias and at least one receive method.");
+        const candidate = JSON.stringify({alias, methods: payload});
+        const verifying = pendingDomainRegistration && pendingDomainRegistration.candidate === candidate
+          && pendingDomainRegistration.expires_at * 1000 > Date.now();
+        const requestBody = verifying
+          ? {alias, challenge_id: pendingDomainRegistration.challenge_id}
+          : {alias, methods: payload};
+        const response = await apiFetch(verifying ? "/v1/onboarding/verify" : "/v1/onboarding/challenge", {
+          method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify(requestBody)
+        });
+        const registration = await response.json();
+        if (registration.error) throw new Error(registration.error);
+        if (!verifying) {
+          pendingDomainRegistration = {candidate, challenge_id: registration.challenge_id, expires_at: registration.expires_at};
+          msg.innerHTML = `<h3>Authorize the alias on your domain</h3>
+            <p>Serve this exact body at the HTTPS URL, then click Save again before expiry. This proves domain administration, not mailbox access.</p>
+            <div class="payload-box">${esc(registration.url)}</div>
+            <pre class="payload-box" style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(registration.body)}</pre>`;
+        } else {
+          pendingDomainRegistration = null;
+          msg.textContent = "Domain-authorized profile published. Receive methods need independent ownership proofs before a payable route is available. No funds moved.";
+        }
+        show(msg);
+        return;
+      }
+      if (alias && alias.toLowerCase() !== current.wallet.alias.toLowerCase()) {
+        throw new Error("Use a separate daemon home for a different alias.");
+      }
       
       if (payload.lightning_address || payload.onchain_address || payload.onchain_pubkey || payload.ark_server || payload.alias) {
         const r = await apiFetch("/v1/profile", {
@@ -1070,9 +1083,9 @@
         });
         const d = await r.json();
         if (d.error) throw new Error(d.error);
-        msg.innerHTML = `<span style="color: #34d399">✓ Profile signed & saved!</span><br/><span style="font-size: 11px; color: var(--text-muted)">Valid signature verified. Your profile is active.</span>`;
+        msg.textContent = "Profile signed and saved. Check Node Control for identifier and method ownership status. No funds moved.";
       } else {
-        msg.innerHTML = `<span style="color: #34d399">✓ Alias verified & saved.</span>`;
+        msg.textContent = "No receive-method changes supplied.";
       }
       show(msg);
     } catch (e) { err.textContent = e.message; show(err); }
@@ -1202,6 +1215,7 @@
     if (e.key === "Enter") { e.preventDefault(); inspectInvite(); }
   });
 
+  let pendingDomainClaim = null;
   $("c-claim-go").addEventListener("click", async () => {
     const btn = $("c-claim-go"), resCard = $("c-result-card"), err = $("c-err");
     hide(resCard); hide(err); btn.disabled = true;
@@ -1216,15 +1230,15 @@
       if (!alias) throw new Error("Please enter your identifier / alias.");
       if (!ln && !onchain && !ark) throw new Error("Please provide at least one receive method (Lightning, Onchain, or Ark).");
 
-      const body = {
-        invite_id,
-        alias,
-        lightning_address: ln || undefined,
-        onchain_address: onchain || undefined,
-        ark_server: ark || undefined,
-      };
-
-      const r = await apiFetch("/v1/claim", {
+      if (ark) throw new Error("Use the onboarding API with both Ark server and public key; this form supports Lightning and on-chain methods.");
+      const methods = {lightning_address: ln || undefined, onchain_address: onchain || undefined};
+      const candidate = JSON.stringify({invite_id, alias, methods});
+      const verifying = pendingDomainClaim && pendingDomainClaim.candidate === candidate
+        && pendingDomainClaim.expires_at * 1000 > Date.now();
+      const body = verifying
+        ? {alias, challenge_id: pendingDomainClaim.challenge_id}
+        : {invite_id, alias, methods};
+      const r = await apiFetch(verifying ? "/v1/onboarding/verify" : "/v1/onboarding/challenge", {
         method: "POST",
         headers: {"content-type": "application/json"},
         body: JSON.stringify(body)
@@ -1232,19 +1246,31 @@
       const d = await r.json();
       if (d.error) throw new Error(d.error);
 
+      if (!verifying) {
+        pendingDomainClaim = {candidate, challenge_id: d.challenge_id, expires_at: d.expires_at};
+        resCard.innerHTML = `<h3>Authorize this alias on your domain</h3>
+          <p class="reason">Serve the exact body below at this HTTPS URL before expiry. This proves domain administrator authorization, not mailbox access. No payment is executed.</p>
+          <div class="payload-box">${esc(d.url)}</div>
+          <pre class="payload-box" style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(d.body)}</pre>
+          <p class="reason">Expires: ${esc(new Date(d.expires_at * 1000).toISOString())}. After publishing it, click the claim button again to verify.</p>`;
+        show(resCard);
+        return;
+      }
+      pendingDomainClaim = null;
+
       hide($("c-claim-box"));
       resCard.innerHTML = `
         <div style="text-align:center; padding:12px;">
           <div style="font-size:36px; margin-bottom:12px;">&#10004;</div>
           <h3 style="font-family:var(--font-mono); color:#34d399; margin-bottom:8px;">Invite Successfully Claimed!</h3>
           <p class="reason" style="margin-bottom:16px;">
-            Your payment profile for <strong>${esc(d.alias)}</strong> is now published in the transparency log.
+            Your payment profile for <strong>${esc(alias)}</strong> is now published in the transparency log.
           </p>
           <div class="payload-box" style="font-size:12px; margin-bottom:16px;">
-            Public Key: ${esc(d.profile_pubkey)}
+            Public Key: ${esc(d.signed_profile.profile.identity_pubkey)}
           </div>
           <p class="reason" style="font-size:12px;">
-            The sender has been notified and can now complete the payment handoff directly to your receive methods.
+            The sender can inspect the claim notification. Receive methods still require independent ownership proofs before a payable route is available. No funds moved.
           </p>
         </div>
       `;

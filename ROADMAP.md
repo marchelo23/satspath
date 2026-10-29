@@ -101,42 +101,50 @@ Evidence: [capability contract & ignored-test inventory](docs/README.md),
 
 ### H1 · P0 — Usable onboarding and method ownership verification
 
-- [ ] Select and implement an initial real alias-control mechanism, bound to
+- [x] Select and implement an initial real alias-control mechanism, bound to
   registration and the authorized event; do not treat an invitation as proof.
-- [ ] Replace the placeholder claim URL with a configurable, functional destination.
-- [ ] Integrate payment-method ownership proof attachment and renewal into the daemon.
-- [ ] Define proof preservation across unrelated edits and invalidation when the
+- [x] Replace the placeholder claim URL with a configurable, functional destination.
+- [x] Integrate payment-method ownership proof attachment and renewal into the daemon.
+- [x] Define proof preservation across unrelated edits and invalidation when the
   verified payment method changes.
 
-**Partial delivery (D1):** the authenticated daemon API attaches and renews
-externally signed on-chain/Ark proofs, preserves unchanged methods' evidence,
-and invalidates it on method changes or identity rotation. Domain-proof attachment,
-real alias control and no-mock claims remain pending; H1 is not complete. See the
-[ownership lifecycle capability and evidence](docs/README.md#component-and-rail-capability-matrix)
-and `cargo test -p satspathd method_proof`.
+**Implemented standalone scope:** HTTPS domain administration authorizes the exact
+registration/profile/event through expiring single-use challenges, without mock
+flags. It is not mailbox verification or DNSSEC. Claims use a separate local
+receiver identity and atomically commit security state; the operator wallet is
+not overwritten. Method-key ownership remains independently required, with
+freshness, renewal, preservation and invalidation gates unchanged. Configurable
+claim links point to the actual dashboard, not a placeholder. Controlled TLS
+fixtures do not certify a public deployment or external-wallet payment.
 
 **Acceptance:** onboarding and claims without mock flags; incorrect aliases,
 expiration, and replay rejected without mutations; verified methods resolve as such.
 
 Evidence: [claim](crates/satspathd/src/handlers/claim.rs),
 [profiles](crates/satspathd/src/handlers/profile.rs),
-[proof tooling](crates/satspath-cli/src/commands/proofs.rs).
+[proof tooling](crates/satspath-cli/src/commands/proofs.rs),
+[criterion-to-test evidence](docs/standalone_onchain_evidence.md).
 
 ### H2 · P0 — Positive end-to-end on-chain journey
 
-- [ ] Automate profile → ownership → resolution → `quote/pay/send` → BIP-21
+- [x] Automate profile → ownership → resolution → `quote/pay/send` → BIP-21
   with the exact amount and network.
-- [ ] Connect the handoff to an external wallet on regtest with explicit approval.
-- [ ] Verify persistence and continuity after daemon restart.
-- [ ] Preserve rejection of unverified methods and modified destinations/amounts/networks.
+- [x] Independently validate BIP-21/PaymentIntent output and approval policy
+  through CLI/daemon tests without a named-wallet adapter.
+- [x] Verify persistence and continuity after daemon restart.
+- [x] Preserve rejection of unverified methods and modified destinations/amounts/networks.
 
-**Acceptance:** reproducible fixture without ownership bypasses; separate evidence
-of quoting, approval, wallet-signed transaction, and regtest confirmation.
-The daemon neither signs nor executes user payments.
+**Acceptance:** reproducible standalone fixture without ownership bypasses,
+valid handoffs and restart continuity. `pay/send` distinguish handoff from actual
+payment. External approval, wallet-signed transaction and receiving-side
+confirmation move to phase 2 (#216/#171). The daemon neither signs nor executes
+user payments.
 
 Evidence: [quote](crates/satspathd/src/handlers/quote.rs),
 [handoff gates](crates/satspath-router/src/quote_response.rs),
-[current E2E](crates/satspathd/tests/e2e_daemon_flow.rs).
+[current E2E](crates/satspathd/tests/e2e_daemon_flow.rs),
+[no-mock HTTPS/CLI/approval fixture](crates/satspathd/src/handlers/onboarding/tests.rs),
+[criterion-to-test evidence](docs/standalone_onchain_evidence.md).
 
 ### H3 · P0 — Reproducible preview packaging and deployment
 

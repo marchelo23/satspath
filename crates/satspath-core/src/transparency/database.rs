@@ -10,7 +10,7 @@ use super::{
     IdentifierAttestation, NameEvent, TransparencyCheckpoint, TransparencyError, TransparencyLog,
 };
 
-const DB_FILE: &str = "satspath-transparency-v1.sqlite3";
+pub const DB_FILE: &str = "satspath-transparency-v1.sqlite3";
 
 fn db_error(error: impl std::fmt::Display) -> SatsPathError {
     SatsPathError::RegistryError(format!("transparency database: {error}"))
@@ -21,6 +21,16 @@ pub struct TransactionalTransparencyStore {
     path: PathBuf,
     log_id: String,
     read_only: bool,
+}
+
+/// Public verification evidence consumed atomically with a registration.
+pub struct AliasAuthorization<'a> {
+    pub challenge_id: &'a str,
+    pub challenge_json: &'a str,
+    pub attestation: &'a IdentifierAttestation,
+    pub claimed_invite: Option<&'a crate::profile::InviteRecord>,
+    pub local_wallet_json: Option<&'a str>,
+    pub now: i64,
 }
 
 impl TransactionalTransparencyStore {
@@ -44,7 +54,10 @@ impl TransactionalTransparencyStore {
              CREATE TABLE IF NOT EXISTS checkpoints(checkpoint_index INTEGER PRIMARY KEY, checkpoint_hash TEXT NOT NULL UNIQUE, log_size INTEGER NOT NULL, checkpoint_json TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS pins(log_id TEXT PRIMARY KEY, pin_json TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS anchors(txid TEXT PRIMARY KEY, anchor_json TEXT NOT NULL);
-             CREATE TABLE IF NOT EXISTS identifier_attestations(attestation_hash TEXT PRIMARY KEY, attestation_json TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS identifier_attestations(attestation_hash TEXT PRIMARY KEY, attestation_json TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS alias_challenges(challenge_id TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, payload_json TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS claimed_invites(invite_id TEXT PRIMARY KEY, invite_json TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS registration_wallet(id INTEGER PRIMARY KEY CHECK(id=1), wallet_json TEXT NOT NULL, profile_json TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS operator_state(log_id TEXT PRIMARY KEY, operator_pubkey TEXT, operator_sequence INTEGER NOT NULL DEFAULT 0);
              INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);"
         ).map_err(db_error)?;
@@ -155,6 +168,138 @@ impl TransactionalTransparencyStore {
         ).map_err(db_error)?;
         Ok(())
     }
+
+    /// Bounded durable pending authorizations. Expired entries are never reusable.
+    pub fn save_alias_challenge(
+        &self,
+        id: &str,
+        payload: &str,
+        expires: i64,
+        now: i64,
+    ) -> Result<()> {
+        let mut connection = self.connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        tx.execute("DELETE FROM alias_challenges WHERE expires_at<=?1", [now])
+            .map_err(db_error)?;
+        let count: i64 = tx
+            .query_row("SELECT COUNT(*) FROM alias_challenges", [], |r| r.get(0))
+            .map_err(db_error)?;
+        if count >= 128 || payload.len() > 50 * 1024 || expires <= now {
+            return Err(db_error("pending alias challenge limit or invalid expiry"));
+        }
+        tx.execute(
+            "INSERT INTO alias_challenges VALUES (?1,?2,?3)",
+            params![id, expires, payload],
+        )
+        .map_err(db_error)?;
+        tx.commit().map_err(db_error)
+    }
+
+    pub fn alias_challenge(&self, id: &str, now: i64) -> Result<Option<String>> {
+        self.connection()?
+            .query_row(
+                "SELECT payload_json FROM alias_challenges WHERE challenge_id=?1 AND expires_at>?2",
+                params![id, now],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_error)
+    }
+
+    pub fn claimed_invite(&self, id: &str) -> Result<Option<crate::profile::InviteRecord>> {
+        let raw: Option<String> = self
+            .connection()?
+            .query_row(
+                "SELECT invite_json FROM claimed_invites WHERE invite_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        raw.map(|raw| serde_json::from_str(&raw).map_err(Into::into))
+            .transpose()
+    }
+
+    pub fn claimed_invites(&self) -> Result<Vec<crate::profile::InviteRecord>> {
+        Self::read_claimed_invites(&self.connection()?)
+    }
+
+    /// Metadata-only inspection: no log replay, migrations or file creation.
+    /// This must never replace profile/history verification on a payable route.
+    pub fn claimed_invite_read_only(
+        home: &Path,
+        id: &str,
+    ) -> Result<Option<crate::profile::InviteRecord>> {
+        let Some(connection) = Self::claim_metadata_connection(home)? else {
+            return Ok(None);
+        };
+        let raw: Option<String> = connection
+            .query_row(
+                "SELECT invite_json FROM claimed_invites WHERE invite_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        raw.map(|raw| serde_json::from_str(&raw).map_err(Into::into))
+            .transpose()
+    }
+
+    /// Owner-only notification recovery need not replay unrelated profile history.
+    pub fn claimed_invites_read_only(home: &Path) -> Result<Vec<crate::profile::InviteRecord>> {
+        let Some(connection) = Self::claim_metadata_connection(home)? else {
+            return Ok(vec![]);
+        };
+        Self::read_claimed_invites(&connection)
+    }
+
+    fn claim_metadata_connection(home: &Path) -> Result<Option<Connection>> {
+        let path = home.join(DB_FILE);
+        if !path.try_exists()? {
+            return Ok(None);
+        }
+        Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map(Some)
+            .map_err(db_error)
+    }
+
+    fn read_claimed_invites(connection: &Connection) -> Result<Vec<crate::profile::InviteRecord>> {
+        let mut statement = connection
+            .prepare("SELECT invite_json FROM claimed_invites")
+            .map_err(db_error)?;
+        let rows = statement
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(db_error)?;
+        rows.map(|row| serde_json::from_str(&row.map_err(db_error)?).map_err(Into::into))
+            .collect()
+    }
+
+    /// Recoverable mirror activation, committed with self-registration security state.
+    pub fn registration_wallet(&self) -> Result<Option<(String, SignedPaymentProfile)>> {
+        let row: Option<(String, String)> = self
+            .connection()?
+            .query_row(
+                "SELECT wallet_json,profile_json FROM registration_wallet WHERE id=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(db_error)?;
+        row.map(|(wallet, profile)| Ok((wallet, serde_json::from_str(&profile)?)))
+            .transpose()
+    }
+
+    pub fn clear_registration_wallet(&self, wallet_json: &str) -> Result<()> {
+        self.connection()?
+            .execute(
+                "DELETE FROM registration_wallet WHERE id=1 AND wallet_json=?1",
+                [wallet_json],
+            )
+            .map_err(db_error)?;
+        Ok(())
+    }
     fn load_log_from_connection(&self, connection: &Connection) -> Result<TransparencyLog> {
         let mut event_statement = connection
             .prepare("SELECT event_json FROM name_events ORDER BY event_index")
@@ -222,6 +367,52 @@ impl TransactionalTransparencyStore {
         profile: &SignedPaymentProfile,
         event: &NameEvent,
         checkpoint: &TransparencyCheckpoint,
+    ) -> Result<()> {
+        self.commit_profile_event_checkpoint_inner(alias, profile, event, checkpoint, None, None)
+    }
+
+    pub fn commit_authorized_profile(
+        &self,
+        profile: &SignedPaymentProfile,
+        event: &NameEvent,
+        checkpoint: &TransparencyCheckpoint,
+        authorization: AliasAuthorization<'_>,
+    ) -> Result<()> {
+        self.commit_profile_event_checkpoint_inner(
+            &profile.profile.alias,
+            profile,
+            event,
+            checkpoint,
+            Some(authorization),
+            None,
+        )
+    }
+
+    pub fn commit_attested_profile(
+        &self,
+        profile: &SignedPaymentProfile,
+        event: &NameEvent,
+        checkpoint: &TransparencyCheckpoint,
+        attestation: &IdentifierAttestation,
+    ) -> Result<()> {
+        self.commit_profile_event_checkpoint_inner(
+            &profile.profile.alias,
+            profile,
+            event,
+            checkpoint,
+            None,
+            Some(attestation),
+        )
+    }
+
+    fn commit_profile_event_checkpoint_inner(
+        &self,
+        alias: &str,
+        profile: &SignedPaymentProfile,
+        event: &NameEvent,
+        checkpoint: &TransparencyCheckpoint,
+        authorization: Option<AliasAuthorization<'_>>,
+        renewed_attestation: Option<&IdentifierAttestation>,
     ) -> Result<()> {
         Registry::validate_profile_write(alias, profile)?;
         let current = self.load_log()?;
@@ -299,6 +490,132 @@ impl TransactionalTransparencyStore {
             return Err(
                 TransparencyError::CorruptStore("checkpoint changed concurrently".into()).into(),
             );
+        }
+        if let Some(attestation) = renewed_attestation {
+            let trusted = super::TrustedVerifier {
+                verifier_id: "local-https-domain".into(),
+                public_key: checkpoint.operator_pubkey.clone(),
+                allowed_methods: vec![super::IdentifierVerificationMethod::Domain],
+            };
+            if !super::verify_attestation_binding(
+                attestation,
+                event,
+                &[trusted],
+                checkpoint.created_at,
+            )? {
+                return Err(db_error(
+                    "renewed alias attestation does not bind the event",
+                ));
+            }
+            transaction
+                .execute(
+                    "INSERT INTO identifier_attestations VALUES (?1,?2)",
+                    params![
+                        attestation.attestation_hash()?,
+                        serde_json::to_string(attestation)?
+                    ],
+                )
+                .map_err(db_error)?;
+        }
+        if let Some(auth) = authorization {
+            // Independently bind the consumed durable challenge to the exact
+            // profile and planned event. A verifier receipt cannot authorize a
+            // different action, predecessor, sequence, identity or invitation.
+            let pending: serde_json::Value = serde_json::from_str(auth.challenge_json)?;
+            let mut planned_event = serde_json::to_value(event)?;
+            planned_event["identifier_attestation_hash"] = serde_json::Value::Null;
+            planned_event["owner_signature"] = serde_json::Value::String(String::new());
+            if pending["challenge_id"].as_str() != Some(auth.challenge_id)
+                || pending["signed_profile"] != serde_json::to_value(profile)?
+                || pending["event"] != planned_event
+                || pending["expires_at"]
+                    .as_i64()
+                    .is_none_or(|end| end <= auth.now)
+                || auth.attestation.nonce != auth.challenge_id
+            {
+                return Err(db_error("registration differs from authorized challenge"));
+            }
+            if let Some(receipt) = auth.claimed_invite {
+                let mut invited: crate::profile::InviteRecord =
+                    serde_json::from_value(pending["invite"].clone())?;
+                if !matches!(
+                    invited.status,
+                    crate::profile::InviteStatus::Created | crate::profile::InviteStatus::EmailSent
+                ) {
+                    return Err(db_error("challenge invitation was not active"));
+                }
+                invited.status = receipt.status.clone();
+                invited.claimed_at = receipt.claimed_at;
+                invited.claimed_profile_pubkey = receipt.claimed_profile_pubkey.clone();
+                if serde_json::to_value(invited)? != serde_json::to_value(receipt)?
+                    || auth.local_wallet_json.is_some()
+                {
+                    return Err(db_error("claim changed invitation or operator wallet"));
+                }
+            } else if !pending["invite"].is_null()
+                || auth
+                    .local_wallet_json
+                    .map(serde_json::from_str::<serde_json::Value>)
+                    .transpose()?
+                    .as_ref()
+                    != Some(&pending["wallet"])
+            {
+                return Err(db_error("self-registration wallet or invite mismatch"));
+            }
+            let trusted = super::TrustedVerifier {
+                verifier_id: "local-https-domain".into(),
+                public_key: checkpoint.operator_pubkey.clone(),
+                allowed_methods: vec![super::IdentifierVerificationMethod::Domain],
+            };
+            if !super::verify_attestation_binding(auth.attestation, event, &[trusted], auth.now)? {
+                return Err(db_error(
+                    "alias attestation is not bound to the authorized event",
+                ));
+            }
+            let consumed = transaction.execute(
+                "DELETE FROM alias_challenges WHERE challenge_id=?1 AND payload_json=?2 AND expires_at>?3",
+                params![auth.challenge_id, auth.challenge_json, auth.now],
+            ).map_err(db_error)?;
+            if consumed != 1 {
+                return Err(db_error(
+                    "alias challenge expired, changed or already consumed",
+                ));
+            }
+            transaction
+                .execute(
+                    "INSERT INTO identifier_attestations VALUES (?1,?2)",
+                    params![
+                        auth.attestation.attestation_hash()?,
+                        serde_json::to_string(auth.attestation)?
+                    ],
+                )
+                .map_err(db_error)?;
+            if let Some(invite) = auth.claimed_invite {
+                if invite.identifier_hash != event.identifier_hash
+                    || invite.claimed_profile_pubkey.as_deref() != Some(&event.identity_pubkey)
+                    || invite.status != crate::profile::InviteStatus::ClaimedWithPublicProfile
+                    || invite
+                        .claimed_at
+                        .is_none_or(|time| time < invite.created_at || time > auth.now)
+                    || invite.expires_at <= auth.now
+                {
+                    return Err(db_error("claim receipt does not bind the registration"));
+                }
+                transaction
+                    .execute(
+                        "INSERT INTO claimed_invites VALUES (?1,?2)",
+                        params![invite.invite_id, serde_json::to_string(invite)?],
+                    )
+                    .map_err(db_error)?;
+            }
+            if let Some(wallet) = auth.local_wallet_json {
+                transaction
+                    .execute(
+                        "INSERT INTO registration_wallet VALUES (1,?1,?2)",
+                        params![wallet, profile_json],
+                    )
+                    .map_err(db_error)?;
+            }
         }
         transaction.execute("INSERT INTO name_events(event_index,signed_event_hash,identifier_hash,event_json) VALUES (?1,?2,?3,?4)", params![event_index, event_hash, event.identifier_hash, event_json]).map_err(db_error)?;
         transaction.execute("INSERT INTO profiles(identifier_hash,alias,profile_json) VALUES (?1,?2,?3) ON CONFLICT(identifier_hash) DO UPDATE SET alias=excluded.alias,profile_json=excluded.profile_json", params![key, canonical_identifier(alias), profile_json]).map_err(db_error)?;

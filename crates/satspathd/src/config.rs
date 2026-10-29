@@ -99,6 +99,9 @@ pub(crate) struct WalletState {
 
 #[derive(Clone)]
 pub(crate) struct AppState {
+    /// Test-only TLS trust/connection fixture; no runtime flag can enable this.
+    #[cfg(test)]
+    pub(crate) alias_test_client: Option<reqwest::Client>,
     pub(crate) p2p: Arc<crate::p2p::Bridge>,
     pub(crate) home: PathBuf,
     pub(crate) bind: SocketAddr,

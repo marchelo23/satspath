@@ -37,8 +37,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-daemon-e2e-
             ${{ runner.os }}-cargo-
-      - name: Run daemon black-box e2e test suite
-        run: cargo test -p satspathd --test e2e_daemon_flow
+      - name: Build independent CLI handoff consumer
+        run: cargo build --locked -p satspath-cli
+      - name: Run daemon HTTP and standalone onboarding suites
+        env:
+          SATSPATH_FEE_SOURCES: ""
+        run: cargo test -p satspathd
 
   daemon-regtest-anchor:
     name: Daemon Catena anchor on Bitcoin Core regtest

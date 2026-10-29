@@ -166,6 +166,26 @@ test('invite guide requires owner authentication for claims and private lists', 
   assert.match(guide, /GET \/v1\/claim\?invite_id=<UUID>`\n- \*\*Auth:\*\* None \(Public\)/);
 });
 
+test('real onboarding documents domain authority separately from ownership and payment approval', () => {
+  const operations = parseOpenApiOperations(openapiText);
+  for (const endpoint of ['/v1/onboarding/challenge', '/v1/onboarding/verify']) {
+    assert.ok(operations.some(op => op.path === endpoint && op.method === 'POST' && op.requiresBearer), endpoint);
+    assert.ok(apiRefText.includes(endpoint), endpoint);
+  }
+  const methods = openapiText.match(/    DomainRegistrationRequest:\n([\s\S]*?)(?=    DomainRegistrationVerify:)/)[1];
+  assert.match(methods, /schemas\/ProfileUpdateRequest/);
+  assert.match(methods, /not:\s*\n\s+required: \[alias\]/);
+  assert.match(methods, /minProperties: 1/);
+  assert.match(apiRefText, /not mailbox verification or DNSSEC/);
+  assert.match(apiRefText, /Method ownership still/);
+  const html = fs.readFileSync(path.join(repoRoot, 'crates/satspathd/src/index.html'), 'utf8');
+  assert.ok(html.includes('/v1/onboarding/challenge'));
+  assert.ok(html.includes('/v1/onboarding/verify'));
+  assert.ok(!html.includes('apiFetch("/v1/profile/verify"'), 'dashboard must not use the mock verifier');
+  assert.match(html, /esc\(registration\.body\)/);
+  assert.match(html, /esc\(d\.body\)/);
+});
+
 /**
  * Extracts endpoint summary rows from `docs/API_REFERENCE.md`.
  *
@@ -293,7 +313,9 @@ function parseArchitectureTreePaths(architectureMarkdown) {
 
 test('OpenAPI 3.0.3 operations have operationId, responses, and match router auth rules', () => {
   const operations = parseOpenApiOperations(openapiText);
-  assert.equal(operations.length, 56, 'Expected all 56 HTTP operations in docs/openapi.yaml');
+  assert.equal(operations.length, 58, 'Expected all 58 HTTP operations in docs/openapi.yaml');
+  assert.equal(new Set(operations.map(op => op.path)).size, 53, 'Expected all 53 OpenAPI paths');
+  assert.match(apiRefText, /58 operations\s+across 53 paths/);
 
   for (const op of operations) {
     assert.ok(op.hasOperationId, `${op.method} ${op.path} must define an operationId`);

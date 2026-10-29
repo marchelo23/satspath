@@ -1,6 +1,7 @@
 //! handlers module: re-exports all submodules.
 
 pub(crate) mod claim;
+pub(crate) mod onboarding;
 pub(crate) mod profile;
 pub(crate) mod quote;
 pub(crate) mod resolve;

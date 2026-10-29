@@ -294,6 +294,8 @@ async fn mutating_routes_require_bearer_token() {
         (Method::POST, "/v1/profile/verify"),
         (Method::POST, "/v1/profile/methods"),
         (Method::POST, "/v1/profile/methods/proof"),
+        (Method::POST, "/v1/onboarding/challenge"),
+        (Method::POST, "/v1/onboarding/verify"),
         (Method::POST, "/v1/profile/rotate-key"),
         (Method::POST, "/v1/claim"),
         (Method::POST, "/v1/transparency/anchors"),

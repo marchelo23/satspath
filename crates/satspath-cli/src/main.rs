@@ -94,6 +94,21 @@ enum Command {
     /// Decode a SatsPath payment URI
     Decode { uri: String },
 
+    /// Independently check an on-chain quote against payer-supplied bounds. Never approves or pays.
+    CheckHandoff {
+        /// JSON QuoteResponse emitted by a daemon or CLI.
+        quote_file: std::path::PathBuf,
+        #[arg(long)]
+        recipient: String,
+        /// Expected address obtained from independently verified resolution.
+        #[arg(long)]
+        destination: String,
+        #[arg(long)]
+        amount_sats: u64,
+        #[arg(long)]
+        network: String,
+    },
+
     /// Show routing decision with live mempool fees + scannable QR
     Quote {
         alias: String,
@@ -483,6 +498,19 @@ async fn main() -> Result<()> {
             memo,
         } => commands::cmd_encode(&alias, amount_sats, memo.as_deref())?,
         Command::Decode { uri } => commands::cmd_decode(&uri)?,
+        Command::CheckHandoff {
+            quote_file,
+            recipient,
+            destination,
+            amount_sats,
+            network,
+        } => commands::cmd_check_handoff(
+            &quote_file,
+            &recipient,
+            &destination,
+            amount_sats,
+            &network,
+        )?,
         Command::Quote {
             alias,
             amount_sats,

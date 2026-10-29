@@ -759,6 +759,9 @@ paths:
               required:
               - verification
               properties:
+                alias:
+                  type: string
+                  description: Optional locally claimed receiver alias. The operator wallet is not modified.
                 verification:
                   $ref: '#/components/schemas/MethodVerification'
       responses:
@@ -776,12 +779,88 @@ paths:
           $ref: '#/components/responses/PayloadTooLarge'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+  /v1/onboarding/challenge:
+    post:
+      tags:
+      - Profile
+      summary: Prepare a single-use HTTPS domain authorization
+      operationId: createDomainRegistration
+      description: |
+        Prepares a signed registration and its exact NameEvent before authorization.
+        Serve the returned body byte-for-byte at the returned HTTPS URL on the alias domain.
+        This proves domain administrator authorization, not mailbox access. Alias syntax
+        follows the ASCII BIP-353 parser. Pending challenges expire after 600 seconds.
+        Include invite_id to prepare an independent local receiver identity without
+        overwriting the operator wallet. An invite ID alone never proves alias control.
+        Existing registrations/history cannot be replaced by this endpoint.
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DomainRegistrationRequest'
+      responses:
+        '200':
+          description: Public domain authorization instructions; not yet published.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DomainRegistrationChallenge'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /v1/onboarding/verify:
+    post:
+      tags:
+      - Profile
+      summary: Verify HTTPS authorization and publish the registration or claim
+      operationId: verifyDomainRegistration
+      description: |
+        Fetches only the stored alias-domain URL, with valid TLS, validated/pinned
+        public DNS addresses, no proxies or redirects, a 10-second timeout and a
+        16-KiB body bound. Requires exact authorization bytes. No request-supplied
+        DNS answers, challenge bodies, signatures or spending keys are accepted.
+        Rechecks expiry, wallet/invite state and registration continuity after the
+        fetch. Consumes the challenge and commits the profile, owner-signed event,
+        operator attestation, checkpoint and optional claim receipt in one transaction.
+        wallet.json and invite notifications are recoverable mirrors. Method ownership
+        remains independently required before a payable route is available.
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DomainRegistrationVerify'
+      responses:
+        '200':
+          description: Published domain-authorized profile; no payment executed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DomainRegistrationResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
   /v1/profile/challenge:
     post:
       tags:
       - Profile
       summary: Start alias verification (DEV MOCK)
-      description: 'Fails closed (`HTTP 400`) by default because no production alias verifier is configured.
+      description: 'Legacy mock route, not the real `/v1/onboarding/challenge` workflow. Fails closed (`HTTP 400`) by default.
         Requires `--dev-mock-alias-verification` (or `SATSPATH_DEV_MOCK_ALIAS_VERIFICATION=1`) on devnet/regtest only; the development-only token equals the email address itself. Never use it on public Bitcoin networks.'
       operationId: createProfileChallenge
       requestBody:
@@ -1268,7 +1347,7 @@ paths:
       tags:
       - Resolution & Routing
       summary: Preview send with local transparency and ownership checks
-      description: '**Requires Bearer.** Resolves a local SQLite profile and verifies its signature, transparency inclusion, key continuity and payment-method ownership before routing. A profile found only in the legacy registry or external resolver is not payable here. Returns a validated, amount-bound on-chain or address-backed Ark payload and QR (`mode: preview_only`) or `no_route` for an unsafe/unverified rail. Only a locally unknown alias creates a persisted experimental invite; claiming it is disabled by default. The daemon never executes a payment.'
+      description: '**Requires Bearer.** Resolves a local SQLite profile and verifies its signature, transparency inclusion, key continuity and payment-method ownership before routing. A profile found only in the legacy registry or external resolver is not payable here. Returns a validated, amount-bound on-chain or address-backed Ark payload and QR (`mode: preview_only`) or `no_route` for an unsafe/unverified rail. Only a locally unknown alias creates a persisted experimental invite; real claims use the HTTPS domain onboarding workflow. The daemon never executes a payment.'
       operationId: send
       requestBody:
         required: true
@@ -2508,7 +2587,7 @@ paths:
       tags:
       - Invites
       summary: Claim an invite (explicit insecure devnet/regtest mock only)
-      description: '**Admin authentication required.** Disabled by default and on mainnet/testnet/signet (HTTP 400 without mutating wallet, invite or log): there is no production email/domain alias-control verifier. Only explicit `--dev-mock-alias-verification` on devnet/regtest allows an insecure local daemon-identity claim with receive methods; it does not establish alias ownership or authorize a trusted payment. An externally supplied `signed_profile` is rejected even in mock mode. In enabled mock mode, 404 unknown invite, 409 already claimed, 400 other validation errors.'
+      description: '**Admin authentication required.** Legacy mock route, not the real HTTPS onboarding workflow. Disabled by default and on mainnet/testnet/signet (HTTP 400 without mutating wallet, invite or log). Only explicit `--dev-mock-alias-verification` on devnet/regtest allows an insecure local daemon-identity claim with receive methods; it does not establish alias ownership or authorize a trusted payment. Use `/v1/onboarding/challenge` and `/v1/onboarding/verify` for domain-authorized claims. An externally supplied `signed_profile` is rejected even in mock mode. In enabled mock mode, 404 unknown invite, 409 already claimed, 400 other validation errors.'
       operationId: claimInvite
       requestBody:
         required: true
@@ -4271,6 +4350,73 @@ components:
       - verification
       description: Result of the mandatory transparency composition (signature, history, continuity, inclusion,
         consistency, operator continuity, method ownership). Failure is terminal.
+    DomainRegistrationRequest:
+      type: object
+      additionalProperties: false
+      required: [alias, methods]
+      properties:
+        alias:
+          type: string
+        methods:
+          allOf:
+          - $ref: '#/components/schemas/ProfileUpdateRequest'
+          - not:
+              required: [alias]
+            minProperties: 1
+          description: Public receive methods on the daemon network; nested alias is forbidden. At least one method is required.
+        invite_id:
+          type: string
+          nullable: true
+    DomainRegistrationVerify:
+      type: object
+      additionalProperties: false
+      required: [alias, challenge_id]
+      properties:
+        alias:
+          type: string
+        challenge_id:
+          type: string
+    DomainRegistrationChallenge:
+      type: object
+      required: [challenge_id, expires_at, verification_method, url, body, instruction]
+      properties:
+        challenge_id:
+          type: string
+        expires_at:
+          type: integer
+          format: int64
+        verification_method:
+          type: string
+          enum: [https_domain]
+        url:
+          type: string
+          format: uri
+        body:
+          type: string
+          description: Exact public authorization bytes, including the signed candidate profile, event, nonce, network and optional invite ID. Do not append a newline.
+        instruction:
+          type: string
+    DomainRegistrationResult:
+      type: object
+      required: [status, verification_method, signed_profile, identifier_attestation, claimed_invite, moves_funds]
+      properties:
+        status:
+          type: string
+          enum: [registered]
+        verification_method:
+          type: string
+          enum: [https_domain]
+        signed_profile:
+          $ref: '#/components/schemas/SignedPaymentProfile'
+        identifier_attestation:
+          $ref: '#/components/schemas/IdentifierAttestation'
+        claimed_invite:
+          nullable: true
+          allOf:
+          - $ref: '#/components/schemas/InviteRecord'
+        moves_funds:
+          type: boolean
+          enum: [false]
     AliasRequest:
       type: object
       properties:
@@ -5445,6 +5591,7 @@ components:
           type: boolean
         is_claimable:
           type: boolean
+          description: An active invitation may start HTTPS domain onboarding; this does not authorize the legacy mock claim route or imply alias verification.
         created_at:
           type: integer
           format: int64

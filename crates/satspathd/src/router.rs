@@ -65,6 +65,8 @@ pub(crate) fn route_template(path: &str) -> &'static str {
         "/v1/profile/recover" => "/v1/profile/recover",
         "/v1/profile/methods" => "/v1/profile/methods",
         "/v1/profile/methods/proof" => "/v1/profile/methods/proof",
+        "/v1/onboarding/challenge" => "/v1/onboarding/challenge",
+        "/v1/onboarding/verify" => "/v1/onboarding/verify",
         "/v1/resolve" => "/v1/resolve",
         "/v1/preview" => "/v1/preview",
         "/v1/quote" => "/v1/quote",
@@ -566,6 +568,23 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
                 Err(e) => read_error_with_status(StatusCode(400), e),
             }
         }
+        (Method::Post, "/v1/onboarding/challenge") => {
+            let _guard = state.mutation_lock.lock().await;
+            match read_json::<crate::handlers::onboarding::RegistrationRequest>(&mut request, state)
+                .and_then(|body| crate::handlers::onboarding::create_registration(state, body)) {
+                Ok(response) => json_response(StatusCode(200), &response),
+                Err(error) => read_error_with_status(StatusCode(400), error),
+            }
+        }
+        (Method::Post, "/v1/onboarding/verify") => {
+            match read_json::<crate::handlers::onboarding::RegistrationVerifyRequest>(&mut request, state) {
+                Ok(body) => match crate::handlers::onboarding::verify_registration(state, body).await {
+                    Ok(response) => json_response(StatusCode(200), &response),
+                    Err(error) => json_error(StatusCode(400), error),
+                },
+                Err(error) => handle_read_error(error),
+            }
+        }
         (Method::Post, "/v1/profile/challenge") => {
             match read_json::<AliasRequest>(&mut request, state)
                 .and_then(|body| create_challenge(state, body))
@@ -712,14 +731,20 @@ pub(crate) async fn handle_request(mut request: Request, state: &AppState) -> Re
                 Err(e) => handle_read_error(e),
             }
         }
-        (Method::Get, "/v1/invites") => json_result(StatusCode(200), list_invites_handler(state)),
+        (Method::Get, "/v1/invites") => {
+            let _guard = state.mutation_lock.lock().await;
+            json_result(StatusCode(200), list_invites_handler(state))
+        }
         (Method::Get, "/v1/invites/notifications") => {
+            let _guard = state.mutation_lock.lock().await;
             json_result(StatusCode(200), list_notifications_handler(state))
         }
         (Method::Post, "/v1/invites/notifications/read-all") => {
+            let _guard = state.mutation_lock.lock().await;
             json_result(StatusCode(200), mark_all_notifications_read_handler(state))
         }
         (Method::Post, p) if p.starts_with("/v1/invites/notifications/") => {
+            let _guard = state.mutation_lock.lock().await;
             let id = p
                 .trim_start_matches("/v1/invites/notifications/")
                 .trim_end_matches("/read");

@@ -15,15 +15,16 @@ pub(crate) fn inspect_invite_handler(
     state: &AppState,
     invite_id: &str,
 ) -> Result<InspectInviteResponse> {
-    let store = InviteStore::open(&state.home)?;
-    let invite = store
-        .get(invite_id)
-        .ok_or_else(|| anyhow::anyhow!("invite '{}' not found", invite_id))?;
+    let invite = match committed_claim(state, invite_id)? {
+        Some(receipt) => receipt,
+        None => InviteStore::open(&state.home)?
+            .get(invite_id)
+            .ok_or_else(|| anyhow::anyhow!("invite '{}' not found", invite_id))?,
+    };
 
     let now = chrono::Utc::now().timestamp();
     let is_expired = now >= invite.expires_at || invite.status == InviteStatus::Expired;
-    let is_claimable = ensure_invite_claim_enabled(state).is_ok()
-        && !is_expired
+    let is_claimable = !is_expired
         && invite.status != InviteStatus::ClaimedWithPublicProfile
         && invite.status != InviteStatus::Cancelled;
 
@@ -78,6 +79,9 @@ fn ensure_invite_claim_enabled(state: &AppState) -> Result<()> {
 /// Claim an invite only in explicit development mock mode after the router's auth gate.
 pub(crate) fn claim_invite_handler(state: &AppState, body: ClaimRequest) -> Result<ClaimResponse> {
     ensure_invite_claim_enabled(state)?;
+    if committed_claim(state, &body.invite_id)?.is_some() {
+        anyhow::bail!("invite has already been claimed");
+    }
     // A signature over the profile proves possession of its identity key, not
     // control of the alias; it cannot authorize a transparency NameEvent either.
     // The wire request has no independently signed event or alias attestation.
@@ -188,11 +192,13 @@ pub(crate) fn claim_invite_handler(state: &AppState, body: ClaimRequest) -> Resu
 }
 
 pub(crate) fn list_invites_handler(state: &AppState) -> Result<Vec<InviteRecord>> {
+    sync_committed_claims(state)?;
     let mut store = InviteStore::open(&state.home)?;
     store.list()
 }
 
 pub(crate) fn list_notifications_handler(state: &AppState) -> Result<Vec<ClaimNotification>> {
+    sync_committed_claims(state)?;
     let store = InviteStore::open(&state.home)?;
     Ok(store.notifications().to_vec())
 }
@@ -201,6 +207,7 @@ pub(crate) fn mark_notification_read_handler(
     state: &AppState,
     notification_id: &str,
 ) -> Result<serde_json::Value> {
+    sync_committed_claims(state)?;
     let mut store = InviteStore::open(&state.home)?;
     store.mark_notification_read(notification_id)?;
     Ok(serde_json::json!({
@@ -211,10 +218,27 @@ pub(crate) fn mark_notification_read_handler(
 }
 
 pub(crate) fn mark_all_notifications_read_handler(state: &AppState) -> Result<serde_json::Value> {
+    sync_committed_claims(state)?;
     let mut store = InviteStore::open(&state.home)?;
     store.mark_all_notifications_read()?;
     Ok(serde_json::json!({
         "status": "ok",
         "all_read": true
     }))
+}
+
+fn committed_claim(state: &AppState, id: &str) -> Result<Option<InviteRecord>> {
+    Ok(satspath_core::TransactionalTransparencyStore::claimed_invite_read_only(&state.home, id)?)
+}
+
+fn sync_committed_claims(state: &AppState) -> Result<()> {
+    let receipts =
+        satspath_core::TransactionalTransparencyStore::claimed_invites_read_only(&state.home)?;
+    if !receipts.is_empty() {
+        let mut mirror = InviteStore::open(&state.home)?;
+        for receipt in receipts {
+            mirror.apply_authorized_claim(&receipt)?;
+        }
+    }
+    Ok(())
 }

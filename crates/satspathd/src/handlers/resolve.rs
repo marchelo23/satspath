@@ -91,13 +91,9 @@ fn verify_stored_profile(
         .map(|hash| store.identifier_attestation(hash))
         .transpose()?
         .flatten();
-    let trusted_verifiers: Vec<satspath_core::TrustedVerifier> =
-        std::env::var("SATSPATH_TRUSTED_VERIFIERS_JSON")
-            .ok()
-            .map(|json| serde_json::from_str(&json))
-            .transpose()
-            .map_err(|e| anyhow::anyhow!("invalid SATSPATH_TRUSTED_VERIFIERS_JSON: {e}"))?
-            .unwrap_or_default();
+    let configured = std::env::var("SATSPATH_TRUSTED_VERIFIERS_JSON").ok();
+    let trusted_verifiers =
+        identifier_verifier_policy(configured.as_deref(), &checkpoint.operator_pubkey)?;
     let identifier_verified = identifier_attestation
         .as_ref()
         .map(|attestation| {
@@ -130,6 +126,23 @@ fn verify_stored_profile(
             payment_method_states,
         },
     })
+}
+
+fn identifier_verifier_policy(
+    configured: Option<&str>,
+    operator: &str,
+) -> Result<Vec<satspath_core::TrustedVerifier>> {
+    if let Some(json) = configured {
+        // Even an explicitly empty policy must not be silently broadened.
+        return serde_json::from_str(json)
+            .map_err(|error| anyhow::anyhow!("invalid SATSPATH_TRUSTED_VERIFIERS_JSON: {error}"));
+    }
+    // Default only for the owner's authoritative local store, never a remote quote.
+    Ok(vec![satspath_core::TrustedVerifier {
+        verifier_id: "local-https-domain".into(),
+        public_key: operator.into(),
+        allowed_methods: vec![satspath_core::IdentifierVerificationMethod::Domain],
+    }])
 }
 
 /// Builds a v2 [`satspath_core::transparency::ResolutionEnvelope`] for `alias` with inclusion and state proofs.
@@ -227,5 +240,26 @@ pub(crate) async fn dns_resolve_response(body: DnsResolveRequest) -> DnsResolveR
             error: e.to_string(),
             strict_mode: policy == DnssecPolicy::Strict,
         },
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    #[test]
+    fn explicit_verifier_policy_is_never_broadened_by_local_defaults() {
+        let identity = satspath_core::crypto::generate_identity_keypair();
+        let operator = hex::encode(identity.public_key.serialize());
+        assert!(identifier_verifier_policy(Some("[]"), &operator)
+            .unwrap()
+            .is_empty());
+        assert!(identifier_verifier_policy(Some("invalid"), &operator).is_err());
+        let defaults = identifier_verifier_policy(None, &operator).unwrap();
+        assert_eq!(defaults.len(), 1);
+        assert_eq!(defaults[0].public_key, operator);
+        assert_eq!(
+            defaults[0].allowed_methods,
+            vec![satspath_core::IdentifierVerificationMethod::Domain]
+        );
     }
 }

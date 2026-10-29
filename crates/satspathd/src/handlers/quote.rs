@@ -42,7 +42,16 @@ pub(crate) async fn quote_response(
         &state.network,
     )
     .await;
-    checked_quote(quote, &state.network, body.amount_sats)
+    let mut quote = checked_quote(quote, &state.network, body.amount_sats);
+    if let QuoteResponse::Ok { recipient, .. } = &mut quote {
+        recipient.identifier_verified = resolved.verification.identifier_verified;
+        recipient.identifier_verification = if recipient.identifier_verified {
+            "local transparency-bound identifier attestation verified".into()
+        } else {
+            "no trusted identifier attestation".into()
+        };
+    }
+    quote
 }
 
 fn checked_quote(quote: QuoteResponse, network: &str, amount_sats: u64) -> QuoteResponse {

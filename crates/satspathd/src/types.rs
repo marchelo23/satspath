@@ -232,6 +232,8 @@ pub(crate) struct AliasRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MethodProofRequest {
+    /// Optional local claimed profile; never changes the operator wallet.
+    pub(crate) alias: Option<String>,
     pub(crate) verification: satspath_core::ownership::MethodVerification,
 }
 

@@ -1,4 +1,5 @@
 mod ark;
+mod check_handoff;
 mod claim;
 mod demo;
 mod dns;
@@ -19,6 +20,7 @@ mod wallet;
 mod web;
 
 pub use ark::{cmd_ark_receive, cmd_ark_send, cmd_ark_swap, ArkSwapSide};
+pub use check_handoff::cmd_check_handoff;
 pub use claim::cmd_claim;
 pub use demo::cmd_demo;
 pub use dns::cmd_dns_resolve;

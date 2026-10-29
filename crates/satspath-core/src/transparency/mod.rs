@@ -44,7 +44,9 @@ pub use checkpoint::{
     TransparencyLogIdentity,
 };
 #[cfg(feature = "std")]
-pub use database::TransactionalTransparencyStore;
+pub use database::{
+    AliasAuthorization, TransactionalTransparencyStore, DB_FILE as TRANSPARENCY_DB_FILE,
+};
 pub use event::{payment_method_descriptor_hash, profile_hash, NameAction, NameEvent};
 pub use gossip::{
     compare_gossip_observations, gossip_topic, GossipComparison, GossipObservation,

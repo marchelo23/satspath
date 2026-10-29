@@ -144,6 +144,10 @@ not legacy Bitcoin `signmessage` or BIP-322. Initially only
 accepted; domain proofs, self-attestations and Silent Payments are not supported
 by this endpoint.
 
+An optional `alias` selects a receiver profile created by a locally authorized
+invite claim. Its independent identity and exact receive methods are loaded from
+the committed claim; attaching its proof never changes the operator's wallet.
+
 `verified_at` must be within the last 600 seconds, not in the future. Explicit
 `expires_at` must be after now and no more than 30 days after issuance. A renewal
 must have a later issuance than the currently stored proof; repeated/stale
@@ -156,8 +160,8 @@ Success returns `ProfileResponse` with a new signed sequence and atomic
 profile/event/checkpoint commit. Unrelated edits preserve proofs byte-for-byte;
 changed/removed methods and identity rotation invalidate them. Expired evidence
 is not silently renewed by an edit: resolvers re-check validity. This endpoint
-does not enable production alias onboarding or claims; those remain outside this
-partial delivery for #201.
+does not itself prove alias control; real registration and claims use the
+separate HTTPS onboarding workflow below.
 
 ## 4. Request pipeline and global errors
 
@@ -242,8 +246,8 @@ the normal JSON limit is 65,536 bytes.
 
 ## 5. Endpoint index
 
-Access is **Public** (no token) or **Bearer** (token required). 56 operations
-across 50 paths.
+Access is **Public** (no token) or **Bearer** (token required). 58 operations
+across 53 paths.
 
 ### UI
 
@@ -281,6 +285,8 @@ across 50 paths.
 | `POST` | `/v1/profile` | Bearer | Same as `PUT` (CORS-friendly) |
 | `POST` | `/v1/profile/methods` | Bearer | Update receive methods |
 | `POST` | `/v1/profile/methods/proof` | Bearer | Attach or renew a public ownership proof |
+| `POST` | `/v1/onboarding/challenge` | Bearer | Prepare an exact, expiring HTTPS domain authorization for registration or claim |
+| `POST` | `/v1/onboarding/verify` | Bearer | Verify domain authorization and atomically publish the profile/event/receipt |
 | `POST` | `/v1/profile/challenge` | Bearer | Start alias verification (DEV MOCK) |
 | `POST` | `/v1/profile/verify` | Bearer | Complete alias verification (DEV MOCK) |
 | `POST` | `/v1/profile/rotate-key` | Bearer | Rotate identity key |
@@ -344,21 +350,13 @@ List endpoints accept `offset` (default 0) and `limit` (default 50, clamped to
 | `POST` | `/v1/invites/notifications/read-all` | Bearer | Mark all read |
 | `POST` | `/v1/invites/notifications/{id}/read` | Bearer | Mark one read |
 
-`GET /v1/claim` remains public for inspection, but reports `is_claimable: false`
-when the daemon's claim gate is disabled. Authenticated `/v1/send` returns the claim URL
-and authenticated `/v1/invites` lists IDs: possession of an ID, a matching alias hash,
-or a signed profile does **not** prove control of an email address/domain. No
-production claim verifier or alias attestation exists. `POST /v1/claim` requires
-admin authentication; even authenticated requests fail
-closed (HTTP 400, without changing invite, wallet or transparency state) by
-default and on mainnet/testnet/signet even if the mock flag is set. Only
-`--dev-mock-alias-verification` (or `SATSPATH_DEV_MOCK_ALIAS_VERIFICATION=1`)
-on **devnet/regtest** permits the insecure daemon-identity claim path; its
-response says `DEVELOPMENT ONLY` and explicitly disclaims alias ownership.
-The `signed_profile` branch is rejected even there: its signature proves
-identity-key possession, not alias control or a signed transparency `NameEvent`.
-Do not trust or settle payments based on a mock claim. See
-[`invite_flow.md`](invite_flow.md).
+`GET /v1/claim` remains public for inspection. `is_claimable` means the invitation
+is active and can start **HTTPS domain onboarding**, not that alias control is
+already verified. Use `/v1/onboarding/challenge` with `invite_id`, then
+`/v1/onboarding/verify`. Neither possession of an invite ID, a matching alias hash,
+admin authentication nor a profile signature replaces domain authorization.
+The legacy `POST /v1/claim` remains mock-only and disabled by default; no gate on
+that route is relaxed. See [`invite_flow.md`](invite_flow.md).
 
 ---
 
@@ -393,28 +391,48 @@ curl -s http://127.0.0.1:9737/v1/status
 
 ### Publish a receiving profile
 
-The alias must be verified before methods can be saved. The daemon ships no
-production alias verifier yet, so `/v1/profile/challenge` and `/v1/profile/verify`
-**fail closed (`HTTP 400`) by default**. For local development on **devnet or
-regtest only**, start `satspathd` with `--dev-mock-alias-verification` (or
-`SATSPATH_DEV_MOCK_ALIAS_VERIFICATION=1`) to enable the mock verifier where the
-token equals the email address itself. The mock is refused on mainnet,
-testnet and signet. Even with this flag, `POST /v1/claim` does not
-produce a real alias attestation.
+Start a clean daemon home **without** mock flags. Supply a valid receive address
+for the configured network. The initial real mechanism is administrator control
+of the alias domain through HTTPS, **not mailbox verification or DNSSEC**. Aliases
+must follow the ASCII BIP-353 name syntax. Existing aliases/history cannot be
+replaced through registration; use normal owner-authorized updates/rotation.
 
 ```bash
-curl -s -X POST http://127.0.0.1:9737/v1/profile/challenge \
+curl --fail-with-body -s -X POST http://127.0.0.1:9737/v1/onboarding/challenge \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"alias":"alice@example.com"}'
+  -d '{"alias":"alice@example.com","methods":{"onchain_address":"<address-on-daemon-network>"}}' > challenge.json
 
-curl -s -X POST http://127.0.0.1:9737/v1/profile/verify \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"alias":"alice@example.com","token":"alice@example.com"}'
+# Publish these exact bytes at the response's .url on your alias domain.
+jq -j .body challenge.json > domain-authorization.json
 
-curl -s -X PUT http://127.0.0.1:9737/v1/profile \
+# After publishing over HTTPS, complete within the 600-second challenge window.
+jq '{alias:"alice@example.com",challenge_id}' challenge.json > verify.json
+curl --fail-with-body -s -X POST http://127.0.0.1:9737/v1/onboarding/verify \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"lightning_address":"alice@getalby.com","onchain_address":"tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"}'
+  --data-binary @verify.json
 ```
+
+The verifier requires valid TLS, public DNS addresses pinned to the connection,
+HTTP 200 without redirects, and exact body bytes bounded to 16 KiB. Proxies are
+disabled and requests time out after 10 seconds. It never accepts a proof body
+or DNS answer from the verify request. The authorization commits identity,
+profile, event/action/sequence/predecessor, network, expiry and optional invite.
+Consumption, publication, attestation, checkpoint and optional claim receipt
+commit atomically; replay/stale submissions fail closed. Wallet activation and
+invite notifications recover from that authoritative transaction after restart.
+
+The local operator signs a `Domain` identifier attestation valid no longer than
+the candidate profile. By default the local resolver trusts its own operator for
+that method; an explicit `SATSPATH_TRUSTED_VERIFIERS_JSON` policy replaces that
+default, including an empty list. Remote consumers need their own trusted-verifier policy.
+Owner updates rebind a current grant to the new profile without extending its
+expiry; identity replacement does not inherit it. **Method ownership still
+requires an independent method-key proof.** No payment is approved or executed.
+
+For invite links, set `SATSPATH_CLAIM_BASE_URL=https://node.example.com/claim`
+to the HTTPS origin/path serving this daemon's dashboard. Credentials, query and
+fragment are forbidden. Without configuration the actual local `/claim` URL is
+used (HTTP only on loopback); there is no `satspath.local` placeholder.
 
 Each save re-signs the profile (`SHA256("SatsPathProfileV1" || RFC8785(profile))`)
 with the next `sequence` and a 30-day expiry, appends a `register` or
