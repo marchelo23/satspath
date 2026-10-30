@@ -67,13 +67,14 @@ test('expired registration and claim challenges request a fresh authorization', 
     const responseJson = source.match(new RegExp(`const (\\w+) = await ${responseVariable}\\.json\\(\\);`));
     assert.ok(responseJson, `${button} reads its own response JSON`);
     assert.match(source, new RegExp(`${name} = \\{candidate, challenge_id: ${responseJson[1]}\\.challenge_id, expires_at:`));
-    const request = source.match(new RegExp(`const ${responseVariable} = await apiFetch\\((verifying \\? [^,]+), \\{`));
+    const request = source.match(new RegExp(`const ${responseVariable} = await apiFetch\\((verifying \\? [^,]+), \\{([\\s\\S]*?)\\n\\s*\\}\\);`));
     assert.ok(request, `${button} uses its own ${responseVariable} request`);
+    assert.match(request[2], /\bmethod:\s*["']POST["']/, `${button} sends onboarding requests with POST`);
     const endpoint = new Function('verifying', `return ${request[1]};`);
     assert.equal(endpoint(true), '/v1/onboarding/verify', `${button} verifies a current challenge`);
     assert.equal(endpoint(false), '/v1/onboarding/challenge', `${button} creates a fresh challenge`);
     const bodyVariable = button === 'p-save' ? 'requestBody' : 'body';
-    assert.match(source, new RegExp(`body: JSON\\.stringify\\(${bodyVariable}\\)`));
+    assert.match(request[2], new RegExp(`body: JSON\\.stringify\\(${bodyVariable}\\)`));
     const bodyDeclaration = source.match(new RegExp(`const ${bodyVariable} = (verifying[\\s\\S]*?);`));
     assert.ok(bodyDeclaration, `${button} constructs the selected request body`);
     const body = new Function('verifying', 'alias', name, 'payload', 'methods', 'invite_id', `return (${bodyDeclaration[1]});`);
