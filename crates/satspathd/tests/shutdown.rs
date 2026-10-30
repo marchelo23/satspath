@@ -116,3 +116,73 @@ fn sigterm_exits_with_stalled_public_request() {
 fn sigterm_exits_with_mutation_lock_held_by_stalled_request() {
     shutdown_with_stalled_request(true);
 }
+
+#[tokio::test]
+async fn port_zero_startup_and_claim_urls_use_the_assigned_listener_port() {
+    let home = tempfile::tempdir().unwrap();
+    let token = "b".repeat(64);
+    let mut daemon = Daemon(
+        Command::new(env!("CARGO_BIN_EXE_satspathd"))
+            .env_clear()
+            .env("SATSPATHD_AUTH_TOKEN", &token)
+            .env("SATSPATH_FEE_SOURCES", "")
+            .args(["--no-open", "--bind", "127.0.0.1:0", "--home"])
+            .arg(home.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let stdout = daemon.0.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Some(url) = line.strip_prefix("Wallet UI -> ") {
+                let _ = tx.send(url.to_owned());
+            }
+        }
+    });
+    let startup_url = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("startup UI URL");
+    let url = reqwest::Url::parse(&startup_url).unwrap();
+    assert_ne!(url.port(), Some(0), "startup must report the assigned port");
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .unwrap();
+    assert!(client
+        .get(url.join("health").unwrap())
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .is_success());
+    // /v1/send resolves local transparency state, not DNS; this absent alias
+    // deterministically creates an invite without an external resolver.
+    let response: serde_json::Value = client
+        .post(url.join("v1/send").unwrap())
+        .bearer_auth(&token)
+        .json(&serde_json::json!({"recipient":"nobody@unknown.invalid", "amount_sats":1000}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let claim_url = response["claim_url"]
+        .as_str()
+        .expect("send must include the claim URL");
+    assert!(
+        claim_url.starts_with(&format!("{startup_url}claim?invite_id=")),
+        "{response}"
+    );
+    assert!(client
+        .get(claim_url)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .is_success());
+}

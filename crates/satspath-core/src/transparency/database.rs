@@ -288,6 +288,43 @@ impl TransactionalTransparencyStore {
         Self::read_claimed_invites(&connection)
     }
 
+    /// Incremental owner-only mirror recovery. Committed claim rows are append-only;
+    /// their SQLite rowids provide an indexed cursor, not payment-verification evidence.
+    pub fn claimed_invites_after_read_only(
+        home: &Path,
+        cursor: i64,
+        anchor: Option<&str>,
+    ) -> Result<Vec<(i64, crate::profile::InviteRecord)>> {
+        let Some(connection) = Self::claim_metadata_connection(home)? else {
+            return Ok(vec![]);
+        };
+        // Rowids can change after a restore or VACUUM. Trust a watermark only
+        // while it still points to its receipt; otherwise idempotently rebuild.
+        let anchor_matches: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM claimed_invites WHERE rowid=?1 AND invite_id=?2)",
+                params![cursor, anchor],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        let cursor = if anchor_matches { cursor } else { 0 };
+        let mut statement = connection
+            .prepare(
+                "SELECT rowid,invite_json FROM claimed_invites WHERE rowid > ?1 ORDER BY rowid",
+            )
+            .map_err(db_error)?;
+        let rows = statement
+            .query_map([cursor], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(db_error)?;
+        rows.map(|row| {
+            let (cursor, raw) = row.map_err(db_error)?;
+            Ok((cursor, serde_json::from_str(&raw)?))
+        })
+        .collect()
+    }
+
     fn claim_metadata_connection(home: &Path) -> Result<Option<Connection>> {
         let path = home.join(DB_FILE);
         if !path.try_exists()? {

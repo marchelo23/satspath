@@ -45,7 +45,10 @@ pub(crate) fn audit_binding_security(
     Ok(())
 }
 
-pub(crate) async fn serve(state: AppState, tls_config: Option<(PathBuf, PathBuf)>) -> Result<()> {
+pub(crate) async fn serve(
+    mut state: AppState,
+    tls_config: Option<(PathBuf, PathBuf)>,
+) -> Result<()> {
     let scheme = if tls_config.is_some() {
         "https"
     } else {
@@ -76,6 +79,10 @@ pub(crate) async fn serve(state: AppState, tls_config: Option<(PathBuf, PathBuf)
             )
         })?)
     };
+    state.bind = server
+        .server_addr()
+        .to_ip()
+        .context("HTTP listener has no IP address")?;
     let url = format!("{scheme}://{}/", state.bind);
     println!("Wallet UI -> {url}");
     if state.open_ui {

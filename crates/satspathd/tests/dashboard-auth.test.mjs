@@ -47,6 +47,14 @@ test('expired registration and claim challenges request a fresh authorization', 
     const handler = html.match(new RegExp(`\\$\\("${button}"\\)\\.addEventListener\\("click", async \\(\\) => \\{([\\s\\S]*?)\\n  \\}\\);`));
     assert.ok(handler, `${button} handler exists`);
     const source = handler[1];
+    const candidateDeclaration = source.match(/const candidate = JSON\.stringify\((\{[^;]+\})\);/);
+    assert.ok(candidateDeclaration, `${button} constructs its candidate from an object`);
+    const methods = { onchain_address: 'independent-destination' };
+    const payload = { lightning_address: 'registration@example.com' };
+    const expectedMethods = button === 'p-save' ? payload : methods;
+    const candidateObject = new Function('alias', 'payload', 'methods', 'invite_id', `return (${candidateDeclaration[1]});`);
+    assert.deepEqual(candidateObject('alice@example.com', payload, methods, 'invite-1').methods, expectedMethods,
+      `${button} binds the receive methods into the candidate`);
     const declaration = source.match(new RegExp(`const verifying = ${name}([\\s\\S]*?);`));
     assert.ok(declaration, name);
     const check = new Function(name, 'candidate', 'Date', `return Boolean(${name}${declaration[1]});`);
@@ -56,12 +64,25 @@ test('expired registration and claim challenges request a fresh authorization', 
     assert.equal(check({ candidate: 'unchanged', expires_at: 200 }, 'unchanged', clock), false);
     assert.equal(check({ candidate: 'unchanged', expires_at: 201 }, 'unchanged', clock), true);
     assert.equal(check({ candidate: 'changed', expires_at: 201 }, 'unchanged', clock), false);
-    assert.match(source, new RegExp(`${name} = \\{candidate, challenge_id: [^,]+, expires_at:`));
+    const responseJson = source.match(new RegExp(`const (\\w+) = await ${responseVariable}\\.json\\(\\);`));
+    assert.ok(responseJson, `${button} reads its own response JSON`);
+    assert.match(source, new RegExp(`${name} = \\{candidate, challenge_id: ${responseJson[1]}\\.challenge_id, expires_at:`));
     const request = source.match(new RegExp(`const ${responseVariable} = await apiFetch\\((verifying \\? [^,]+), \\{`));
     assert.ok(request, `${button} uses its own ${responseVariable} request`);
     const endpoint = new Function('verifying', `return ${request[1]};`);
     assert.equal(endpoint(true), '/v1/onboarding/verify', `${button} verifies a current challenge`);
     assert.equal(endpoint(false), '/v1/onboarding/challenge', `${button} creates a fresh challenge`);
+    const bodyVariable = button === 'p-save' ? 'requestBody' : 'body';
+    assert.match(source, new RegExp(`body: JSON\\.stringify\\(${bodyVariable}\\)`));
+    const bodyDeclaration = source.match(new RegExp(`const ${bodyVariable} = (verifying[\\s\\S]*?);`));
+    assert.ok(bodyDeclaration, `${button} constructs the selected request body`);
+    const body = new Function('verifying', 'alias', name, 'payload', 'methods', 'invite_id', `return (${bodyDeclaration[1]});`);
+    const pending = { challenge_id: `${button}-server-challenge` };
+    assert.deepEqual(body(true, 'alice@example.com', pending, payload, methods, 'invite-1'),
+      { alias: 'alice@example.com', challenge_id: pending.challenge_id }, `${button} verifies the stored challenge`);
+    assert.deepEqual(body(false, 'alice@example.com', pending, payload, methods, 'invite-1'),
+      { ...(button === 'c-claim-go' ? { invite_id: 'invite-1' } : {}), alias: 'alice@example.com', methods: expectedMethods },
+      `${button} creates a challenge bound to the receive methods`);
     assert.match(source, /Reloading clears the dashboard's pending challenge/);
   }
 });

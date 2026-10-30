@@ -108,20 +108,34 @@ method inputs even when the local wallet already has a receive method. Mixed-cas
 primary-alias proof attachment and an otherwise-valid unsigned-profile quote have
 specific regression coverage.
 
+Follow-up review coverage verifies the assigned port from a real `--bind
+127.0.0.1:0` daemon in both its startup UI URL and generated, reachable claim URL.
+Notification recovery uses an atomically persisted receipt cursor and anchor to
+read only new claims; missing/legacy mirrors, older SQLite backups and rowid
+renumbering trigger idempotent recovery without resetting read notifications.
+The activation fixture now retains the real registration commit's row by injecting
+only a cleanup failure rather than manually inserting its security state. The
+successful registration fixture checks the exact expected successor wallet.
+Dashboard assertions independently bind each handler's methods, response JSON
+challenge ID, verify body and endpoint; differing-alias proof requests cannot
+silently target the primary profile.
+
 Toolchain: `rustc 1.97.1`, `cargo 1.97.1`, Node `v22.23.2`; Linux, regtest
 addresses, controlled HTTPS fixture. No public-domain deployment or external
 wallet payment was exercised.
 
 | Gate | Observed result |
 | --- | --- |
-| `cargo test --workspace` with offline fee sources | 829 passed, 0 failed, 8 ignored |
+| `cargo test --workspace` with offline fee sources | 831 passed, 0 failed, 8 ignored |
 | `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
 | Root and fuzz-workspace formatting checks | Passed |
 | `audit_crypto.sh` | Passed; 0 errors/warnings; ignored external tests are not evidence |
 | Documentation/dashboard Node tests | 56 passed |
 
-Three local CodeRabbit review rounds were checked against the code. The latest
-round's save-failure retry finding was fixed; its suggestion to start tracking the
+Four local CodeRabbit review rounds were checked against the code. Save-failure
+retry, cursor restore, test binding and stdout-draining findings were fixed. The
+DNS-dependency finding was skipped: `/v1/send` resolves the local transparency
+registry without DNS. The suggestion to start tracking the
 root `Cargo.lock` was deferred to a separate dependency-policy change. The initial
 build generates the currently ignored lockfile; nested consumers remain offline
 and locked.

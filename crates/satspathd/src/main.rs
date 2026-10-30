@@ -809,6 +809,23 @@ mod tests {
         .is_verified());
         let store = TransactionalTransparencyStore::open(dir.path()).unwrap();
         let before = store.load_log().unwrap().events().len();
+        let wallet_before = std::fs::read(crate::config::wallet_path(dir.path())).unwrap();
+        assert!(
+            attach_method_proof(
+                &state,
+                MethodProofRequest {
+                    alias: Some("other@example.com".into()),
+                    verification: proof.clone(),
+                }
+            )
+            .is_err(),
+            "a differing alias must not silently target the primary profile"
+        );
+        assert_eq!(store.load_log().unwrap().events().len(), before);
+        assert_eq!(
+            std::fs::read(crate::config::wallet_path(dir.path())).unwrap(),
+            wallet_before
+        );
         assert!(attach_method_proof(
             &state,
             MethodProofRequest {

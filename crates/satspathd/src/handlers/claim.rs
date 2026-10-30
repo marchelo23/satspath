@@ -232,11 +232,19 @@ fn committed_claim(state: &AppState, id: &str) -> Result<Option<InviteRecord>> {
 }
 
 fn sync_committed_claims(state: &AppState) -> Result<()> {
-    let receipts =
-        satspath_core::TransactionalTransparencyStore::claimed_invites_read_only(&state.home)?;
-    if !receipts.is_empty() {
-        let mut mirror = InviteStore::open(&state.home)?;
-        mirror.apply_authorized_claims(&receipts)?;
+    let mut mirror = InviteStore::open(&state.home)?;
+    let rows = satspath_core::TransactionalTransparencyStore::claimed_invites_after_read_only(
+        &state.home,
+        mirror.committed_claim_cursor(),
+        mirror.committed_claim_anchor(),
+    )?;
+    if let Some((cursor, _)) = rows.last() {
+        let cursor = *cursor;
+        let receipts = rows
+            .into_iter()
+            .map(|(_, receipt)| receipt)
+            .collect::<Vec<_>>();
+        mirror.apply_authorized_claims_through(&receipts, cursor)?;
     }
     Ok(())
 }

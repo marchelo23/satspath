@@ -251,6 +251,160 @@ async fn verify(d: &Daemon, id: &Value) -> (StatusCode, Value) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claim_mirror_recovers_only_new_receipts_and_rebuilds_missing_or_legacy_mirrors() {
+    let domain = Domain::start();
+    let d = Daemon::start(domain.client.clone());
+    let db = rusqlite::Connection::open(
+        d.home
+            .path()
+            .join(satspath_core::transparency::TRANSPARENCY_DB_FILE),
+    )
+    .unwrap();
+    let receiver = generate_identity_keypair();
+    let receipts = ["alice@example.com", "bob@example.com"].map(|alias| {
+        let mut receipt =
+            satspath_core::create_invite_record(alias, 1000, None, "sender".into(), 3600);
+        receipt.status = InviteStatus::ClaimedWithPublicProfile;
+        receipt.claimed_at = Some(now());
+        receipt.claimed_profile_pubkey = Some(hex::encode(receiver.public_key.serialize()));
+        receipt
+    });
+    let insert = |receipt: &InviteRecord| {
+        db.execute(
+            "INSERT INTO claimed_invites VALUES (?1,?2)",
+            rusqlite::params![receipt.invite_id, serde_json::to_string(receipt).unwrap()],
+        )
+        .unwrap();
+    };
+    insert(&receipts[0]);
+    let notifications = crate::handlers::claim::list_notifications_handler(&d.state).unwrap();
+    assert_eq!(notifications.len(), 1);
+    crate::handlers::claim::mark_all_notifications_read_handler(&d.state).unwrap();
+    let path = d
+        .home
+        .path()
+        .join(satspath_core::invite_store::INVITES_FILE);
+    let before = std::fs::read(&path).unwrap();
+    // Old JSON must not even be parsed again after its durable cursor advances.
+    db.execute(
+        "UPDATE claimed_invites SET invite_json='invalid old JSON' WHERE invite_id=?1",
+        [&receipts[0].invite_id],
+    )
+    .unwrap();
+    assert!(crate::handlers::claim::list_notifications_handler(&d.state).unwrap()[0].read);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "no new receipts means no mirror write"
+    );
+    insert(&receipts[1]);
+    let notifications = crate::handlers::claim::list_notifications_handler(&d.state).unwrap();
+    assert_eq!(notifications.len(), 2);
+    assert!(notifications[0].read);
+    assert!(!notifications[1].read);
+    assert_eq!(
+        InviteStore::open(d.home.path())
+            .unwrap()
+            .committed_claim_cursor(),
+        2
+    );
+    db.execute(
+        "UPDATE claimed_invites SET invite_json=?1 WHERE invite_id=?2",
+        rusqlite::params![
+            serde_json::to_string(&receipts[0]).unwrap(),
+            receipts[0].invite_id
+        ],
+    )
+    .unwrap();
+    // Legacy mirrors replay once without resetting existing notification state.
+    let mut legacy: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("committed_claim_cursor");
+    std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert!(crate::handlers::claim::list_notifications_handler(&d.state).unwrap()[0].read);
+    assert_eq!(
+        InviteStore::open(d.home.path())
+            .unwrap()
+            .committed_claim_cursor(),
+        2
+    );
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(
+        crate::handlers::claim::list_notifications_handler(&d.state)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        InviteStore::open(d.home.path())
+            .unwrap()
+            .committed_claim_cursor(),
+        2
+    );
+    // An older SQLite backup must not strand the mirror ahead of new claims.
+    db.execute(
+        "DELETE FROM claimed_invites WHERE invite_id=?1",
+        [&receipts[1].invite_id],
+    )
+    .unwrap();
+    assert_eq!(
+        crate::handlers::claim::list_notifications_handler(&d.state)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        InviteStore::open(d.home.path())
+            .unwrap()
+            .committed_claim_cursor(),
+        1
+    );
+    let mut later = satspath_core::create_invite_record(
+        "charlie@example.com",
+        1000,
+        None,
+        "sender".into(),
+        3600,
+    );
+    later.status = InviteStatus::ClaimedWithPublicProfile;
+    later.claimed_at = Some(now());
+    later.claimed_profile_pubkey = receipts[0].claimed_profile_pubkey.clone();
+    insert(&later);
+    assert_eq!(
+        crate::handlers::claim::list_notifications_handler(&d.state)
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        InviteStore::open(d.home.path())
+            .unwrap()
+            .committed_claim_cursor(),
+        2
+    );
+    // Simulate rowid renumbering; the receipt anchor invalidates the old cursor.
+    db.execute(
+        "UPDATE claimed_invites SET rowid=8 WHERE invite_id=?1",
+        [&later.invite_id],
+    )
+    .unwrap();
+    assert_eq!(
+        crate::handlers::claim::list_notifications_handler(&d.state)
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        InviteStore::open(d.home.path())
+            .unwrap()
+            .committed_claim_cursor(),
+        8
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn failed_claim_preparation_leaves_neither_pending_challenge_nor_new_key() {
     let domain = Domain::start();
     let d = Daemon::start(domain.client.clone());
@@ -320,24 +474,51 @@ async fn registration_recovery_preserves_intervening_edits_and_retries_applied_s
     let d = Daemon::start(domain.client.clone());
     let predecessor = load_wallet(d.home.path()).unwrap();
     let pending = challenge(&d, None).await;
+    let prepared: PendingRegistration = serde_json::from_str(
+        &TransactionalTransparencyStore::open_read_only(d.home.path())
+            .unwrap()
+            .alias_challenge(pending["challenge_id"].as_str().unwrap(), now())
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
     domain.publish(pending["body"].as_str().unwrap());
-    let (status, published) = verify(&d, &pending["challenge_id"]).await;
-    assert_eq!(status, StatusCode::OK, "{published}");
-    let successor = load_wallet(d.home.path()).unwrap();
-    let wallet_json = serde_json::to_string(&successor).unwrap();
-    let profile_json = serde_json::to_string(&published["signed_profile"]).unwrap();
-    let before_json = serde_json::to_string(&predecessor).unwrap();
     let db = rusqlite::Connection::open(
         d.home
             .path()
             .join(satspath_core::transparency::TRANSPARENCY_DB_FILE),
     )
     .unwrap();
-    db.execute(
-        "INSERT INTO registration_wallet VALUES (1,?1,?2,?3)",
-        rusqlite::params![wallet_json, profile_json, before_json],
-    )
-    .unwrap();
+    // Keep the real commit's activation row by failing only its cleanup.
+    db.execute_batch("CREATE TRIGGER refuse_activation_cleanup BEFORE DELETE ON registration_wallet BEGIN SELECT RAISE(ABORT,'injected cleanup failure'); END;").unwrap();
+    let (status, published) = verify(&d, &pending["challenge_id"]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{published}");
+    assert!(
+        published.to_string().contains("injected cleanup failure"),
+        "{published}"
+    );
+    db.execute_batch("DROP TRIGGER refuse_activation_cleanup")
+        .unwrap();
+    let successor = prepared.wallet;
+    assert_eq!(
+        serde_json::to_value(load_wallet(d.home.path()).unwrap()).unwrap(),
+        serde_json::to_value(&successor).unwrap()
+    );
+    let activation = TransactionalTransparencyStore::open_read_only(d.home.path())
+        .unwrap()
+        .registration_wallet()
+        .unwrap()
+        .expect("real registration must commit its activation row");
+    let wallet_json = activation.wallet_json;
+    let profile_json = serde_json::to_string(&activation.profile).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&wallet_json).unwrap(),
+        serde_json::to_value(&successor).unwrap()
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(activation.predecessor_json.as_deref().unwrap()).unwrap(),
+        serde_json::to_value(&predecessor).unwrap()
+    );
     let mut edited = predecessor.clone();
     edited.lightning_address = Some("operator-edit@example.net".into());
     save_wallet(d.home.path(), &edited).unwrap();
@@ -474,33 +655,30 @@ async fn a_stalled_challenge_body_does_not_hold_the_mutation_lock() {
 async fn standalone_https_registration_ownership_quote_cli_approval_and_restart() {
     let domain = Domain::start();
     let mut d = Daemon::start(domain.client.clone());
-    let wallet_before_registration = load_wallet(d.home.path()).unwrap();
     let pending = challenge(&d, None).await;
     domain.publish(pending["body"].as_str().unwrap());
     d.restart(); // The pending authorization itself must survive restart.
-    let (status, registered) = verify(&d, &pending["challenge_id"]).await;
-    assert_eq!(status, StatusCode::OK, "{registered}");
-    let signed: SignedPaymentProfile =
-        serde_json::from_value(registered["signed_profile"].clone()).unwrap();
-    // Recreate the crash window after SQLite commit but before wallet.json
-    // activation. Startup must recover only the exact committed public mirror.
-    let active = load_wallet(d.home.path()).unwrap();
-    let db =
-        rusqlite::Connection::open(d.home.path().join("satspath-transparency-v1.sqlite3")).unwrap();
-    db.execute(
-        "INSERT INTO registration_wallet VALUES (1,?1,?2,?3)",
-        rusqlite::params![
-            serde_json::to_string(&active).unwrap(),
-            serde_json::to_string(&signed).unwrap(),
-            serde_json::to_string(&wallet_before_registration).unwrap()
-        ],
+    let prepared: PendingRegistration = serde_json::from_str(
+        &TransactionalTransparencyStore::open_read_only(d.home.path())
+            .unwrap()
+            .alias_challenge(pending["challenge_id"].as_str().unwrap(), now())
+            .unwrap()
+            .unwrap(),
     )
     .unwrap();
-    save_wallet(d.home.path(), &wallet_before_registration).unwrap();
+    let (status, registered) = verify(&d, &pending["challenge_id"]).await;
+    assert_eq!(status, StatusCode::OK, "{registered}");
+    assert_eq!(
+        serde_json::to_value(load_wallet(d.home.path()).unwrap()).unwrap(),
+        serde_json::to_value(&prepared.wallet).unwrap(),
+        "successful real registration must activate the expected successor wallet"
+    );
+    let signed: SignedPaymentProfile =
+        serde_json::from_value(registered["signed_profile"].clone()).unwrap();
     d.restart();
     assert_eq!(
         serde_json::to_value(load_wallet(d.home.path()).unwrap()).unwrap(),
-        serde_json::to_value(active).unwrap()
+        serde_json::to_value(&prepared.wallet).unwrap()
     );
     assert!(
         TransactionalTransparencyStore::open_read_only(d.home.path())
