@@ -286,6 +286,7 @@ pub(crate) fn attach_method_proof(
     body: crate::types::MethodProofRequest,
 ) -> Result<ProfileResponse> {
     use satspath_core::ownership::{ProofType, VerificationStatus};
+    super::onboarding::recover_registration_wallet(state)?;
     let mut wallet = load_wallet(&state.home)?;
     wallet.alias = wallet
         .alias
@@ -1406,6 +1407,14 @@ mod tests {
         home: &std::path::Path,
         alias: &str,
     ) -> (AppState, WalletState, WalletState) {
+        setup_pending_registration_wallet_with_address(home, alias, "bcrt1qtest")
+    }
+
+    fn setup_pending_registration_wallet_with_address(
+        home: &std::path::Path,
+        alias: &str,
+        onchain_address: &str,
+    ) -> (AppState, WalletState, WalletState) {
         let store = TransactionalTransparencyStore::open(home).unwrap();
         let predecessor = load_or_create_identity(home).unwrap();
         save_wallet(home, &predecessor).unwrap();
@@ -1414,7 +1423,7 @@ mod tests {
             load_identity_key(home, predecessor.identity_pubkey.as_deref().unwrap()).unwrap();
         let mut successor = predecessor.clone();
         successor.alias = Some(alias.to_string());
-        successor.onchain_address = Some("bcrt1qtest".to_string());
+        successor.onchain_address = Some(onchain_address.to_string());
 
         let signed = sign_profile(
             PaymentProfile {
@@ -1578,6 +1587,66 @@ mod tests {
         let resp = verify_challenge(&state, req).unwrap();
         assert_eq!(resp.wallet.alias.as_deref(), Some("bob@example.com"));
         assert_eq!(resp.wallet.onchain_address, successor.onchain_address);
+        let signed = resp
+            .signed_profile
+            .as_ref()
+            .expect("signed profile must be present");
+        assert_eq!(signed.profile.alias, "bob@example.com");
         assert!(store.registration_wallet().unwrap().is_none());
+    }
+
+    #[test]
+    fn attach_method_proof_recovers_registration_wallet_before_editing() {
+        use crate::types::MethodProofRequest;
+        use satspath_core::ownership::{build_signature_attestation, ProofType};
+
+        let dir = tempfile::tempdir().unwrap();
+        let spending = generate_identity_keypair();
+        let pk =
+            bitcoin::CompressedPublicKey::from_slice(&spending.public_key.serialize()).unwrap();
+        let onchain_address = bitcoin::Address::p2wpkh(&pk, bitcoin::Network::Testnet).to_string();
+
+        let (state, _, successor) = setup_pending_registration_wallet_with_address(
+            dir.path(),
+            "alice@example.com",
+            &onchain_address,
+        );
+
+        let store = TransactionalTransparencyStore::open(dir.path()).unwrap();
+        assert!(store.registration_wallet().unwrap().is_some());
+
+        let method = build_methods(&successor, "devnet")
+            .into_iter()
+            .find(|m| matches!(m, satspath_core::PaymentMethod::Onchain { .. }))
+            .unwrap();
+        let issued = now() - 10;
+        let proof = build_signature_attestation(
+            &method,
+            successor.identity_pubkey.as_deref().unwrap(),
+            ProofType::OnchainAddressSignature,
+            &spending.secret_key,
+            issued,
+            Some(issued + 3600),
+        )
+        .unwrap();
+
+        let resp = attach_method_proof(
+            &state,
+            MethodProofRequest {
+                alias: Some("alice@example.com".to_string()),
+                verification: proof,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resp.wallet.alias.as_deref(), Some("alice@example.com"));
+        assert_eq!(resp.wallet.onchain_address, successor.onchain_address);
+        assert!(store.registration_wallet().unwrap().is_none());
+        let signed = resp
+            .signed_profile
+            .as_ref()
+            .expect("signed profile must be present");
+        assert_eq!(signed.profile.alias, "alice@example.com");
+        assert_eq!(signed.profile.method_verifications.len(), 1);
     }
 }
