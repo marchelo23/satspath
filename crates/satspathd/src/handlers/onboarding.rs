@@ -550,9 +550,14 @@ fn configured_claim_url(base: &str, invite_id: &str) -> Result<String> {
     if url.scheme() != "https" {
         ensure!(
             url.scheme() == "http"
-                && url.host_str().is_some_and(|host| host
-                    .parse::<std::net::IpAddr>()
-                    .is_ok_and(|ip| ip.is_loopback())),
+                && url.host_str().is_some_and(|host| {
+                    let host = host
+                        .strip_prefix('[')
+                        .and_then(|h| h.strip_suffix(']'))
+                        .unwrap_or(host);
+                    host.parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+                }),
             "public claim base requires HTTPS"
         );
     }

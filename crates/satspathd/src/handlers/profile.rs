@@ -3,7 +3,8 @@
 use anyhow::Result;
 use satspath_core::{
     crypto::{generate_identity_keypair, sign_profile, verify_signed_profile},
-    NameAction, NameEvent, PaymentProfile, SatsPathError, TransactionalTransparencyStore,
+    IdentifierAttestation, NameAction, NameEvent, PaymentProfile, SatsPathError,
+    TransactionalTransparencyStore,
 };
 
 use crate::config::{AppState, WalletState};
@@ -71,6 +72,7 @@ pub(crate) fn update_profile(
     state: &AppState,
     body: ProfileUpdateRequest,
 ) -> Result<ProfileResponse> {
+    super::onboarding::recover_registration_wallet(state)?;
     let mut wallet = load_or_create_identity(&state.home)?;
     // Alias must be verified first through /v1/profile/verify
     if let Some(alias) = &body.alias {
@@ -131,6 +133,7 @@ pub(crate) fn verify_challenge(state: &AppState, body: VerifyRequest) -> Result<
         anyhow::bail!("invalid verification token for this alias");
     }
 
+    super::onboarding::recover_registration_wallet(state)?;
     let mut wallet = load_or_create_identity(&state.home)?;
     wallet.alias = Some(body.alias);
     wallet.updated_at = Some(chrono::Utc::now().timestamp());
@@ -149,6 +152,7 @@ pub(crate) fn update_profile_methods(
     state: &AppState,
     body: ProfileUpdateRequest,
 ) -> Result<ProfileResponse> {
+    super::onboarding::recover_registration_wallet(state)?;
     let mut wallet = load_or_create_identity(&state.home)?;
     if wallet.alias.is_none() {
         anyhow::bail!("set alias first with PUT /v1/profile");
@@ -490,38 +494,29 @@ fn store_current_profile_with_proof(
         owner_signature: String::new(),
     };
     let operator = load_or_create_transparency_operator(home)?;
+    let operator_pubkey = hex::encode(
+        secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), &operator).serialize(),
+    );
     // Preserve a current local domain grant only for the same identity. Owner
     // updates cannot extend its validity or confer authority on a replacement key.
-    let attestation = if !revoked {
+    let existing_attestation = if !revoked {
         history
             .last()
             .and_then(|previous| previous.identifier_attestation_hash.as_deref())
             .map(|hash| store.identifier_attestation(hash))
             .transpose()?
             .flatten()
-            .filter(|old| {
-                old.identity_pubkey == signed.profile.identity_pubkey
-                    && old.identifier_hash == event.identifier_hash
-                    && history.last().is_some_and(|previous| {
-                        previous.profile_hash == old.profile_hash
-                            && old.attestation_hash().ok().as_deref()
-                                == previous.identifier_attestation_hash.as_deref()
-                    })
-                    && old.expires_at > t
-                    && old.method == satspath_core::IdentifierVerificationMethod::Domain
-                    && old.verifier_pubkey
-                        == hex::encode(
-                            secp256k1::PublicKey::from_secret_key(
-                                &secp256k1::Secp256k1::new(),
-                                &operator,
-                            )
-                            .serialize(),
-                        )
-                    && old.verify(t).unwrap_or(false)
-            })
     } else {
         None
     };
+    let attestation = eligible_attestation(
+        existing_attestation,
+        &signed.profile.identity_pubkey,
+        &event.identifier_hash,
+        history.last(),
+        &operator_pubkey,
+        t,
+    )?;
     let attestation = if let Some(mut old) = attestation {
         old.profile_hash = event.profile_hash.clone();
         old.nonce = satspath_core::crypto::generate_nonce();
@@ -541,6 +536,101 @@ fn store_current_profile_with_proof(
         store.commit_profile_event_checkpoint(&alias, &signed, &event, &checkpoint)?;
     }
     Ok(())
+}
+
+pub(crate) fn eligible_attestation(
+    attestation: Option<IdentifierAttestation>,
+    expected_identity_pubkey: &str,
+    expected_identifier_hash: &str,
+    previous_event: Option<&NameEvent>,
+    expected_operator_pubkey: &str,
+    now: i64,
+) -> Result<Option<IdentifierAttestation>> {
+    let Some(attestation) = attestation else {
+        return Ok(None);
+    };
+
+    if attestation.expires_at <= now {
+        return Ok(None);
+    }
+
+    if attestation.identity_pubkey != expected_identity_pubkey {
+        tracing::warn!(
+            expected = expected_identity_pubkey,
+            actual = %attestation.identity_pubkey,
+            "existing grant rejected: identity public key mismatch"
+        );
+        return Ok(None);
+    }
+
+    if attestation.identifier_hash != expected_identifier_hash {
+        tracing::warn!(
+            expected = expected_identifier_hash,
+            actual = %attestation.identifier_hash,
+            "existing grant rejected: identifier hash mismatch"
+        );
+        return Ok(None);
+    }
+
+    let Some(previous) = previous_event else {
+        tracing::warn!("existing grant rejected: missing previous transparency event");
+        return Ok(None);
+    };
+
+    if previous.profile_hash != attestation.profile_hash {
+        tracing::warn!(
+            expected = %previous.profile_hash,
+            actual = %attestation.profile_hash,
+            "existing grant rejected: history profile hash mismatch"
+        );
+        return Ok(None);
+    }
+
+    let attestation_hash = match attestation.attestation_hash() {
+        Ok(hash) => hash,
+        Err(e) => {
+            tracing::warn!("existing grant rejected: failed to compute attestation hash: {e}");
+            return Ok(None);
+        }
+    };
+
+    if previous.identifier_attestation_hash.as_deref() != Some(attestation_hash.as_str()) {
+        tracing::warn!(
+            expected = ?previous.identifier_attestation_hash,
+            actual = %attestation_hash,
+            "existing grant rejected: history attestation hash mismatch"
+        );
+        return Ok(None);
+    }
+
+    if attestation.method != satspath_core::IdentifierVerificationMethod::Domain {
+        tracing::warn!(
+            method = ?attestation.method,
+            "existing grant rejected: verification method is not Domain"
+        );
+        return Ok(None);
+    }
+
+    if attestation.verifier_pubkey != expected_operator_pubkey {
+        tracing::warn!(
+            expected = expected_operator_pubkey,
+            actual = %attestation.verifier_pubkey,
+            "existing grant rejected: operator verifier pubkey mismatch"
+        );
+        return Ok(None);
+    }
+
+    match attestation.verify(now) {
+        Ok(true) => Ok(Some(attestation)),
+        Ok(false) => {
+            tracing::warn!("existing grant rejected: invalid verifier signature");
+            Ok(None)
+        }
+        Err(e) => {
+            tracing::warn!("existing grant rejected: attestation verification error: {e}");
+            Ok(None)
+        }
+    }
 }
 
 pub(crate) fn rotate_profile_key(state: &AppState) -> Result<KeyRotationResponse> {
@@ -834,4 +924,660 @@ pub(crate) fn ensure_signed_profile(
     sign_and_store(home, wallet, network)?;
     save_wallet(home, wallet)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use satspath_core::IdentifierVerificationMethod;
+
+    fn test_keypair() -> (secp256k1::SecretKey, String) {
+        let kp = generate_identity_keypair();
+        (kp.secret_key, hex::encode(kp.public_key.serialize()))
+    }
+
+    fn sample_grant(
+        operator_sec: &secp256k1::SecretKey,
+        operator_pub: &str,
+        identity_pub: &str,
+        identifier_hash: &str,
+        profile_hash: &str,
+        issued_at: i64,
+        expires_at: i64,
+    ) -> IdentifierAttestation {
+        let mut grant = IdentifierAttestation {
+            version: 1,
+            identifier_hash: identifier_hash.to_string(),
+            identity_pubkey: identity_pub.to_string(),
+            profile_hash: profile_hash.to_string(),
+            nonce: satspath_core::crypto::generate_nonce(),
+            issued_at,
+            expires_at,
+            method: IdentifierVerificationMethod::Domain,
+            verifier_pubkey: operator_pub.to_string(),
+            verifier_signature: String::new(),
+        };
+        grant.sign(operator_sec).unwrap();
+        grant
+    }
+
+    fn sample_event(
+        identifier_hash: &str,
+        identity_pub: &str,
+        profile_hash: &str,
+        attestation_hash: Option<String>,
+        created_at: i64,
+    ) -> NameEvent {
+        NameEvent {
+            version: 1,
+            identifier_hash: identifier_hash.to_string(),
+            action: NameAction::Register,
+            identity_pubkey: identity_pub.to_string(),
+            profile_hash: profile_hash.to_string(),
+            sequence: 1,
+            previous_event_hash: None,
+            created_at,
+            identifier_attestation_hash: attestation_hash,
+            removed_method_hashes: vec![],
+            rotation: None,
+            recovery_policy: None,
+            recovery: None,
+            owner_signature: String::new(),
+        }
+    }
+
+    #[test]
+    fn eligible_attestation_returns_none_for_none() {
+        let (_, operator_pub) = test_keypair();
+        let (_, identity_pub) = test_keypair();
+        let res =
+            eligible_attestation(None, &identity_pub, "hash", None, &operator_pub, 1000).unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn eligible_attestation_accepts_valid_grant() {
+        let (operator_sec, operator_pub) = test_keypair();
+        let (_, identity_pub) = test_keypair();
+        let identifier_hash = satspath_core::privacy::identifier_hash("alice@example.com");
+        let profile_hash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        let now = 1_700_000_000;
+        let grant = sample_grant(
+            &operator_sec,
+            &operator_pub,
+            &identity_pub,
+            &identifier_hash,
+            profile_hash,
+            now - 60,
+            now + 3600,
+        );
+        let attestation_hash = grant.attestation_hash().unwrap();
+        let prev = sample_event(
+            &identifier_hash,
+            &identity_pub,
+            profile_hash,
+            Some(attestation_hash),
+            now - 60,
+        );
+
+        let res = eligible_attestation(
+            Some(grant.clone()),
+            &identity_pub,
+            &identifier_hash,
+            Some(&prev),
+            &operator_pub,
+            now,
+        )
+        .unwrap();
+        assert_eq!(res, Some(grant));
+    }
+
+    #[test]
+    fn eligible_attestation_rejects_expired_grant() {
+        let (operator_sec, operator_pub) = test_keypair();
+        let (_, identity_pub) = test_keypair();
+        let identifier_hash = satspath_core::privacy::identifier_hash("alice@example.com");
+        let profile_hash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        let now = 1_700_000_000;
+        let grant = sample_grant(
+            &operator_sec,
+            &operator_pub,
+            &identity_pub,
+            &identifier_hash,
+            profile_hash,
+            now - 3600,
+            now - 60,
+        );
+        let attestation_hash = grant.attestation_hash().unwrap();
+        let prev = sample_event(
+            &identifier_hash,
+            &identity_pub,
+            profile_hash,
+            Some(attestation_hash),
+            now - 3600,
+        );
+
+        let res = eligible_attestation(
+            Some(grant),
+            &identity_pub,
+            &identifier_hash,
+            Some(&prev),
+            &operator_pub,
+            now,
+        )
+        .unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn eligible_attestation_rejects_identity_mismatch() {
+        let (operator_sec, operator_pub) = test_keypair();
+        let (_, identity_pub) = test_keypair();
+        let identifier_hash = satspath_core::privacy::identifier_hash("alice@example.com");
+        let profile_hash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        let now = 1_700_000_000;
+        let grant = sample_grant(
+            &operator_sec,
+            &operator_pub,
+            &identity_pub,
+            &identifier_hash,
+            profile_hash,
+            now - 60,
+            now + 3600,
+        );
+        let attestation_hash = grant.attestation_hash().unwrap();
+        let prev = sample_event(
+            &identifier_hash,
+            &identity_pub,
+            profile_hash,
+            Some(attestation_hash),
+            now - 60,
+        );
+
+        let res = eligible_attestation(
+            Some(grant),
+            "other_identity_pubkey",
+            &identifier_hash,
+            Some(&prev),
+            &operator_pub,
+            now,
+        )
+        .unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn eligible_attestation_rejects_identifier_mismatch() {
+        let (operator_sec, operator_pub) = test_keypair();
+        let (_, identity_pub) = test_keypair();
+        let identifier_hash = satspath_core::privacy::identifier_hash("alice@example.com");
+        let profile_hash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        let now = 1_700_000_000;
+        let grant = sample_grant(
+            &operator_sec,
+            &operator_pub,
+            &identity_pub,
+            &identifier_hash,
+            profile_hash,
+            now - 60,
+            now + 3600,
+        );
+        let attestation_hash = grant.attestation_hash().unwrap();
+        let prev = sample_event(
+            &identifier_hash,
+            &identity_pub,
+            profile_hash,
+            Some(attestation_hash),
+            now - 60,
+        );
+
+        let res = eligible_attestation(
+            Some(grant),
+            &identity_pub,
+            "different_identifier_hash",
+            Some(&prev),
+            &operator_pub,
+            now,
+        )
+        .unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn eligible_attestation_rejects_missing_previous_event() {
+        let (operator_sec, operator_pub) = test_keypair();
+        let (_, identity_pub) = test_keypair();
+        let identifier_hash = satspath_core::privacy::identifier_hash("alice@example.com");
+        let profile_hash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        let now = 1_700_000_000;
+        let grant = sample_grant(
+            &operator_sec,
+            &operator_pub,
+            &identity_pub,
+            &identifier_hash,
+            profile_hash,
+            now - 60,
+            now + 3600,
+        );
+
+        let res = eligible_attestation(
+            Some(grant),
+            &identity_pub,
+            &identifier_hash,
+            None,
+            &operator_pub,
+            now,
+        )
+        .unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn eligible_attestation_rejects_history_profile_hash_mismatch() {
+        let (operator_sec, operator_pub) = test_keypair();
+        let (_, identity_pub) = test_keypair();
+        let identifier_hash = satspath_core::privacy::identifier_hash("alice@example.com");
+        let profile_hash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        let now = 1_700_000_000;
+        let grant = sample_grant(
+            &operator_sec,
+            &operator_pub,
+            &identity_pub,
+            &identifier_hash,
+            profile_hash,
+            now - 60,
+            now + 3600,
+        );
+        let attestation_hash = grant.attestation_hash().unwrap();
+        let prev = sample_event(
+            &identifier_hash,
+            &identity_pub,
+            "mismatched_profile_hash",
+            Some(attestation_hash),
+            now - 60,
+        );
+
+        let res = eligible_attestation(
+            Some(grant),
+            &identity_pub,
+            &identifier_hash,
+            Some(&prev),
+            &operator_pub,
+            now,
+        )
+        .unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn eligible_attestation_rejects_history_attestation_hash_mismatch() {
+        let (operator_sec, operator_pub) = test_keypair();
+        let (_, identity_pub) = test_keypair();
+        let identifier_hash = satspath_core::privacy::identifier_hash("alice@example.com");
+        let profile_hash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        let now = 1_700_000_000;
+        let grant = sample_grant(
+            &operator_sec,
+            &operator_pub,
+            &identity_pub,
+            &identifier_hash,
+            profile_hash,
+            now - 60,
+            now + 3600,
+        );
+        let prev = sample_event(
+            &identifier_hash,
+            &identity_pub,
+            profile_hash,
+            Some("mismatched_attestation_hash".to_string()),
+            now - 60,
+        );
+
+        let res = eligible_attestation(
+            Some(grant),
+            &identity_pub,
+            &identifier_hash,
+            Some(&prev),
+            &operator_pub,
+            now,
+        )
+        .unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn eligible_attestation_rejects_non_domain_method() {
+        let (operator_sec, operator_pub) = test_keypair();
+        let (_, identity_pub) = test_keypair();
+        let identifier_hash = satspath_core::privacy::identifier_hash("alice@example.com");
+        let profile_hash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        let now = 1_700_000_000;
+        let mut grant = sample_grant(
+            &operator_sec,
+            &operator_pub,
+            &identity_pub,
+            &identifier_hash,
+            profile_hash,
+            now - 60,
+            now + 3600,
+        );
+        grant.method = IdentifierVerificationMethod::Email;
+        grant.sign(&operator_sec).unwrap();
+
+        let attestation_hash = grant.attestation_hash().unwrap();
+        let prev = sample_event(
+            &identifier_hash,
+            &identity_pub,
+            profile_hash,
+            Some(attestation_hash),
+            now - 60,
+        );
+
+        let res = eligible_attestation(
+            Some(grant),
+            &identity_pub,
+            &identifier_hash,
+            Some(&prev),
+            &operator_pub,
+            now,
+        )
+        .unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn eligible_attestation_rejects_operator_key_mismatch() {
+        let (operator_sec, operator_pub) = test_keypair();
+        let (_, identity_pub) = test_keypair();
+        let identifier_hash = satspath_core::privacy::identifier_hash("alice@example.com");
+        let profile_hash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        let now = 1_700_000_000;
+        let grant = sample_grant(
+            &operator_sec,
+            &operator_pub,
+            &identity_pub,
+            &identifier_hash,
+            profile_hash,
+            now - 60,
+            now + 3600,
+        );
+        let attestation_hash = grant.attestation_hash().unwrap();
+        let prev = sample_event(
+            &identifier_hash,
+            &identity_pub,
+            profile_hash,
+            Some(attestation_hash),
+            now - 60,
+        );
+
+        let res = eligible_attestation(
+            Some(grant),
+            &identity_pub,
+            &identifier_hash,
+            Some(&prev),
+            "other_operator_pubkey",
+            now,
+        )
+        .unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn eligible_attestation_rejects_invalid_signature() {
+        let (operator_sec, operator_pub) = test_keypair();
+        let (_, identity_pub) = test_keypair();
+        let identifier_hash = satspath_core::privacy::identifier_hash("alice@example.com");
+        let profile_hash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        let now = 1_700_000_000;
+        let mut grant = sample_grant(
+            &operator_sec,
+            &operator_pub,
+            &identity_pub,
+            &identifier_hash,
+            profile_hash,
+            now - 60,
+            now + 3600,
+        );
+        grant.verifier_signature = "00".repeat(64);
+
+        let attestation_hash = grant.attestation_hash().unwrap();
+        let prev = sample_event(
+            &identifier_hash,
+            &identity_pub,
+            profile_hash,
+            Some(attestation_hash),
+            now - 60,
+        );
+
+        let res = eligible_attestation(
+            Some(grant),
+            &identity_pub,
+            &identifier_hash,
+            Some(&prev),
+            &operator_pub,
+            now,
+        )
+        .unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn eligible_attestation_rejects_verification_error() {
+        let (operator_sec, operator_pub) = test_keypair();
+        let (_, identity_pub) = test_keypair();
+        let identifier_hash = satspath_core::privacy::identifier_hash("alice@example.com");
+        let profile_hash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        let now = 1_700_000_000;
+        let mut grant = sample_grant(
+            &operator_sec,
+            &operator_pub,
+            &identity_pub,
+            &identifier_hash,
+            profile_hash,
+            now - 60,
+            now + 3600,
+        );
+        // An invalid nonce length (< 32 chars) triggers TransparencyError::InvalidAttestation
+        grant.nonce = "too_short".to_string();
+        grant.sign(&operator_sec).unwrap();
+
+        let attestation_hash = grant.attestation_hash().unwrap();
+        let prev = sample_event(
+            &identifier_hash,
+            &identity_pub,
+            profile_hash,
+            Some(attestation_hash),
+            now - 60,
+        );
+
+        let res = eligible_attestation(
+            Some(grant),
+            &identity_pub,
+            &identifier_hash,
+            Some(&prev),
+            &operator_pub,
+            now,
+        )
+        .unwrap();
+        assert!(res.is_none());
+    }
+
+    fn setup_pending_registration_wallet(
+        home: &std::path::Path,
+        alias: &str,
+    ) -> (AppState, WalletState, WalletState) {
+        let store = TransactionalTransparencyStore::open(home).unwrap();
+        let predecessor = load_or_create_identity(home).unwrap();
+        save_wallet(home, &predecessor).unwrap();
+
+        let secret =
+            load_identity_key(home, predecessor.identity_pubkey.as_deref().unwrap()).unwrap();
+        let mut successor = predecessor.clone();
+        successor.alias = Some(alias.to_string());
+        successor.onchain_address = Some("bcrt1qtest".to_string());
+
+        let signed = sign_profile(
+            PaymentProfile {
+                sequence: Some(0),
+                alias: alias.to_string(),
+                identity_pubkey: successor.identity_pubkey.clone().unwrap(),
+                methods: build_methods(&successor, "devnet"),
+                updated_at: 1_700_000_000,
+                expires_at: Some(1_800_000_000),
+                preferences: vec!["onchain".into()],
+                nonce: Some("12345678901234567890123456789012".to_string()),
+                rotation: None,
+                method_verifications: vec![],
+                hybrid_pubkey: None,
+                pqc_required: false,
+                revoked: false,
+                recovery_policy: None,
+                recovery: None,
+            },
+            &secret,
+        )
+        .unwrap();
+
+        let operator = load_or_create_transparency_operator(home).unwrap();
+        let mut event = NameEvent {
+            version: 1,
+            identifier_hash: satspath_core::privacy::identifier_hash(alias),
+            action: NameAction::Register,
+            identity_pubkey: successor.identity_pubkey.clone().unwrap(),
+            profile_hash: satspath_core::transparency::profile_hash(&signed).unwrap(),
+            sequence: 0,
+            previous_event_hash: None,
+            created_at: 1_700_000_000,
+            identifier_attestation_hash: None,
+            removed_method_hashes: vec![],
+            rotation: None,
+            recovery_policy: None,
+            recovery: None,
+            owner_signature: String::new(),
+        };
+        event.sign(&secret).unwrap();
+        let log = store.load_log().unwrap();
+        let candidate = log.prepare_append(event.clone(), &signed).unwrap();
+        let checkpoint = candidate.prepare_checkpoint(&operator).unwrap();
+        store
+            .commit_profile_event_checkpoint(alias, &signed, &event, &checkpoint)
+            .unwrap();
+
+        let wallet_json = serde_json::to_string(&successor).unwrap();
+        let profile_json = serde_json::to_string(&signed).unwrap();
+        let predecessor_json = serde_json::to_string(&predecessor).unwrap();
+
+        let db = rusqlite::Connection::open(home.join("satspath-transparency-v1.sqlite3")).unwrap();
+        db.execute(
+            "INSERT INTO registration_wallet(id,wallet_json,profile_json,predecessor_json) VALUES (1,?1,?2,?3)",
+            rusqlite::params![wallet_json, profile_json, predecessor_json],
+        )
+        .unwrap();
+
+        let state = AppState {
+            alias_test_client: None,
+            p2p: crate::p2p::Bridge::new(false),
+            home: home.to_path_buf(),
+            bind: "127.0.0.1:0".parse().unwrap(),
+            allowed_hosts: vec![],
+            network: "devnet".to_string(),
+            open_ui: false,
+            auth_token: "test".to_string(),
+            allow_mock_alias_verification: true,
+            mutation_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            anchor_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            rate_limiter: std::sync::Arc::new(crate::rate_limit::RateLimiter::new(
+                crate::rate_limit::RateLimiterConfig::default(),
+            )),
+            is_tls: false,
+        };
+
+        (state, predecessor, successor)
+    }
+
+    #[test]
+    fn update_profile_recovers_registration_wallet_before_editing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _, successor) =
+            setup_pending_registration_wallet(dir.path(), "alice@example.com");
+
+        let store = TransactionalTransparencyStore::open(dir.path()).unwrap();
+        assert!(store.registration_wallet().unwrap().is_some());
+
+        let req = ProfileUpdateRequest {
+            alias: Some("alice@example.com".to_string()),
+            lightning_address: Some("alice@example.com".to_string()),
+            onchain_address: None,
+            onchain_pubkey: None,
+            silent_payment_address: None,
+            ark_address: None,
+            ark_server: None,
+            ark_pubkey: None,
+            ark_asp_pubkey: None,
+            remove_methods: vec![],
+            recovery_policy: None,
+        };
+
+        let resp = update_profile(&state, req).unwrap();
+        assert_eq!(resp.wallet.alias.as_deref(), Some("alice@example.com"));
+        assert_eq!(
+            resp.wallet.lightning_address.as_deref(),
+            Some("alice@example.com")
+        );
+        assert_eq!(resp.wallet.onchain_address, successor.onchain_address);
+        assert!(store.registration_wallet().unwrap().is_none());
+    }
+
+    #[test]
+    fn update_profile_methods_recovers_registration_wallet_before_editing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _, successor) =
+            setup_pending_registration_wallet(dir.path(), "alice@example.com");
+
+        let store = TransactionalTransparencyStore::open(dir.path()).unwrap();
+        assert!(store.registration_wallet().unwrap().is_some());
+
+        let req = ProfileUpdateRequest {
+            alias: None,
+            lightning_address: Some("alice@example.com".to_string()),
+            onchain_address: None,
+            onchain_pubkey: None,
+            silent_payment_address: None,
+            ark_address: None,
+            ark_server: None,
+            ark_pubkey: None,
+            ark_asp_pubkey: None,
+            remove_methods: vec![],
+            recovery_policy: None,
+        };
+
+        let resp = update_profile_methods(&state, req).unwrap();
+        assert_eq!(resp.wallet.alias.as_deref(), Some("alice@example.com"));
+        assert_eq!(
+            resp.wallet.lightning_address.as_deref(),
+            Some("alice@example.com")
+        );
+        assert_eq!(resp.wallet.onchain_address, successor.onchain_address);
+        assert!(store.registration_wallet().unwrap().is_none());
+    }
+
+    #[test]
+    fn verify_challenge_recovers_registration_wallet_before_editing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _, successor) =
+            setup_pending_registration_wallet(dir.path(), "alice@example.com");
+
+        let store = TransactionalTransparencyStore::open(dir.path()).unwrap();
+        assert!(store.registration_wallet().unwrap().is_some());
+
+        let req = VerifyRequest {
+            alias: "bob@example.com".to_string(),
+            token: "bob@example.com".to_string(),
+        };
+
+        let resp = verify_challenge(&state, req).unwrap();
+        assert_eq!(resp.wallet.alias.as_deref(), Some("bob@example.com"));
+        assert_eq!(resp.wallet.onchain_address, successor.onchain_address);
+        assert!(store.registration_wallet().unwrap().is_none());
+    }
 }

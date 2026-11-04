@@ -44,10 +44,19 @@ fn claim_base_requires_the_served_path_and_a_safe_origin() {
         local_claim_base("127.0.0.1:9737".parse().unwrap(), false).unwrap(),
         "http://127.0.0.1:9737/claim"
     );
+    let ipv6_base = local_claim_base("[::1]:9737".parse().unwrap(), false).unwrap();
+    assert_eq!(ipv6_base, "http://[::1]:9737/claim");
+    let url =
+        url::Url::parse(&configured_claim_url(&ipv6_base, "id&injected=bad").unwrap()).unwrap();
+    assert_eq!(
+        url.query_pairs().collect::<Vec<_>>(),
+        vec![("invite_id".into(), "id&injected=bad".into())]
+    );
     for base in [
         "https://node.example.com/claim",
         "https://node.example.com/prefix/claim",
         "http://127.0.0.1:9737/claim",
+        "http://[::1]:9737/claim",
     ] {
         let url = url::Url::parse(&configured_claim_url(base, "id&injected=bad").unwrap()).unwrap();
         assert_eq!(
@@ -62,6 +71,8 @@ fn claim_base_requires_the_served_path_and_a_safe_origin() {
         "https://node.example.com/claim?other=value",
         "https://node.example.com/not-a-claim-page",
         "ftp://node.example.com/claim",
+        "http://[::]:9737/claim",
+        "http://[::2]:9737/claim",
     ] {
         assert!(configured_claim_url(base, "id").is_err(), "{base}");
     }
